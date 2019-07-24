@@ -1,0 +1,17 @@
+name: "toolchain/jdk/jdk11"
+description:
+    "Source for OpenJDK11"
+
+third_party {
+  url {
+    type: HOMEPAGE
+    value: "https://github.com/AdoptOpenJDK/openjdk-jdk11u"
+  }
+  url {
+    type: GIT
+    value: "https://github.com/AdoptOpenJDK/openjdk-jdk11u.git"
+  }
+  version: "16567ca85f4f901ac8aea9647e3fbdd1c7c0c037"
+  last_upgrade_date { year: 2019 month: 5 day: 16 }
+  license_type: RESTRICTED
+}
