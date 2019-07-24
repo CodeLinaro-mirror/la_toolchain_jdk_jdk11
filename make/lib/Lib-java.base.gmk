@@ -99,7 +99,10 @@ $(BUILD_LIBNIO): $(BUILD_LIBNET)
 ifeq ($(OPENJDK_TARGET_OS), macosx)
   # JavaNativeFoundation framework not supported in static builds
   ifneq ($(STATIC_BUILD), true)
+  # ANDROID: disable libosxsecurity library, it requires an Apple runtime library to build
+  ifdef NEVER_BUILD
 
+  ################################################################################
     $(eval $(call SetupJdkLibrary, BUILD_LIBOSXSECURITY, \
         NAME := osxsecurity, \
         OPTIMIZATION := LOW, \
@@ -120,6 +123,9 @@ ifeq ($(OPENJDK_TARGET_OS), macosx)
 
     TARGETS += $(BUILD_LIBOSXSECURITY)
 
+  #############################################################################
+
+  endif
   endif
 endif
 

@@ -112,6 +112,13 @@ AC_DEFUN([FLAGS_SETUP_LDFLAGS_HELPER],
       OS_LDFLAGS_JDK_ONLY="-mmacosx-version-min=$MACOSX_VERSION_MIN"
     fi
   fi
+  if test "x$TOOLCHAIN_TYPE" = xclang; then
+    if test "x$OPENJDK_TARGET_OS" = xlinux; then
+      OS_LDFLAGS_JVM_ONLY="$OS_LDFLAGS_JVM_ONLY -Wl,-z,noexecstack"
+      OS_LDFLAGS_JDK_ONLY="$OS_LDFLAGS_JDK_ONLY -Wl,-z,noexecstack"
+      LIBJSIG_NOEXECSTACK_LDFLAGS="$LIBJSIG_NOEXECSTACK_LDFLAGS -Wl,-z,noexecstack"
+    fi
+  fi
 
   # Setup debug level-dependent LDFLAGS
   if test "x$TOOLCHAIN_TYPE" = xgcc; then
