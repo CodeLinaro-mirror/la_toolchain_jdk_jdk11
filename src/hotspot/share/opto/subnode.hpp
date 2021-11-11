@@ -195,6 +195,7 @@ class CmpLNode : public CmpNode {
 public:
   CmpLNode( Node *in1, Node *in2 ) : CmpNode(in1,in2) {}
   virtual int    Opcode() const;
+  virtual Node *Ideal(PhaseGVN *phase, bool can_reshape);
   virtual const Type *sub( const Type *, const Type * ) const;
 };
 
@@ -347,6 +348,17 @@ public:
   virtual int Opcode() const;
   const Type *bottom_type() const { return TypeInt::INT; }
   virtual uint ideal_reg() const { return Op_RegI; }
+};
+
+//------------------------------AbsLNode---------------------------------------
+// Absolute value a long.  Since a naive graph involves control flow, we
+// "match" it in the ideal world (so the control flow can be removed).
+class AbsLNode : public AbsNode {
+public:
+  AbsLNode( Node *in1 ) : AbsNode(in1) {}
+  virtual int Opcode() const;
+  const Type *bottom_type() const { return TypeLong::LONG; }
+  virtual uint ideal_reg() const { return Op_RegL; }
 };
 
 //------------------------------AbsFNode---------------------------------------

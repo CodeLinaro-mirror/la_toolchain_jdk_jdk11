@@ -28,8 +28,8 @@
  * @library /test/lib /
  * @modules java.base/jdk.internal.misc
  *          java.management
- *
- * @run main/othervm compiler.rtm.cli.TestRTMRetryCountOption
+ * @requires vm.rtm.compiler
+ * @run driver compiler.rtm.cli.TestRTMRetryCountOption
  */
 
 package compiler.rtm.cli;

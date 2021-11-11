@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1995, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -235,7 +235,7 @@ public abstract class URLStreamHandler {
             start = i;
             // If the authority is defined then the path is defined by the
             // spec only; See RFC 2396 Section 5.2.4.
-            if (authority != null && authority.length() > 0)
+            if (authority != null && !authority.isEmpty())
                 path = "";
         }
 
@@ -247,7 +247,7 @@ public abstract class URLStreamHandler {
         if (start < limit) {
             if (spec.charAt(start) == '/') {
                 path = spec.substring(start, limit);
-            } else if (path != null && path.length() > 0) {
+            } else if (path != null && !path.isEmpty()) {
                 isRelPath = true;
                 int ind = path.lastIndexOf('/');
                 String seperator = "";
@@ -432,23 +432,8 @@ public abstract class URLStreamHandler {
      * IP address.
      * @since 1.3
      */
-    protected synchronized InetAddress getHostAddress(URL u) {
-        if (u.hostAddress != null)
-            return u.hostAddress;
-
-        String host = u.getHost();
-        if (host == null || host.equals("")) {
-            return null;
-        } else {
-            try {
-                u.hostAddress = InetAddress.getByName(host);
-            } catch (UnknownHostException ex) {
-                return null;
-            } catch (SecurityException se) {
-                return null;
-            }
-        }
-        return u.hostAddress;
+    protected InetAddress getHostAddress(URL u) {
+        return u.getHostAddress();
     }
 
     /**
@@ -483,11 +468,11 @@ public abstract class URLStreamHandler {
         String s;
         return u.getProtocol()
             + ':'
-            + (((s = u.getAuthority()) != null && s.length() > 0)
+            + ((s = u.getAuthority()) != null && !s.isEmpty()
                ? "//" + s : "")
-            + (((s = u.getPath()) != null) ? s : "")
-            + (((s = u.getQuery()) != null) ? '?' + s : "")
-            + (((s = u.getRef()) != null) ? '#' + s : "");
+            + ((s = u.getPath()) != null ? s : "")
+            + ((s = u.getQuery()) != null ? '?' + s : "")
+            + ((s = u.getRef()) != null ? '#' + s : "");
     }
 
     /**
@@ -547,7 +532,7 @@ public abstract class URLStreamHandler {
          */
         String authority = null;
         String userInfo = null;
-        if (host != null && host.length() != 0) {
+        if (host != null && !host.isEmpty()) {
             authority = (port == -1) ? host : host + ":" + port;
             int at = host.lastIndexOf('@');
             if (at != -1) {

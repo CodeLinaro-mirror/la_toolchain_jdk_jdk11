@@ -46,6 +46,7 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
+#include <utmpx.h>
 
 // Todo: provide a os::get_max_process_id() or similar. Number of processes
 // may have been configured, can be read more accurately from proc fs etc.
@@ -167,13 +168,14 @@ int os::create_file_for_heap(const char* dir) {
 
   const char name_template[] = "/jvmheap.XXXXXX";
 
-  char *fullname = (char*)os::malloc((strlen(dir) + strlen(name_template) + 1), mtInternal);
+  size_t fullname_len = strlen(dir) + strlen(name_template);
+  char *fullname = (char*)os::malloc(fullname_len + 1, mtInternal);
   if (fullname == NULL) {
     vm_exit_during_initialization(err_msg("Malloc failed during creation of backing file for heap (%s)", os::strerror(errno)));
     return -1;
   }
-  (void)strncpy(fullname, dir, strlen(dir)+1);
-  (void)strncat(fullname, name_template, strlen(name_template));
+  int n = snprintf(fullname, fullname_len + 1, "%s%s", dir, name_template);
+  assert((size_t)n == fullname_len, "Unexpected number of characters in string");
 
   os::native_path(fullname);
 
@@ -362,55 +364,98 @@ struct tm* os::gmtime_pd(const time_t* clock, struct tm*  res) {
 void os::Posix::print_load_average(outputStream* st) {
   st->print("load average:");
   double loadavg[3];
-  os::loadavg(loadavg, 3);
-  st->print("%0.02f %0.02f %0.02f", loadavg[0], loadavg[1], loadavg[2]);
+  int res = os::loadavg(loadavg, 3);
+  if (res != -1) {
+    st->print("%0.02f %0.02f %0.02f", loadavg[0], loadavg[1], loadavg[2]);
+  } else {
+    st->print(" Unavailable");
+  }
   st->cr();
 }
 
-void os::Posix::print_rlimit_info(outputStream* st) {
-  st->print("rlimit:");
+// boot/uptime information;
+// unfortunately it does not work on macOS and Linux because the utx chain has no entry
+// for reboot at least on my test machines
+void os::Posix::print_uptime_info(outputStream* st) {
+  int bootsec = -1;
+  int currsec = time(NULL);
+  struct utmpx* ent;
+  setutxent();
+  while ((ent = getutxent())) {
+    if (!strcmp("system boot", ent->ut_line)) {
+      bootsec = ent->ut_tv.tv_sec;
+      break;
+    }
+  }
+
+  if (bootsec != -1) {
+    os::print_dhm(st, "OS uptime:", (long) (currsec-bootsec));
+  }
+}
+
+static void print_rlimit(outputStream* st, const char* msg,
+                         int resource, bool output_k = false) {
   struct rlimit rlim;
 
-  st->print(" STACK ");
-  getrlimit(RLIMIT_STACK, &rlim);
-  if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
-  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) / 1024);
+  st->print(" %s ", msg);
+  int res = getrlimit(resource, &rlim);
+  if (res == -1) {
+    st->print("could not obtain value");
+  } else {
+    // soft limit
+    if (rlim.rlim_cur == RLIM_INFINITY) { st->print("infinity"); }
+    else {
+      if (output_k) { st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) / 1024); }
+      else { st->print(UINT64_FORMAT, uint64_t(rlim.rlim_cur)); }
+    }
+    // hard limit
+    st->print("/");
+    if (rlim.rlim_max == RLIM_INFINITY) { st->print("infinity"); }
+    else {
+      if (output_k) { st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_max) / 1024); }
+      else { st->print(UINT64_FORMAT, uint64_t(rlim.rlim_max)); }
+    }
+  }
+}
 
-  st->print(", CORE ");
-  getrlimit(RLIMIT_CORE, &rlim);
-  if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
-  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) / 1024);
+void os::Posix::print_rlimit_info(outputStream* st) {
+  st->print("rlimit (soft/hard):");
+  print_rlimit(st, "STACK", RLIMIT_STACK, true);
+  print_rlimit(st, ", CORE", RLIMIT_CORE, true);
 
-  // Isn't there on solaris
 #if defined(AIX)
   st->print(", NPROC ");
   st->print("%d", sysconf(_SC_CHILD_MAX));
+
+  print_rlimit(st, ", THREADS", RLIMIT_THREADS);
 #elif !defined(SOLARIS)
-  st->print(", NPROC ");
-  getrlimit(RLIMIT_NPROC, &rlim);
-  if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
-  else st->print(UINT64_FORMAT, uint64_t(rlim.rlim_cur));
+  print_rlimit(st, ", NPROC", RLIMIT_NPROC);
 #endif
 
-  st->print(", NOFILE ");
-  getrlimit(RLIMIT_NOFILE, &rlim);
-  if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
-  else st->print(UINT64_FORMAT, uint64_t(rlim.rlim_cur));
+  print_rlimit(st, ", NOFILE", RLIMIT_NOFILE);
+  print_rlimit(st, ", AS", RLIMIT_AS, true);
+  print_rlimit(st, ", CPU", RLIMIT_CPU);
+  print_rlimit(st, ", DATA", RLIMIT_DATA, true);
 
-  st->print(", AS ");
-  getrlimit(RLIMIT_AS, &rlim);
-  if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
-  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) / 1024);
+  // maximum size of files that the process may create
+  print_rlimit(st, ", FSIZE", RLIMIT_FSIZE, true);
 
-  st->print(", DATA ");
-  getrlimit(RLIMIT_DATA, &rlim);
-  if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
-  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) / 1024);
+#if defined(LINUX) || defined(__APPLE__)
+  // maximum number of bytes of memory that may be locked into RAM
+  // (rounded down to the nearest  multiple of system pagesize)
+  print_rlimit(st, ", MEMLOCK", RLIMIT_MEMLOCK, true);
+#endif
 
-  st->print(", FSIZE ");
-  getrlimit(RLIMIT_FSIZE, &rlim);
-  if (rlim.rlim_cur == RLIM_INFINITY) st->print("infinity");
-  else st->print(UINT64_FORMAT "k", uint64_t(rlim.rlim_cur) / 1024);
+#if defined(SOLARIS)
+  // maximum size of mapped address space of a process in bytes;
+  // if the limit is exceeded, mmap and brk fail
+  print_rlimit(st, ", VMEM", RLIMIT_VMEM, true);
+#endif
+
+  // MacOS; The maximum size (in bytes) to which a process's resident set size may grow.
+#if defined(__APPLE__)
+  print_rlimit(st, ", RSS", RLIMIT_RSS, true);
+#endif
 
   st->cr();
 }
@@ -682,6 +727,21 @@ int os::sleep(Thread* thread, jlong millis, bool interruptible) {
   }
 }
 
+void os::naked_short_nanosleep(jlong ns) {
+  struct timespec req;
+  assert(ns > -1 && ns < NANOUNITS, "Un-interruptable sleep, short time use only");
+  req.tv_sec = 0;
+  req.tv_nsec = ns;
+  ::nanosleep(&req, NULL);
+  return;
+}
+
+void os::naked_short_sleep(jlong ms) {
+  assert(ms < MILLIUNITS, "Un-interruptable sleep, short time use only");
+  os::naked_short_nanosleep(ms * (NANOUNITS / MILLIUNITS));
+  return;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // interrupt support
 
@@ -783,6 +843,9 @@ static const struct {
 #endif
   {  SIGHUP,      "SIGHUP" },
   {  SIGILL,      "SIGILL" },
+#ifdef SIGINFO
+  {  SIGINFO,     "SIGINFO" },
+#endif
   {  SIGINT,      "SIGINT" },
 #ifdef SIGIO
   {  SIGIO,       "SIGIO" },
@@ -1645,6 +1708,24 @@ static void pthread_init_common(void) {
   }
 }
 
+#ifndef SOLARIS
+sigset_t sigs;
+struct sigaction sigact[NSIG];
+
+struct sigaction* os::Posix::get_preinstalled_handler(int sig) {
+  if (sigismember(&sigs, sig)) {
+    return &sigact[sig];
+  }
+  return NULL;
+}
+
+void os::Posix::save_preinstalled_handler(int sig, struct sigaction& oldAct) {
+  assert(sig > 0 && sig < NSIG, "vm signal out of expected range");
+  sigact[sig] = oldAct;
+  sigaddset(&sigs, sig);
+}
+#endif
+
 // Not all POSIX types and API's are available on all notionally "posix"
 // platforms. If we have build-time support then we will check for actual
 // runtime support via dlopen/dlsym lookup. This allows for running on an
@@ -1756,6 +1837,9 @@ void os::Posix::init_2(void) {
                (_pthread_condattr_setclock != NULL ? "" : " not"));
   log_info(os)("Relative timed-wait using pthread_cond_timedwait is associated with %s",
                _use_clock_monotonic_condattr ? "CLOCK_MONOTONIC" : "the default clock");
+#ifndef SOLARIS
+  sigemptyset(&sigs);
+#endif
 }
 
 #else // !SUPPORTS_CLOCK_MONOTONIC
@@ -1768,6 +1852,9 @@ void os::Posix::init_2(void) {
   log_info(os)("Use of CLOCK_MONOTONIC is not supported");
   log_info(os)("Use of pthread_condattr_setclock is not supported");
   log_info(os)("Relative timed-wait using pthread_cond_timedwait is associated with the default clock");
+#ifndef SOLARIS
+  sigemptyset(&sigs);
+#endif
 }
 
 #endif // SUPPORTS_CLOCK_MONOTONIC

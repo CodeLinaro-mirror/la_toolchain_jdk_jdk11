@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1994, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1994, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -72,6 +72,7 @@ import jdk.internal.misc.VM;
 import jdk.internal.logger.LoggerFinderLoader;
 import jdk.internal.logger.LazyLoggers;
 import jdk.internal.logger.LocalizedLoggerWrapper;
+import sun.nio.fs.DefaultFileSystemProvider;
 import sun.reflect.annotation.AnnotationType;
 import sun.nio.ch.Interruptible;
 import sun.security.util.SecurityConstants;
@@ -318,6 +319,8 @@ public final class System {
         if (security == null) {
             // ensure image reader is initialized
             Object.class.getResource("java/lang/ANY");
+            // ensure the default file system is initialized
+            DefaultFileSystemProvider.theFileSystem();
         }
         if (s != null) {
             try {
@@ -769,8 +772,11 @@ public final class System {
         if (props == null) {
             props = new Properties();
             initProperties(props);
+            System.props = props;
+            VersionProps.init();
+        } else {
+            System.props = props;
         }
-        System.props = props;
     }
 
     /**
@@ -949,7 +955,7 @@ public final class System {
      * <p>If a security manager exists, its
      * {@link SecurityManager#checkPermission checkPermission}
      * method is called with a
-     * {@code {@link RuntimePermission}("getenv."+name)}
+     * {@link RuntimePermission RuntimePermission("getenv."+name)}
      * permission.  This may result in a {@link SecurityException}
      * being thrown.  If no exception is thrown the value of the
      * variable {@code name} is returned.
@@ -1020,7 +1026,7 @@ public final class System {
      * <p>If a security manager exists, its
      * {@link SecurityManager#checkPermission checkPermission}
      * method is called with a
-     * {@code {@link RuntimePermission}("getenv.*")} permission.
+     * {@link RuntimePermission RuntimePermission("getenv.*")} permission.
      * This may result in a {@link SecurityException} being thrown.
      *
      * <p>When passing information to a Java subprocess,
@@ -1984,6 +1990,8 @@ public final class System {
 
         // register shared secrets
         setJavaLangAccess();
+
+        ClassLoader.initLibraryPaths();
 
         // Subsystems that are invoked during initialization can invoke
         // VM.isBooted() in order to avoid doing things that should

@@ -21,24 +21,30 @@
  * under the License.
  */
 /*
- * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
- */
-/*
- * $Id: DOMX509Data.java 1789702 2017-03-31 15:15:04Z coheigea $
+ * Copyright (c) 2005, Oracle and/or its affiliates. All rights reserved.
  */
 package org.jcp.xml.dsig.internal.dom;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.security.cert.*;
-import java.util.*;
+import java.security.cert.CRLException;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509CRL;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
-import javax.xml.crypto.*;
+import javax.security.auth.x500.X500Principal;
+import javax.xml.crypto.MarshalException;
+import javax.xml.crypto.XMLStructure;
 import javax.xml.crypto.dom.DOMCryptoContext;
-import javax.xml.crypto.dsig.*;
+import javax.xml.crypto.dsig.XMLSignature;
 import javax.xml.crypto.dsig.keyinfo.X509Data;
 import javax.xml.crypto.dsig.keyinfo.X509IssuerSerial;
-import javax.security.auth.x500.X500Principal;
 
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -62,7 +68,7 @@ public final class DOMX509Data extends DOMStructure implements X509Data {
      * @param content a list of one or more X.509 data types. Valid types are
      *    {@link String} (subject names), {@code byte[]} (subject key ids),
      *    {@link java.security.cert.X509Certificate}, {@link X509CRL},
-     *    or {@link javax.xml.dsig.XMLStructure}
+     *    or {@link javax.xml.crypto.XMLStructure}
      *    objects or elements from an external namespace). The list is
      *    defensively copied to protect against subsequent modification.
      * @throws NullPointerException if {@code content} is {@code null}
@@ -115,7 +121,7 @@ public final class DOMX509Data extends DOMStructure implements X509Data {
                 } else if ("X509SubjectName".equals(localName) && XMLSignature.XMLNS.equals(namespace)) {
                     newContent.add(childElem.getFirstChild().getNodeValue());
                 } else if ("X509SKI".equals(localName) && XMLSignature.XMLNS.equals(namespace)) {
-                    String content = XMLUtils.getFullTextChildrenFromElement(childElem);
+                    String content = XMLUtils.getFullTextChildrenFromNode(childElem);
                     newContent.add(XMLUtils.decode(content));
                 } else if ("X509CRL".equals(localName) && XMLSignature.XMLNS.equals(namespace)) {
                     newContent.add(unmarshalX509CRL(childElem));
@@ -132,6 +138,7 @@ public final class DOMX509Data extends DOMStructure implements X509Data {
         return content;
     }
 
+    @Override
     public void marshal(Node parent, String dsPrefix, DOMCryptoContext context)
         throws MarshalException
     {
@@ -241,7 +248,7 @@ public final class DOMX509Data extends DOMStructure implements X509Data {
             if (cf == null) {
                 cf = CertificateFactory.getInstance("X.509");
             }
-            String content = XMLUtils.getFullTextChildrenFromElement(elem);
+            String content = XMLUtils.getFullTextChildrenFromNode(elem);
             return new ByteArrayInputStream(XMLUtils.decode(content));
         } catch (CertificateException e) {
             throw new MarshalException("Cannot create CertificateFactory", e);

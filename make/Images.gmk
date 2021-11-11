@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -276,21 +276,14 @@ endif
 
 ifeq ($(GCOV_ENABLED), true)
 
-  GCOV_FIND_EXPR := -type f -name "*.gcno"
-
-  $(eval $(call SetupCopyFiles,COPY_HOTSPOT_GCOV_GCNO, \
+  $(eval $(call SetupCopyFiles,COPY_GCOV_GCNO, \
       SRC := $(OUTPUTDIR), \
       DEST := $(SYMBOLS_IMAGE_DIR)/gcov, \
-      FILES := $(shell $(FIND) $(HOTSPOT_OUTPUTDIR) $(GCOV_FIND_EXPR))))
+      FILES := $(call FindFiles, $(HOTSPOT_OUTPUTDIR) \
+          $(SUPPORT_OUTPUTDIR)/native, *.gcno) \
+  ))
 
-  SYMBOLS_TARGETS += $(COPY_HOTSPOT_GCOV_GCNO)
-
-  $(eval $(call SetupCopyFiles,COPY_JDK_GCOV_GCNO, \
-      SRC := $(OUTPUTDIR), \
-      DEST := $(SYMBOLS_IMAGE_DIR)/gcov, \
-      FILES := $(shell $(FIND) $(SUPPORT_OUTPUTDIR)/native $(GCOV_FIND_EXPR))))
-
-  SYMBOLS_TARGETS += $(COPY_JDK_GCOV_GCNO)
+  SYMBOLS_TARGETS += $(COPY_GCOV_GCNO)
 
 endif
 
@@ -308,6 +301,7 @@ ifeq ($(OPENJDK_TARGET_OS), windows)
 else
   LIBS_TARGET_SUBDIR := lib
 endif
+CMDS_TARGET_SUBDIR := bin
 
 # Param 1 - dir to find debuginfo files in
 FindDebuginfoFiles = \
@@ -323,12 +317,15 @@ else
   # On Macosx, if debug symbols have not been zipped, find all files inside *.dSYM
   # dirs.
   ifeq ($(OPENJDK_TARGET_OS), macosx)
-    $(eval $(call FillCacheFind, \
-        $(SUPPORT_OUTPUTDIR)/modules_cmds $(SUPPORT_OUTPUTDIR)/modules_libs))
+    $(call FillFindCache, \
+        $(SUPPORT_OUTPUTDIR)/modules_libs $(SUPPORT_OUTPUTDIR)/modules_cmds)
     FindDebuginfoFiles = \
-        $(if $(wildcard $1), $(call containing, .dSYM/, $(call CacheFind, $1)))
+        $(if $(wildcard $1), $(call containing, .dSYM/, $(call FindFiles, $1)))
   endif
 endif
+
+FILTERED_PDBS := %jimage.stripped.pdb %jpackage.stripped.pdb %java.stripped.pdb \
+    %jimage.pdb %jpackage.pdb %java.pdb %jimage.map %jpackage.map %java.map
 
 # Param 1 - either JDK or JRE
 SetupCopyDebuginfo = \
@@ -340,6 +337,13 @@ SetupCopyDebuginfo = \
               $(SUPPORT_OUTPUTDIR)/modules_libs/$m), \
       )) \
       $(eval $1_TARGETS += $$(COPY_$1_LIBS_DEBUGINFO_$m)) \
+      $(eval $(call SetupCopyFiles, COPY_$1_CMDS_DEBUGINFO_$m, \
+          SRC := $(SUPPORT_OUTPUTDIR)/modules_cmds/$m, \
+          DEST := $($1_IMAGE_DIR)/$(CMDS_TARGET_SUBDIR), \
+          FILES := $(filter-out $(FILTERED_PDBS), $(call FindDebuginfoFiles, \
+              $(SUPPORT_OUTPUTDIR)/modules_cmds/$m)), \
+      )) \
+      $(eval $1_TARGETS += $$(COPY_$1_CMDS_DEBUGINFO_$m)) \
     )
 
 # No space before argument to avoid having to put $(strip ) everywhere in

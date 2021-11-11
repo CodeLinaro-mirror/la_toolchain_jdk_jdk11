@@ -107,13 +107,26 @@ public final class StopDetectingInputStream extends InputStream {
         }
     }
 
+    @Override
+    public int read(byte[] b, int off, int len) throws IOException {
+        if (len == 0) {
+            return 0;
+        }
+        int r = read();
+        if (r != (-1)) {
+            b[off] = (byte) r;
+            return 1;
+        }
+        return 0;
+    }
+
     public synchronized void shutdown() {
         state = State.CLOSED;
         notifyAll();
     }
 
     public synchronized void write(int b) {
-        if (state != State.BUFFER) {
+        if (state == State.READ) {
             state = State.WAIT;
         }
         int newEnd = (end + 1) % buffer.length;

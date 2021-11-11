@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -138,17 +138,17 @@ int SharedRuntime::_implicit_null_throws = 0;
 int SharedRuntime::_implicit_div0_throws = 0;
 int SharedRuntime::_throw_null_ctr = 0;
 
-int SharedRuntime::_nof_normal_calls = 0;
-int SharedRuntime::_nof_optimized_calls = 0;
-int SharedRuntime::_nof_inlined_calls = 0;
-int SharedRuntime::_nof_megamorphic_calls = 0;
-int SharedRuntime::_nof_static_calls = 0;
-int SharedRuntime::_nof_inlined_static_calls = 0;
-int SharedRuntime::_nof_interface_calls = 0;
-int SharedRuntime::_nof_optimized_interface_calls = 0;
-int SharedRuntime::_nof_inlined_interface_calls = 0;
-int SharedRuntime::_nof_megamorphic_interface_calls = 0;
-int SharedRuntime::_nof_removable_exceptions = 0;
+int64_t SharedRuntime::_nof_normal_calls = 0;
+int64_t SharedRuntime::_nof_optimized_calls = 0;
+int64_t SharedRuntime::_nof_inlined_calls = 0;
+int64_t SharedRuntime::_nof_megamorphic_calls = 0;
+int64_t SharedRuntime::_nof_static_calls = 0;
+int64_t SharedRuntime::_nof_inlined_static_calls = 0;
+int64_t SharedRuntime::_nof_interface_calls = 0;
+int64_t SharedRuntime::_nof_optimized_interface_calls = 0;
+int64_t SharedRuntime::_nof_inlined_interface_calls = 0;
+int64_t SharedRuntime::_nof_megamorphic_interface_calls = 0;
+int     SharedRuntime::_nof_removable_exceptions = 0;
 
 int SharedRuntime::_new_instance_ctr=0;
 int SharedRuntime::_new_array_ctr=0;
@@ -581,6 +581,28 @@ void SharedRuntime::throw_and_post_jvmti_exception(JavaThread *thread, Handle h_
     address bcp = method()->bcp_from(vfst.bci());
     JvmtiExport::post_exception_throw(thread, method(), bcp, h_exception());
   }
+
+#if INCLUDE_JVMCI
+  if (EnableJVMCI && UseJVMCICompiler) {
+    vframeStream vfst(thread, true);
+    methodHandle method = methodHandle(thread, vfst.method());
+    int bci = vfst.bci();
+    MethodData* trap_mdo = method->method_data();
+    if (trap_mdo != NULL) {
+      // Set exception_seen if the exceptional bytecode is an invoke
+      Bytecode_invoke call = Bytecode_invoke_check(method, bci);
+      if (call.is_valid()) {
+        ResourceMark rm(thread);
+        ProfileData* pdata = trap_mdo->allocate_bci_to_data(bci, NULL);
+        if (pdata != NULL && pdata->is_BitData()) {
+          BitData* bit_data = (BitData*) pdata;
+          bit_data->set_exception_seen();
+        }
+      }
+    }
+  }
+#endif
+
   Exceptions::_throw(thread, __FILE__, __LINE__, h_exception);
 }
 
@@ -1970,7 +1992,7 @@ char* SharedRuntime::generate_class_cast_message(
   const char* caster_name = caster_klass->external_name();
 
   assert(target_klass != NULL || target_klass_name != NULL, "one must be provided");
-  const char* target_name = target_klass == NULL ? target_klass_name->as_C_string() :
+  const char* target_name = target_klass == NULL ? target_klass_name->as_klass_external_name() :
                                                    target_klass->external_name();
 
   size_t msglen = strlen(caster_name) + strlen("class ") + strlen(" cannot be cast to class ") + strlen(target_name) + 1;
@@ -2011,20 +2033,19 @@ JRT_LEAF(void, SharedRuntime::reguard_yellow_pages())
   (void) JavaThread::current()->reguard_stack();
 JRT_END
 
-
-// Handles the uncommon case in locking, i.e., contention or an inflated lock.
-JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_locking_C(oopDesc* _obj, BasicLock* lock, JavaThread* thread))
+void SharedRuntime::monitor_enter_helper(oopDesc* obj, BasicLock* lock, JavaThread* thread,
+                                         bool use_inlined_fast_locking) {
   if (!SafepointSynchronize::is_synchronizing()) {
     // Only try quick_enter() if we're not trying to reach a safepoint
     // so that the calling thread reaches the safepoint more quickly.
-    if (ObjectSynchronizer::quick_enter(_obj, thread, lock)) return;
+    if (ObjectSynchronizer::quick_enter(obj, thread, lock)) return;
   }
   // NO_ASYNC required because an async exception on the state transition destructor
   // would leave you with the lock held and it would never be released.
   // The normal monitorenter NullPointerException is thrown without acquiring a lock
   // and the model is that an exception implies the method failed.
   JRT_BLOCK_NO_ASYNC
-  oop obj(_obj);
+
   if (PrintBiasedLockingStatistics) {
     Atomic::inc(BiasedLocking::slow_path_entry_count_addr());
   }
@@ -2033,46 +2054,37 @@ JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_locking_C(oopDesc* _obj, B
     // Retry fast entry if bias is revoked to avoid unnecessary inflation
     ObjectSynchronizer::fast_enter(h_obj, lock, true, CHECK);
   } else {
-    ObjectSynchronizer::slow_enter(h_obj, lock, CHECK);
+    if (use_inlined_fast_locking) {
+      ObjectSynchronizer::slow_enter(h_obj, lock, CHECK);
+    } else {
+      ObjectSynchronizer::fast_enter(h_obj, lock, false, CHECK);
+    }
   }
   assert(!HAS_PENDING_EXCEPTION, "Should have no exception here");
   JRT_BLOCK_END
+}
+
+// Handles the uncommon case in locking, i.e., contention or an inflated lock.
+JRT_BLOCK_ENTRY(void, SharedRuntime::complete_monitor_locking_C(oopDesc* obj, BasicLock* lock, JavaThread* thread))
+  SharedRuntime::monitor_enter_helper(obj, lock, thread, true);
 JRT_END
 
-// Handles the uncommon cases of monitor unlocking in compiled code
-JRT_LEAF(void, SharedRuntime::complete_monitor_unlocking_C(oopDesc* _obj, BasicLock* lock, JavaThread * THREAD))
-   oop obj(_obj);
-  assert(JavaThread::current() == THREAD, "invariant");
-  // I'm not convinced we need the code contained by MIGHT_HAVE_PENDING anymore
-  // testing was unable to ever fire the assert that guarded it so I have removed it.
-  assert(!HAS_PENDING_EXCEPTION, "Do we need code below anymore?");
-#undef MIGHT_HAVE_PENDING
-#ifdef MIGHT_HAVE_PENDING
-  // Save and restore any pending_exception around the exception mark.
-  // While the slow_exit must not throw an exception, we could come into
-  // this routine with one set.
-  oop pending_excep = NULL;
-  const char* pending_file;
-  int pending_line;
-  if (HAS_PENDING_EXCEPTION) {
-    pending_excep = PENDING_EXCEPTION;
-    pending_file  = THREAD->exception_file();
-    pending_line  = THREAD->exception_line();
-    CLEAR_PENDING_EXCEPTION;
-  }
-#endif /* MIGHT_HAVE_PENDING */
-
-  {
-    // Exit must be non-blocking, and therefore no exceptions can be thrown.
-    EXCEPTION_MARK;
+void SharedRuntime::monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThread* thread,
+                                        bool use_inlined_fast_locking) {
+  assert(JavaThread::current() == thread, "invariant");
+  // Exit must be non-blocking, and therefore no exceptions can be thrown.
+  EXCEPTION_MARK;
+  if (use_inlined_fast_locking) {
+    // When using fast locking, the compiled code has already tried the fast case
     ObjectSynchronizer::slow_exit(obj, lock, THREAD);
+  } else {
+    ObjectSynchronizer::fast_exit(obj, lock, THREAD);
   }
+}
 
-#ifdef MIGHT_HAVE_PENDING
-  if (pending_excep != NULL) {
-    THREAD->set_pending_exception(pending_excep, pending_file, pending_line);
-  }
-#endif /* MIGHT_HAVE_PENDING */
+// Handles the uncommon cases of monitor unlocking in compiled code
+JRT_LEAF(void, SharedRuntime::complete_monitor_unlocking_C(oopDesc* obj, BasicLock* lock, JavaThread* thread))
+  SharedRuntime::monitor_exit_helper(obj, lock, thread, true);
 JRT_END
 
 #ifndef PRODUCT
@@ -2133,24 +2145,32 @@ inline double percent(int x, int y) {
   return 100.0 * x / MAX2(y, 1);
 }
 
+inline double percent(int64_t x, int64_t y) {
+  return 100.0 * x / MAX2(y, (int64_t)1);
+}
+
 class MethodArityHistogram {
  public:
   enum { MAX_ARITY = 256 };
  private:
-  static int _arity_histogram[MAX_ARITY];     // histogram of #args
-  static int _size_histogram[MAX_ARITY];      // histogram of arg size in words
-  static int _max_arity;                      // max. arity seen
-  static int _max_size;                       // max. arg size seen
+  static uint64_t _arity_histogram[MAX_ARITY]; // histogram of #args
+  static uint64_t _size_histogram[MAX_ARITY];  // histogram of arg size in words
+  static uint64_t _total_compiled_calls;
+  static uint64_t _max_compiled_calls_per_method;
+  static int _max_arity;                       // max. arity seen
+  static int _max_size;                        // max. arg size seen
 
   static void add_method_to_histogram(nmethod* nm) {
-    if (CompiledMethod::nmethod_access_is_safe(nm)) {
-      Method* method = nm->method();
+    Method* method = (nm == NULL) ? NULL : nm->method();
+    if ((method != NULL) && nm->is_alive()) {
       ArgumentCount args(method->signature());
       int arity   = args.size() + (method->is_static() ? 0 : 1);
       int argsize = method->size_of_parameters();
       arity   = MIN2(arity, MAX_ARITY-1);
       argsize = MIN2(argsize, MAX_ARITY-1);
-      int count = method->compiled_invocation_count();
+      uint64_t count = (uint64_t)method->compiled_invocation_count();
+      _max_compiled_calls_per_method = count > _max_compiled_calls_per_method ? count : _max_compiled_calls_per_method;
+      _total_compiled_calls    += count;
       _arity_histogram[arity]  += count;
       _size_histogram[argsize] += count;
       _max_arity = MAX2(_max_arity, arity);
@@ -2158,64 +2178,75 @@ class MethodArityHistogram {
     }
   }
 
-  void print_histogram_helper(int n, int* histo, const char* name) {
-    const int N = MIN2(5, n);
-    tty->print_cr("\nHistogram of call arity (incl. rcvr, calls to compiled methods only):");
+  void print_histogram_helper(int n, uint64_t* histo, const char* name) {
+    const int N = MIN2(9, n);
     double sum = 0;
     double weighted_sum = 0;
-    int i;
-    for (i = 0; i <= n; i++) { sum += histo[i]; weighted_sum += i*histo[i]; }
-    double rest = sum;
-    double percent = sum / 100;
-    for (i = 0; i <= N; i++) {
-      rest -= histo[i];
-      tty->print_cr("%4d: %7d (%5.1f%%)", i, histo[i], histo[i] / percent);
+    for (int i = 0; i <= n; i++) { sum += histo[i]; weighted_sum += i*histo[i]; }
+    if (sum >= 1.0) { // prevent divide by zero or divide overflow
+      double rest = sum;
+      double percent = sum / 100;
+      for (int i = 0; i <= N; i++) {
+        rest -= histo[i];
+        tty->print_cr("%4d: " UINT64_FORMAT_W(12) " (%5.1f%%)", i, histo[i], histo[i] / percent);
+      }
+      tty->print_cr("rest: " INT64_FORMAT_W(12) " (%5.1f%%)", (int64_t)rest, rest / percent);
+      tty->print_cr("(avg. %s = %3.1f, max = %d)", name, weighted_sum / sum, n);
+      tty->print_cr("(total # of compiled calls = " INT64_FORMAT_W(14) ")", _total_compiled_calls);
+      tty->print_cr("(max # of compiled calls   = " INT64_FORMAT_W(14) ")", _max_compiled_calls_per_method);
+    } else {
+      tty->print_cr("Histogram generation failed for %s. n = %d, sum = %7.5f", name, n, sum);
     }
-    tty->print_cr("rest: %7d (%5.1f%%))", (int)rest, rest / percent);
-    tty->print_cr("(avg. %s = %3.1f, max = %d)", name, weighted_sum / sum, n);
   }
 
   void print_histogram() {
     tty->print_cr("\nHistogram of call arity (incl. rcvr, calls to compiled methods only):");
     print_histogram_helper(_max_arity, _arity_histogram, "arity");
-    tty->print_cr("\nSame for parameter size (in words):");
+    tty->print_cr("\nHistogram of parameter block size (in words, incl. rcvr):");
     print_histogram_helper(_max_size, _size_histogram, "size");
     tty->cr();
   }
 
  public:
   MethodArityHistogram() {
-    MutexLockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+    // Take the Compile_lock to protect against changes in the CodeBlob structures
+    MutexLockerEx mu1(Compile_lock, Mutex::_no_safepoint_check_flag);
+    // Take the CodeCache_lock to protect against changes in the CodeHeap structure
+    MutexLockerEx mu2(CodeCache_lock, Mutex::_no_safepoint_check_flag);
     _max_arity = _max_size = 0;
+    _total_compiled_calls = 0;
+    _max_compiled_calls_per_method = 0;
     for (int i = 0; i < MAX_ARITY; i++) _arity_histogram[i] = _size_histogram[i] = 0;
     CodeCache::nmethods_do(add_method_to_histogram);
     print_histogram();
   }
 };
 
-int MethodArityHistogram::_arity_histogram[MethodArityHistogram::MAX_ARITY];
-int MethodArityHistogram::_size_histogram[MethodArityHistogram::MAX_ARITY];
+uint64_t MethodArityHistogram::_arity_histogram[MethodArityHistogram::MAX_ARITY];
+uint64_t MethodArityHistogram::_size_histogram[MethodArityHistogram::MAX_ARITY];
+uint64_t MethodArityHistogram::_total_compiled_calls;
+uint64_t MethodArityHistogram::_max_compiled_calls_per_method;
 int MethodArityHistogram::_max_arity;
 int MethodArityHistogram::_max_size;
 
-void SharedRuntime::print_call_statistics(int comp_total) {
+void SharedRuntime::print_call_statistics(uint64_t comp_total) {
   tty->print_cr("Calls from compiled code:");
-  int total  = _nof_normal_calls + _nof_interface_calls + _nof_static_calls;
-  int mono_c = _nof_normal_calls - _nof_optimized_calls - _nof_megamorphic_calls;
-  int mono_i = _nof_interface_calls - _nof_optimized_interface_calls - _nof_megamorphic_interface_calls;
-  tty->print_cr("\t%9d   (%4.1f%%) total non-inlined   ", total, percent(total, total));
-  tty->print_cr("\t%9d   (%4.1f%%) virtual calls       ", _nof_normal_calls, percent(_nof_normal_calls, total));
-  tty->print_cr("\t  %9d  (%3.0f%%)   inlined          ", _nof_inlined_calls, percent(_nof_inlined_calls, _nof_normal_calls));
-  tty->print_cr("\t  %9d  (%3.0f%%)   optimized        ", _nof_optimized_calls, percent(_nof_optimized_calls, _nof_normal_calls));
-  tty->print_cr("\t  %9d  (%3.0f%%)   monomorphic      ", mono_c, percent(mono_c, _nof_normal_calls));
-  tty->print_cr("\t  %9d  (%3.0f%%)   megamorphic      ", _nof_megamorphic_calls, percent(_nof_megamorphic_calls, _nof_normal_calls));
-  tty->print_cr("\t%9d   (%4.1f%%) interface calls     ", _nof_interface_calls, percent(_nof_interface_calls, total));
-  tty->print_cr("\t  %9d  (%3.0f%%)   inlined          ", _nof_inlined_interface_calls, percent(_nof_inlined_interface_calls, _nof_interface_calls));
-  tty->print_cr("\t  %9d  (%3.0f%%)   optimized        ", _nof_optimized_interface_calls, percent(_nof_optimized_interface_calls, _nof_interface_calls));
-  tty->print_cr("\t  %9d  (%3.0f%%)   monomorphic      ", mono_i, percent(mono_i, _nof_interface_calls));
-  tty->print_cr("\t  %9d  (%3.0f%%)   megamorphic      ", _nof_megamorphic_interface_calls, percent(_nof_megamorphic_interface_calls, _nof_interface_calls));
-  tty->print_cr("\t%9d   (%4.1f%%) static/special calls", _nof_static_calls, percent(_nof_static_calls, total));
-  tty->print_cr("\t  %9d  (%3.0f%%)   inlined          ", _nof_inlined_static_calls, percent(_nof_inlined_static_calls, _nof_static_calls));
+  int64_t total  = _nof_normal_calls + _nof_interface_calls + _nof_static_calls;
+  int64_t mono_c = _nof_normal_calls - _nof_optimized_calls - _nof_megamorphic_calls;
+  int64_t mono_i = _nof_interface_calls - _nof_optimized_interface_calls - _nof_megamorphic_interface_calls;
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (100%%)  total non-inlined   ", total);
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.1f%%) |- virtual calls       ", _nof_normal_calls, percent(_nof_normal_calls, total));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- inlined          ", _nof_inlined_calls, percent(_nof_inlined_calls, _nof_normal_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- optimized        ", _nof_optimized_calls, percent(_nof_optimized_calls, _nof_normal_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- monomorphic      ", mono_c, percent(mono_c, _nof_normal_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- megamorphic      ", _nof_megamorphic_calls, percent(_nof_megamorphic_calls, _nof_normal_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.1f%%) |- interface calls     ", _nof_interface_calls, percent(_nof_interface_calls, total));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- inlined          ", _nof_inlined_interface_calls, percent(_nof_inlined_interface_calls, _nof_interface_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- optimized        ", _nof_optimized_interface_calls, percent(_nof_optimized_interface_calls, _nof_interface_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- monomorphic      ", mono_i, percent(mono_i, _nof_interface_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- megamorphic      ", _nof_megamorphic_interface_calls, percent(_nof_megamorphic_interface_calls, _nof_interface_calls));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.1f%%) |- static/special calls", _nof_static_calls, percent(_nof_static_calls, total));
+  tty->print_cr("\t" INT64_FORMAT_W(12) " (%4.0f%%) |  |- inlined          ", _nof_inlined_static_calls, percent(_nof_inlined_static_calls, _nof_static_calls));
   tty->cr();
   tty->print_cr("Note 1: counter updates are not MT-safe.");
   tty->print_cr("Note 2: %% in major categories are relative to total non-inlined calls;");
@@ -2557,7 +2588,7 @@ AdapterHandlerEntry* AdapterHandlerLibrary::new_entry(AdapterFingerPrint* finger
 
 AdapterHandlerEntry* AdapterHandlerLibrary::get_adapter(const methodHandle& method) {
   AdapterHandlerEntry* entry = get_adapter0(method);
-  if (method->is_shared()) {
+  if (entry != NULL && method->is_shared()) {
     // See comments around Method::link_method()
     MutexLocker mu(AdapterHandlerLibrary_lock);
     if (method->adapter() == NULL) {
@@ -2569,6 +2600,7 @@ AdapterHandlerEntry* AdapterHandlerLibrary::get_adapter(const methodHandle& meth
       MacroAssembler _masm(&buffer);
       SharedRuntime::generate_trampoline(&_masm, entry->get_c2i_entry());
       assert(*(int*)trampoline != 0, "Instruction(s) for trampoline must not be encoded as zeros.");
+      _masm.flush();
 
       if (PrintInterpreter) {
         Disassembler::decode(buffer.insts_begin(), buffer.insts_end());
@@ -2783,10 +2815,16 @@ bool AdapterHandlerEntry::compare_code(unsigned char* buffer, int length) {
 void AdapterHandlerLibrary::create_native_wrapper(const methodHandle& method) {
   ResourceMark rm;
   nmethod* nm = NULL;
+  address critical_entry = NULL;
 
   assert(method->is_native(), "must be native");
   assert(method->is_method_handle_intrinsic() ||
          method->has_native_function(), "must have something valid to call!");
+
+  if (CriticalJNINatives && !method->is_method_handle_intrinsic()) {
+    // We perform the I/O with transition to native before acquiring AdapterHandlerLibrary_lock.
+    critical_entry = NativeLookup::lookup_critical_entry(method);
+  }
 
   {
     // Perform the work while holding the lock, but perform any printing outside the lock
@@ -2804,8 +2842,8 @@ void AdapterHandlerLibrary::create_native_wrapper(const methodHandle& method) {
     BufferBlob*  buf = buffer_blob(); // the temporary code buffer in CodeCache
     if (buf != NULL) {
       CodeBuffer buffer(buf);
-      double locs_buf[20];
-      buffer.insts()->initialize_shared_locs((relocInfo*)locs_buf, sizeof(locs_buf) / sizeof(relocInfo));
+      struct { double data[20]; } locs_buf;
+      buffer.insts()->initialize_shared_locs((relocInfo*)&locs_buf, sizeof(locs_buf) / sizeof(relocInfo));
       MacroAssembler _masm(&buffer);
 
       // Fill in the signature array, for the calling-convention call.
@@ -2832,7 +2870,7 @@ void AdapterHandlerLibrary::create_native_wrapper(const methodHandle& method) {
       int comp_args_on_stack = SharedRuntime::java_calling_convention(sig_bt, regs, total_args_passed, is_outgoing);
 
       // Generate the compiled-to-native wrapper code
-      nm = SharedRuntime::generate_native_wrapper(&_masm, method, compile_id, sig_bt, regs, ret_type);
+      nm = SharedRuntime::generate_native_wrapper(&_masm, method, compile_id, sig_bt, regs, ret_type, critical_entry);
 
       if (nm != NULL) {
         method->set_code(method, nm);
@@ -2872,6 +2910,24 @@ JRT_ENTRY_NO_ASYNC(void, SharedRuntime::block_for_jni_critical(JavaThread* threa
   GCLocker::lock_critical(thread);
   GCLocker::unlock_critical(thread);
 JRT_END
+
+#if INCLUDE_SHENANDOAHGC
+JRT_LEAF(oopDesc*, SharedRuntime::pin_object(JavaThread* thread, oopDesc* obj))
+  assert(Universe::heap()->supports_object_pinning(), "Why we here?");
+  assert(obj != NULL, "Should not be null");
+  oop o(obj);
+  o = Universe::heap()->pin_object(thread, o);
+  assert(o != NULL, "Should not be null");
+  return o;
+JRT_END
+
+JRT_LEAF(void, SharedRuntime::unpin_object(JavaThread* thread, oopDesc* obj))
+  assert(Universe::heap()->supports_object_pinning(), "Why we here?");
+  assert(obj != NULL, "Should not be null");
+  oop o(obj);
+  Universe::heap()->unpin_object(thread, o);
+JRT_END
+#endif
 
 // -------------------------------------------------------------------------
 // Java-Java calling convention

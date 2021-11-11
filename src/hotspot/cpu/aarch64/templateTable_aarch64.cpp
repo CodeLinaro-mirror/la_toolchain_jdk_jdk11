@@ -1478,8 +1478,7 @@ void TemplateTable::fop2(Operation op)
   case rem:
     __ fmovs(v1, v0);
     __ pop_f(v0);
-    __ call_VM_leaf_base1(CAST_FROM_FN_PTR(address, SharedRuntime::frem),
-                         0, 2, MacroAssembler::ret_type_float);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::frem));
     break;
   default:
     ShouldNotReachHere();
@@ -1511,8 +1510,7 @@ void TemplateTable::dop2(Operation op)
   case rem:
     __ fmovd(v1, v0);
     __ pop_d(v0);
-    __ call_VM_leaf_base1(CAST_FROM_FN_PTR(address, SharedRuntime::drem),
-                         0, 2, MacroAssembler::ret_type_double);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::drem));
     break;
   default:
     ShouldNotReachHere();
@@ -1653,8 +1651,7 @@ void TemplateTable::convert()
     __ fcvtzsw(r0, v0);
     __ get_fpsr(r1);
     __ cbzw(r1, L_Okay);
-    __ call_VM_leaf_base1(CAST_FROM_FN_PTR(address, SharedRuntime::f2i),
-                         0, 1, MacroAssembler::ret_type_integral);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::f2i));
     __ bind(L_Okay);
   }
     break;
@@ -1665,8 +1662,7 @@ void TemplateTable::convert()
     __ fcvtzs(r0, v0);
     __ get_fpsr(r1);
     __ cbzw(r1, L_Okay);
-    __ call_VM_leaf_base1(CAST_FROM_FN_PTR(address, SharedRuntime::f2l),
-                         0, 1, MacroAssembler::ret_type_integral);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::f2l));
     __ bind(L_Okay);
   }
     break;
@@ -1680,8 +1676,7 @@ void TemplateTable::convert()
     __ fcvtzdw(r0, v0);
     __ get_fpsr(r1);
     __ cbzw(r1, L_Okay);
-    __ call_VM_leaf_base1(CAST_FROM_FN_PTR(address, SharedRuntime::d2i),
-                         0, 1, MacroAssembler::ret_type_integral);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::d2i));
     __ bind(L_Okay);
   }
     break;
@@ -1692,8 +1687,7 @@ void TemplateTable::convert()
     __ fcvtzd(r0, v0);
     __ get_fpsr(r1);
     __ cbzw(r1, L_Okay);
-    __ call_VM_leaf_base1(CAST_FROM_FN_PTR(address, SharedRuntime::d2l),
-                         0, 1, MacroAssembler::ret_type_integral);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::d2l));
     __ bind(L_Okay);
   }
     break;
@@ -1711,7 +1705,7 @@ void TemplateTable::lcmp()
   Label done;
   __ pop_l(r1);
   __ cmp(r1, r0);
-  __ mov(r0, (u_int64_t)-1L);
+  __ mov(r0, (uint64_t)-1L);
   __ br(Assembler::LT, done);
   // __ mov(r0, 1UL);
   // __ csel(r0, r0, zr, Assembler::NE);
@@ -1735,7 +1729,7 @@ void TemplateTable::float_cmp(bool is_float, int unordered_result)
   if (unordered_result < 0) {
     // we want -1 for unordered or less than, 0 for equal and 1 for
     // greater than.
-    __ mov(r0, (u_int64_t)-1L);
+    __ mov(r0, (uint64_t)-1L);
     // for FP LT tests less than or unordered
     __ br(Assembler::LT, done);
     // install 0 for EQ otherwise 1
@@ -1916,7 +1910,7 @@ void TemplateTable::branch(bool is_jsr, bool is_wide)
   __ dispatch_only(vtos, /*generate_poll*/true);
 
   if (UseLoopCounter) {
-    if (ProfileInterpreter) {
+    if (ProfileInterpreter && !TieredCompilation) {
       // Out-of-line code to allocate method data oop.
       __ bind(profile_method);
       __ call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::profile_method));
@@ -2719,7 +2713,7 @@ void TemplateTable::putfield_or_static(int byte_no, bool is_static, RewriteContr
   {
     Label notVolatile;
     __ tbz(r5, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
-    __ membar(MacroAssembler::StoreStore);
+    __ membar(MacroAssembler::StoreStore | MacroAssembler::LoadStore);
     __ bind(notVolatile);
   }
 
@@ -2884,7 +2878,7 @@ void TemplateTable::putfield_or_static(int byte_no, bool is_static, RewriteContr
   {
     Label notVolatile;
     __ tbz(r5, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
-    __ membar(MacroAssembler::StoreLoad);
+    __ membar(MacroAssembler::StoreLoad | MacroAssembler::StoreStore);
     __ bind(notVolatile);
   }
 }
@@ -2969,6 +2963,9 @@ void TemplateTable::fast_storefield(TosState state)
   // access constant pool cache
   __ get_cache_and_index_at_bcp(r2, r1, 1);
 
+  // Must prevent reordering of the following cp cache loads with bytecode load
+  __ membar(MacroAssembler::LoadLoad);
+
   // test for volatile with r3
   __ ldrw(r3, Address(r2, in_bytes(base +
                                    ConstantPoolCacheEntry::flags_offset())));
@@ -2979,7 +2976,7 @@ void TemplateTable::fast_storefield(TosState state)
   {
     Label notVolatile;
     __ tbz(r3, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
-    __ membar(MacroAssembler::StoreStore);
+    __ membar(MacroAssembler::StoreStore | MacroAssembler::LoadStore);
     __ bind(notVolatile);
   }
 
@@ -3027,7 +3024,7 @@ void TemplateTable::fast_storefield(TosState state)
   {
     Label notVolatile;
     __ tbz(r3, ConstantPoolCacheEntry::is_volatile_shift, notVolatile);
-    __ membar(MacroAssembler::StoreLoad);
+    __ membar(MacroAssembler::StoreLoad | MacroAssembler::StoreStore);
     __ bind(notVolatile);
   }
 }
@@ -3061,6 +3058,10 @@ void TemplateTable::fast_accessfield(TosState state)
 
   // access constant pool cache
   __ get_cache_and_index_at_bcp(r2, r1, 1);
+
+  // Must prevent reordering of the following cp cache loads with bytecode load
+  __ membar(MacroAssembler::LoadLoad);
+
   __ ldr(r1, Address(r2, in_bytes(ConstantPoolCache::base_offset() +
                                   ConstantPoolCacheEntry::f2_offset())));
   __ ldrw(r3, Address(r2, in_bytes(ConstantPoolCache::base_offset() +

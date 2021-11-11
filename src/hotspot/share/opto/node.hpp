@@ -48,6 +48,7 @@ class CMoveNode;
 class CallDynamicJavaNode;
 class CallJavaNode;
 class CallLeafNode;
+class CallLeafNoFPNode;
 class CallNode;
 class CallRuntimeNode;
 class CallStaticJavaNode;
@@ -72,6 +73,7 @@ class EncodePNode;
 class EncodePKlassNode;
 class FastLockNode;
 class FastUnlockNode;
+class HaltNode;
 class IfNode;
 class IfProjNode;
 class IfFalseNode;
@@ -107,6 +109,7 @@ class MachSafePointNode;
 class MachSpillCopyNode;
 class MachTempNode;
 class MachMergeNode;
+class MachMemBarNode;
 class Matcher;
 class MemBarNode;
 class MemBarStoreStoreNode;
@@ -116,6 +119,7 @@ class MulNode;
 class MultiNode;
 class MultiBranchNode;
 class NeverBranchNode;
+class Opaque1Node;
 class OuterStripMinedLoopNode;
 class OuterStripMinedLoopEndNode;
 class Node;
@@ -141,6 +145,9 @@ class RegionNode;
 class RootNode;
 class SafePointNode;
 class SafePointScalarObjectNode;
+#if INCLUDE_SHENANDOAHGC
+class ShenandoahBarrierNode;
+#endif
 class StartNode;
 class State;
 class StoreNode;
@@ -391,6 +398,7 @@ protected:
 #ifdef ASSERT
   bool is_dead() const;
 #define is_not_dead(n) ((n) == NULL || !VerifyIterativeGVN || !((n)->is_dead()))
+  bool is_reachable_from_root() const;
 #endif
   // Check whether node has become unreachable
   bool is_unreachable(PhaseIterGVN &igvn) const;
@@ -607,9 +615,9 @@ public:
   // This enum is used only for C2 ideal and mach nodes with is_<node>() methods
   // so that it's values fits into 16 bits.
   enum NodeClasses {
-    Bit_Node   = 0x0000,
-    Class_Node = 0x0000,
-    ClassMask_Node = 0xFFFF,
+    Bit_Node   = 0x00000000,
+    Class_Node = 0x00000000,
+    ClassMask_Node = 0xFFFFFFFF,
 
     DEFINE_CLASS_ID(Multi, Node, 0)
       DEFINE_CLASS_ID(SafePoint, Multi, 0)
@@ -619,6 +627,7 @@ public:
             DEFINE_CLASS_ID(CallDynamicJava,  CallJava, 1)
           DEFINE_CLASS_ID(CallRuntime,      Call, 1)
             DEFINE_CLASS_ID(CallLeaf,         CallRuntime, 0)
+              DEFINE_CLASS_ID(CallLeafNoFP,     CallLeaf, 0)
           DEFINE_CLASS_ID(Allocate,         Call, 2)
             DEFINE_CLASS_ID(AllocateArray,    Allocate, 0)
           DEFINE_CLASS_ID(AbstractLock,     Call, 3)
@@ -659,6 +668,7 @@ public:
       DEFINE_CLASS_ID(MachConstant,     Mach, 5)
         DEFINE_CLASS_ID(MachJump,       MachConstant, 0)
       DEFINE_CLASS_ID(MachMerge,        Mach, 6)
+      DEFINE_CLASS_ID(MachMemBar,       Mach, 7)
 
     DEFINE_CLASS_ID(Type,  Node, 2)
       DEFINE_CLASS_ID(Phi,   Type, 0)
@@ -673,6 +683,9 @@ public:
       DEFINE_CLASS_ID(EncodeNarrowPtr, Type, 6)
         DEFINE_CLASS_ID(EncodeP, EncodeNarrowPtr, 0)
         DEFINE_CLASS_ID(EncodePKlass, EncodeNarrowPtr, 1)
+#if INCLUDE_SHENANDOAHGC
+      DEFINE_CLASS_ID(ShenandoahBarrier, Type, 7)
+#endif
 
     DEFINE_CLASS_ID(Proj,  Node, 3)
       DEFINE_CLASS_ID(CatchProj, Proj, 0)
@@ -714,8 +727,10 @@ public:
     DEFINE_CLASS_ID(Mul,      Node, 12)
     DEFINE_CLASS_ID(Vector,   Node, 13)
     DEFINE_CLASS_ID(ClearArray, Node, 14)
+    DEFINE_CLASS_ID(Halt, Node, 15)
+    DEFINE_CLASS_ID(Opaque1, Node, 16)
 
-    _max_classes  = ClassMask_ClearArray
+    _max_classes  = ClassMask_Halt
   };
   #undef DEFINE_CLASS_ID
 
@@ -740,13 +755,12 @@ public:
   };
 
 private:
-  jushort _class_id;
+  juint _class_id;
   jushort _flags;
 
 protected:
   // These methods should be called from constructors only.
-  void init_class_id(jushort c) {
-    assert(c <= _max_classes, "invalid node class");
+  void init_class_id(juint c) {
     _class_id = c; // cast out const
   }
   void init_flags(jushort fl) {
@@ -759,7 +773,7 @@ protected:
   }
 
 public:
-  const jushort class_id() const { return _class_id; }
+  const juint class_id() const { return _class_id; }
 
   const jushort flags() const { return _flags; }
 
@@ -798,6 +812,7 @@ public:
   DEFINE_CLASS_QUERY(CallDynamicJava)
   DEFINE_CLASS_QUERY(CallJava)
   DEFINE_CLASS_QUERY(CallLeaf)
+  DEFINE_CLASS_QUERY(CallLeafNoFP)
   DEFINE_CLASS_QUERY(CallRuntime)
   DEFINE_CLASS_QUERY(CallStaticJava)
   DEFINE_CLASS_QUERY(Catch)
@@ -818,6 +833,7 @@ public:
   DEFINE_CLASS_QUERY(EncodePKlass)
   DEFINE_CLASS_QUERY(FastLock)
   DEFINE_CLASS_QUERY(FastUnlock)
+  DEFINE_CLASS_QUERY(Halt)
   DEFINE_CLASS_QUERY(If)
   DEFINE_CLASS_QUERY(RangeCheck)
   DEFINE_CLASS_QUERY(IfProj)
@@ -852,6 +868,7 @@ public:
   DEFINE_CLASS_QUERY(MachSafePoint)
   DEFINE_CLASS_QUERY(MachSpillCopy)
   DEFINE_CLASS_QUERY(MachTemp)
+  DEFINE_CLASS_QUERY(MachMemBar)
   DEFINE_CLASS_QUERY(MachMerge)
   DEFINE_CLASS_QUERY(Mem)
   DEFINE_CLASS_QUERY(MemBar)
@@ -860,6 +877,7 @@ public:
   DEFINE_CLASS_QUERY(Mul)
   DEFINE_CLASS_QUERY(Multi)
   DEFINE_CLASS_QUERY(MultiBranch)
+  DEFINE_CLASS_QUERY(Opaque1)
   DEFINE_CLASS_QUERY(OuterStripMinedLoop)
   DEFINE_CLASS_QUERY(OuterStripMinedLoopEnd)
   DEFINE_CLASS_QUERY(Parm)
@@ -870,6 +888,9 @@ public:
   DEFINE_CLASS_QUERY(Root)
   DEFINE_CLASS_QUERY(SafePoint)
   DEFINE_CLASS_QUERY(SafePointScalarObject)
+#if INCLUDE_SHENANDOAHGC
+  DEFINE_CLASS_QUERY(ShenandoahBarrier)
+#endif
   DEFINE_CLASS_QUERY(Start)
   DEFINE_CLASS_QUERY(Store)
   DEFINE_CLASS_QUERY(Sub)
@@ -888,11 +909,7 @@ public:
 
   bool is_Con () const { return (_flags & Flag_is_Con) != 0; }
   // The data node which is safe to leave in dead loop during IGVN optimization.
-  bool is_dead_loop_safe() const {
-    return is_Phi() || (is_Proj() && in(0) == NULL) ||
-           ((_flags & (Flag_is_dead_loop_safe | Flag_is_Con)) != 0 &&
-            (!is_Proj() || !in(0)->is_Allocate()));
-  }
+  bool is_dead_loop_safe() const;
 
   // is_Copy() returns copied edge index (0 or 1)
   uint is_Copy() const { return (_flags & Flag_is_Copy); }
@@ -1144,8 +1161,7 @@ public:
   void collect_nodes_out_all_ctrl_boundary(GrowableArray<Node*> *ns) const;
 
   void verify_edges(Unique_Node_List &visited); // Verify bi-directional edges
-  void verify() const;               // Check Def-Use info for my subgraph
-  static void verify_recur(const Node *n, int verify_depth, VectorSet &old_space, VectorSet &new_space);
+  static void verify(Node* n, int verify_depth);
 
   // This call defines a class-unique string used to identify class instances
   virtual const char *Name() const;

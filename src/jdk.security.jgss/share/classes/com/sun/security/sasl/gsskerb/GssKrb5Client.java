@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,7 @@ import javax.security.sasl.*;
 import javax.security.auth.callback.CallbackHandler;
 
 // JGSS
+import sun.security.jgss.krb5.internal.TlsChannelBindingImpl;
 import org.ietf.jgss.*;
 
 /**
@@ -140,6 +141,16 @@ final class GssKrb5Client extends GssKrb5Base implements SaslClient {
             }
             secCtx.requestMutualAuth(mutual);
 
+            if (props != null) {
+                // TLS Channel Binding
+                // Property name is defined in the TLSChannelBinding class of
+                // the java.naming module
+                byte[] tlsCB = (byte[])props.get("jdk.internal.sasl.tlschannelbinding");
+                if (tlsCB != null) {
+                    secCtx.setChannelBinding(new TlsChannelBindingImpl(tlsCB));
+                }
+            }
+
             // Always specify potential need for integrity and confidentiality
             // Decision will be made during final handshake
             secCtx.requestConf(true);
@@ -230,8 +241,10 @@ final class GssKrb5Client extends GssKrb5Base implements SaslClient {
 
             // Received S1 (security layer, server max recv size)
 
+            MessageProp msgProp = new MessageProp(false);
             byte[] gssOutToken = secCtx.unwrap(challengeData, 0,
-                challengeData.length, new MessageProp(0, false));
+                challengeData.length, msgProp);
+            checkMessageProp("Handshake failure: ", msgProp);
 
             // First octet is a bit-mask specifying the protections
             // supported by the server

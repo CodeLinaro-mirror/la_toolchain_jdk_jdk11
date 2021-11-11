@@ -1199,10 +1199,20 @@ jvmtiError VM_RedefineClasses::load_new_class_versions(TRAPS) {
       the_class->link_class(THREAD);
       if (HAS_PENDING_EXCEPTION) {
         Symbol* ex_name = PENDING_EXCEPTION->klass()->name();
-        log_info(redefine, class, load, exceptions)("link_class exception: '%s'", ex_name->as_C_string());
+        oop message = java_lang_Throwable::message(PENDING_EXCEPTION);
+        if (message != NULL) {
+          char* ex_msg = java_lang_String::as_utf8_string(message);
+          log_info(redefine, class, load, exceptions)("link_class exception: '%s %s'",
+                   ex_name->as_C_string(), ex_msg);
+        } else {
+          log_info(redefine, class, load, exceptions)("link_class exception: '%s'",
+                   ex_name->as_C_string());
+        }
         CLEAR_PENDING_EXCEPTION;
         if (ex_name == vmSymbols::java_lang_OutOfMemoryError()) {
           return JVMTI_ERROR_OUT_OF_MEMORY;
+        } else if (ex_name == vmSymbols::java_lang_NoClassDefFoundError()) {
+          return JVMTI_ERROR_INVALID_CLASS;
         } else {
           return JVMTI_ERROR_INTERNAL;
         }
@@ -1614,6 +1624,11 @@ jvmtiError VM_RedefineClasses::merge_cp_and_rewrite(
     // The merge can fail due to memory allocation failure or due
     // to robustness checks.
     return JVMTI_ERROR_INTERNAL;
+  }
+
+  if (old_cp->has_dynamic_constant()) {
+    merge_cp->set_has_dynamic_constant();
+    scratch_cp->set_has_dynamic_constant();
   }
 
   log_info(redefine, class, constantpool)("merge_cp_len=%d, index_map_len=%d", merge_cp_length, _index_map_count);
@@ -3238,6 +3253,10 @@ void VM_RedefineClasses::set_new_constant_pool(
   // attach klass to new constant pool
   // reference to the cp holder is needed for copy_operands()
   smaller_cp->set_pool_holder(scratch_class);
+
+  if (scratch_cp->has_dynamic_constant()) {
+    smaller_cp->set_has_dynamic_constant();
+  }
 
   scratch_cp->copy_cp_to(1, scratch_cp_length - 1, smaller_cp, 1, THREAD);
   if (HAS_PENDING_EXCEPTION) {

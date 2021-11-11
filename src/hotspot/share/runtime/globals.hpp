@@ -435,6 +435,9 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
   product(bool, CriticalJNINatives, true,                                   \
           "Check for critical JNI entry points")                            \
                                                                             \
+  product(bool, UseLegacyJNINameEscaping, false,                            \
+          "Use the original JNI name escaping scheme")                      \
+                                                                            \
   notproduct(bool, StressCriticalJNINatives, false,                         \
           "Exercise register saving code in critical natives")              \
                                                                             \
@@ -467,6 +470,12 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
                                                                             \
   diagnostic(bool, UseVectorizedMismatchIntrinsic, false,                   \
           "Enables intrinsification of ArraysSupport.vectorizedMismatch()") \
+                                                                            \
+  diagnostic(bool, UseCopySignIntrinsic, false,                             \
+          "Enables intrinsification of Math.copySign")                      \
+                                                                            \
+  diagnostic(bool, UseSignumIntrinsic, false,                               \
+          "Enables intrinsification of Math.signum")                        \
                                                                             \
   diagnostic(ccstrlist, DisableIntrinsic, "",                               \
          "do not expand intrinsics whose (internal) names appear here")     \
@@ -542,7 +551,7 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
   diagnostic(bool, LogEvents, true,                                         \
           "Enable the various ring buffer event logs")                      \
                                                                             \
-  diagnostic(uintx, LogEventsBufferEntries, 10,                             \
+  diagnostic(uintx, LogEventsBufferEntries, 20,                             \
           "Number of ring buffer event logs")                               \
           range(1, NOT_LP64(1*K) LP64_ONLY(1*M))                            \
                                                                             \
@@ -873,9 +882,6 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
                                                                             \
   product(bool, ReduceSignalUsage, false,                                   \
           "Reduce the use of OS signals in Java and/or the VM")             \
-                                                                            \
-  develop_pd(bool, ShareVtableStubs,                                        \
-          "Share vtable stubs (smaller code but worse branch prediction")   \
                                                                             \
   develop(bool, LoadLineNumberTables, true,                                 \
           "Tell whether the class file parser loads line number tables")    \
@@ -1315,6 +1321,12 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
   product(bool, DisplayVMOutputToStdout, false,                             \
           "If DisplayVMOutput is true, display all VM output to stdout")    \
                                                                             \
+  product(bool, ErrorFileToStderr, false,                                   \
+          "If true, error data is printed to stderr instead of a file")     \
+                                                                            \
+  product(bool, ErrorFileToStdout, false,                                   \
+          "If true, error data is printed to stdout instead of a file")     \
+                                                                            \
   product(bool, UseHeavyMonitors, false,                                    \
           "use heavyweight instead of lightweight Java monitors")           \
                                                                             \
@@ -1674,7 +1686,7 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
   notproduct(intx, MaxSubklassPrintSize, 4,                                 \
           "maximum number of subklasses to print when printing klass")      \
                                                                             \
-  product(intx, MaxInlineLevel, 9,                                          \
+  product(intx, MaxInlineLevel, 15,                                         \
           "maximum number of nested calls that are inlined")                \
           range(0, max_jint)                                                \
                                                                             \
@@ -1965,13 +1977,13 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
           range(0, 100)                                                     \
                                                                             \
   /* AOT parameters */                                                      \
-  product(bool, UseAOT, AOT_ONLY(true) NOT_AOT(false),                      \
+  experimental(bool, UseAOT, false,                                         \
           "Use AOT compiled files")                                         \
                                                                             \
-  product(ccstrlist, AOTLibrary, NULL,                                      \
+  experimental(ccstrlist, AOTLibrary, NULL,                                 \
           "AOT library")                                                    \
                                                                             \
-  product(bool, PrintAOT, false,                                            \
+  experimental(bool, PrintAOT, false,                                       \
           "Print used AOT klasses and methods")                             \
                                                                             \
   notproduct(bool, PrintAOTStatistics, false,                               \
@@ -2655,7 +2667,7 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
   diagnostic(bool, ShowRegistersOnAssert, false,                            \
           "On internal errors, include registers in error report.")         \
                                                                             \
-  experimental(bool, UseSwitchProfiling, true,                              \
+  diagnostic(bool, UseSwitchProfiling, true,                                \
           "leverage profiling for table/lookup switch")                     \
                                                                             \
   JFR_ONLY(product(bool, FlightRecorder, false,                             \

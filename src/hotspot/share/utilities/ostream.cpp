@@ -307,54 +307,73 @@ void outputStream::print_data(void* data, size_t len, bool with_ascii) {
   }
 }
 
-stringStream::stringStream(size_t initial_size) : outputStream() {
-  buffer_length = initial_size;
-  buffer        = NEW_RESOURCE_ARRAY(char, buffer_length);
-  buffer_pos    = 0;
-  buffer_fixed  = false;
-  DEBUG_ONLY(rm = Thread::current()->current_resource_mark();)
+stringStream::stringStream(size_t initial_capacity) :
+  outputStream(),
+  _buffer(_small_buffer),
+  _written(0),
+  _capacity(sizeof(_small_buffer)),
+  _is_fixed(false)
+{
+  if (initial_capacity > _capacity) {
+    grow(initial_capacity);
+  }
+  zero_terminate();
 }
 
 // useful for output to fixed chunks of memory, such as performance counters
-stringStream::stringStream(char* fixed_buffer, size_t fixed_buffer_size) : outputStream() {
-  buffer_length = fixed_buffer_size;
-  buffer        = fixed_buffer;
-  buffer_pos    = 0;
-  buffer_fixed  = true;
+stringStream::stringStream(char* fixed_buffer, size_t fixed_buffer_size) :
+  outputStream(),
+  _buffer(fixed_buffer),
+  _written(0),
+  _capacity(fixed_buffer_size),
+  _is_fixed(true)
+{
+  zero_terminate();
+}
+
+// Grow backing buffer to desired capacity. Don't call for fixed buffers
+void stringStream::grow(size_t new_capacity) {
+  assert(!_is_fixed, "Don't call for caller provided buffers");
+  assert(new_capacity > _capacity, "Sanity");
+  assert(new_capacity > sizeof(_small_buffer), "Sanity");
+  if (_buffer == _small_buffer) {
+    _buffer = NEW_C_HEAP_ARRAY(char, new_capacity, mtInternal);
+    _capacity = new_capacity;
+    if (_written > 0) {
+      ::memcpy(_buffer, _small_buffer, _written);
+    }
+    zero_terminate();
+  } else {
+    _buffer = REALLOC_C_HEAP_ARRAY(char, _buffer, new_capacity, mtInternal);
+    _capacity = new_capacity;
+  }
 }
 
 void stringStream::write(const char* s, size_t len) {
-  size_t write_len = len;               // number of non-null bytes to write
-  size_t end = buffer_pos + len + 1;    // position after write and final '\0'
-  if (end > buffer_length) {
-    if (buffer_fixed) {
-      // if buffer cannot resize, silently truncate
-      end = buffer_length;
-      write_len = end - buffer_pos - 1; // leave room for the final '\0'
-    } else {
-      // For small overruns, double the buffer.  For larger ones,
-      // increase to the requested size.
-      if (end < buffer_length * 2) {
-        end = buffer_length * 2;
-      }
-      char* oldbuf = buffer;
-      assert(rm == NULL || Thread::current()->current_resource_mark() == rm,
-             "StringStream is re-allocated with a different ResourceMark. Current: "
-             PTR_FORMAT " original: " PTR_FORMAT,
-             p2i(Thread::current()->current_resource_mark()), p2i(rm));
-      buffer = NEW_RESOURCE_ARRAY(char, end);
-      if (buffer_pos > 0) {
-        memcpy(buffer, oldbuf, buffer_pos);
-      }
-      buffer_length = end;
+  assert(_capacity >= _written + 1, "Sanity");
+  if (len == 0) {
+    return;
+  }
+  const size_t reasonable_max_len = 1 * G;
+  if (len >= reasonable_max_len) {
+    assert(false, "bad length? (" SIZE_FORMAT ")", len);
+    return;
+  }
+  size_t write_len = 0;
+  if (_is_fixed) {
+    write_len = MIN2(len, _capacity - _written - 1);
+  } else {
+    write_len = len;
+    size_t needed = _written + len + 1;
+    if (needed > _capacity) {
+      grow(MAX2(needed, _capacity * 2));
     }
   }
-  // invariant: buffer is always null-terminated
-  guarantee(buffer_pos + write_len + 1 <= buffer_length, "stringStream oob");
+  assert(_written + write_len + 1 <= _capacity, "stringStream oob");
   if (write_len > 0) {
-    buffer[buffer_pos + write_len] = 0;
-    memcpy(buffer + buffer_pos, s, write_len);
-    buffer_pos += write_len;
+    ::memcpy(_buffer + _written, s, write_len);
+    _written += write_len;
+    zero_terminate();
   }
 
   // Note that the following does not depend on write_len.
@@ -363,14 +382,30 @@ void stringStream::write(const char* s, size_t len) {
   update_position(s, len);
 }
 
-char* stringStream::as_string() {
-  char* copy = NEW_RESOURCE_ARRAY(char, buffer_pos + 1);
-  strncpy(copy, buffer, buffer_pos);
-  copy[buffer_pos] = 0;  // terminating null
+void stringStream::zero_terminate() {
+  assert(_buffer != NULL &&
+         _written < _capacity, "sanity");
+  _buffer[_written] = '\0';
+}
+
+void stringStream::reset() {
+  _written = 0; _precount = 0; _position = 0;
+  _newlines = 0;
+  zero_terminate();
+}
+
+char* stringStream::as_string() const {
+  char* copy = NEW_RESOURCE_ARRAY(char, _written + 1);
+  ::memcpy(copy, _buffer, _written);
+  copy[_written] = 0;  // terminating null
   return copy;
 }
 
-stringStream::~stringStream() {}
+stringStream::~stringStream() {
+  if (!_is_fixed && _buffer != _small_buffer) {
+    FREE_C_HEAP_ARRAY(char, _buffer);
+  }
+}
 
 xmlStream*   xtty;
 outputStream* tty;
@@ -951,6 +986,7 @@ bufferedStream::bufferedStream(size_t initial_size, size_t bufmax) : outputStrea
   buffer_pos    = 0;
   buffer_fixed  = false;
   buffer_max    = bufmax;
+  truncated     = false;
 }
 
 bufferedStream::bufferedStream(char* fixed_buffer, size_t fixed_buffer_size, size_t bufmax) : outputStream() {
@@ -959,12 +995,17 @@ bufferedStream::bufferedStream(char* fixed_buffer, size_t fixed_buffer_size, siz
   buffer_pos    = 0;
   buffer_fixed  = true;
   buffer_max    = bufmax;
+  truncated     = false;
 }
 
 void bufferedStream::write(const char* s, size_t len) {
 
+  if (truncated) {
+    return;
+  }
+
   if(buffer_pos + len > buffer_max) {
-    flush();
+    flush(); // Note: may be a noop.
   }
 
   size_t end = buffer_pos + len;
@@ -972,19 +1013,42 @@ void bufferedStream::write(const char* s, size_t len) {
     if (buffer_fixed) {
       // if buffer cannot resize, silently truncate
       len = buffer_length - buffer_pos - 1;
+      truncated = true;
     } else {
       // For small overruns, double the buffer.  For larger ones,
       // increase to the requested size.
       if (end < buffer_length * 2) {
         end = buffer_length * 2;
       }
-      buffer = REALLOC_C_HEAP_ARRAY(char, buffer, end, mtInternal);
-      buffer_length = end;
+      // Impose a cap beyond which the buffer cannot grow - a size which
+      // in all probability indicates a real error, e.g. faulty printing
+      // code looping, while not affecting cases of just-very-large-but-its-normal
+      // output.
+      const size_t reasonable_cap = MAX2(100 * M, buffer_max * 2);
+      if (end > reasonable_cap) {
+        // In debug VM, assert right away.
+        assert(false, "Exceeded max buffer size for this string.");
+        // Release VM: silently truncate. We do this since these kind of errors
+        // are both difficult to predict with testing (depending on logging content)
+        // and usually not serious enough to kill a production VM for it.
+        end = reasonable_cap;
+        size_t remaining = end - buffer_pos;
+        if (len >= remaining) {
+          len = remaining - 1;
+          truncated = true;
+        }
+      }
+      if (buffer_length < end) {
+        buffer = REALLOC_C_HEAP_ARRAY(char, buffer, end, mtInternal);
+        buffer_length = end;
+      }
     }
   }
-  memcpy(buffer + buffer_pos, s, len);
-  buffer_pos += len;
-  update_position(s, len);
+  if (len > 0) {
+    memcpy(buffer + buffer_pos, s, len);
+    buffer_pos += len;
+    update_position(s, len);
+  }
 }
 
 char* bufferedStream::as_string() {

@@ -363,6 +363,9 @@ bool vmIntrinsics::preserves_state(vmIntrinsics::ID id) {
   case vmIntrinsics::_isInstance:
   case vmIntrinsics::_currentThread:
   case vmIntrinsics::_dabs:
+  case vmIntrinsics::_fabs:
+  case vmIntrinsics::_iabs:
+  case vmIntrinsics::_labs:
   case vmIntrinsics::_dsqrt:
   case vmIntrinsics::_dsin:
   case vmIntrinsics::_dcos:
@@ -404,6 +407,9 @@ bool vmIntrinsics::can_trap(vmIntrinsics::ID id) {
   case vmIntrinsics::_longBitsToDouble:
   case vmIntrinsics::_currentThread:
   case vmIntrinsics::_dabs:
+  case vmIntrinsics::_fabs:
+  case vmIntrinsics::_iabs:
+  case vmIntrinsics::_labs:
   case vmIntrinsics::_dsqrt:
   case vmIntrinsics::_dsin:
   case vmIntrinsics::_dcos:
@@ -456,6 +462,8 @@ int vmIntrinsics::predicates_needed(vmIntrinsics::ID id) {
   switch (id) {
   case vmIntrinsics::_cipherBlockChaining_encryptAESCrypt:
   case vmIntrinsics::_cipherBlockChaining_decryptAESCrypt:
+  case vmIntrinsics::_electronicCodeBook_encryptAESCrypt:
+  case vmIntrinsics::_electronicCodeBook_decryptAESCrypt:
   case vmIntrinsics::_counterMode_AESCrypt:
     return 1;
   case vmIntrinsics::_digestBase_implCompressMB:
@@ -477,15 +485,16 @@ bool vmIntrinsics::is_intrinsic_disabled(vmIntrinsics::ID id) {
   // Note, DirectiveSet may not be created at this point yet since this code
   // is called from initial stub geenration code.
   char* local_list = (char*)DirectiveSet::canonicalize_disableintrinsic(DisableIntrinsic);
-
+  char* save_ptr;
   bool found = false;
-  char* token = strtok(local_list, ",");
+
+  char* token = strtok_r(local_list, ",", &save_ptr);
   while (token != NULL) {
     if (strcmp(token, vmIntrinsics::name_at(id)) == 0) {
       found = true;
       break;
     } else {
-      token = strtok(NULL, ",");
+      token = strtok_r(NULL, ",", &save_ptr);
     }
   }
 
@@ -565,7 +574,13 @@ bool vmIntrinsics::is_disabled_by_flags(vmIntrinsics::ID id) {
   case vmIntrinsics::_intBitsToFloat:
   case vmIntrinsics::_doubleToRawLongBits:
   case vmIntrinsics::_longBitsToDouble:
+  case vmIntrinsics::_ceil:
+  case vmIntrinsics::_floor:
+  case vmIntrinsics::_rint:
   case vmIntrinsics::_dabs:
+  case vmIntrinsics::_fabs:
+  case vmIntrinsics::_iabs:
+  case vmIntrinsics::_labs:
   case vmIntrinsics::_dsqrt:
   case vmIntrinsics::_dsin:
   case vmIntrinsics::_dcos:
@@ -579,6 +594,10 @@ bool vmIntrinsics::is_disabled_by_flags(vmIntrinsics::ID id) {
   case vmIntrinsics::_max:
   case vmIntrinsics::_floatToIntBits:
   case vmIntrinsics::_doubleToLongBits:
+  case vmIntrinsics::_maxF:
+  case vmIntrinsics::_minF:
+  case vmIntrinsics::_maxD:
+  case vmIntrinsics::_minD:
     if (!InlineMathNatives) return true;
     break;
   case vmIntrinsics::_fmaD:
@@ -721,6 +740,10 @@ bool vmIntrinsics::is_disabled_by_flags(vmIntrinsics::ID id) {
   case vmIntrinsics::_cipherBlockChaining_decryptAESCrypt:
     if (!UseAESIntrinsics) return true;
     break;
+  case vmIntrinsics::_electronicCodeBook_encryptAESCrypt:
+  case vmIntrinsics::_electronicCodeBook_decryptAESCrypt:
+    if (!UseAESIntrinsics) return true;
+    break;
   case vmIntrinsics::_counterMode_AESCrypt:
     if (!UseAESCTRIntrinsics) return true;
     break;
@@ -836,6 +859,14 @@ bool vmIntrinsics::is_disabled_by_flags(vmIntrinsics::ID id) {
   case vmIntrinsics::_isUpperCase:
   case vmIntrinsics::_isWhitespace:
     if (!UseCharacterCompareIntrinsics) return true;
+    break;
+  case vmIntrinsics::_dcopySign:
+  case vmIntrinsics::_fcopySign:
+    if (!InlineMathNatives || !UseCopySignIntrinsic) return true;
+    break;
+  case vmIntrinsics::_dsignum:
+  case vmIntrinsics::_fsignum:
+    if (!InlineMathNatives || !UseSignumIntrinsic) return true;
     break;
 #endif // COMPILER2
   default:

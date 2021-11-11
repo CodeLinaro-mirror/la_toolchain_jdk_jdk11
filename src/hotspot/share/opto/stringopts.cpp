@@ -539,6 +539,15 @@ StringConcat* PhaseStringOpts::build_candidate(CallStaticJavaNode* call) {
                 cnode->method()->signature()->as_symbol() == int_sig)) {
       sc->add_control(cnode);
       Node* arg = cnode->in(TypeFunc::Parms + 1);
+      if (arg == NULL || arg->is_top()) {
+#ifndef PRODUCT
+        if (PrintOptimizeStringConcat) {
+          tty->print("giving up because the call is effectively dead");
+          cnode->jvms()->dump_spec(tty); tty->cr();
+        }
+#endif
+        break;
+      }
       if (cnode->method()->signature()->as_symbol() == int_sig) {
         sc->push_int(arg);
       } else if (cnode->method()->signature()->as_symbol() == char_sig) {
@@ -1140,6 +1149,11 @@ Node* PhaseStringOpts::int_stringSize(GraphKit& kit, Node* arg) {
     int arg_val = arg->get_int();
     int count = 1;
     if (arg_val < 0) {
+      // Special case for min_jint - it can't be negated.
+      if (arg_val == min_jint) {
+        return __ intcon(11);
+      }
+
       arg_val = -arg_val;
       count++;
     }
@@ -1200,7 +1214,8 @@ Node* PhaseStringOpts::int_stringSize(GraphKit& kit, Node* arg) {
     //     return i+1;
 
     // Add loop predicate first.
-    kit.add_predicate();
+    kit.add_empty_predicates();
+    C->set_has_loops(true);
 
     RegionNode *loop = new RegionNode(3);
     loop->init_req(1, kit.control());
@@ -1276,8 +1291,9 @@ void PhaseStringOpts::getChars(GraphKit& kit, Node* arg, Node* dst_array, BasicT
   // }
 
   // Add loop predicate first.
-  kit.add_predicate();
+  kit.add_empty_predicates();
 
+  C->set_has_loops(true);
   RegionNode* head = new RegionNode(3);
   head->init_req(1, kit.control());
 
@@ -1300,7 +1316,8 @@ void PhaseStringOpts::getChars(GraphKit& kit, Node* arg, Node* dst_array, BasicT
   Node* index = __ SubI(charPos, __ intcon((bt == T_BYTE) ? 1 : 2));
   Node* ch = __ AddI(r, __ intcon('0'));
   Node* st = __ store_to_memory(kit.control(), kit.array_element_address(dst_array, index, T_BYTE),
-                                ch, bt, byte_adr_idx, MemNode::unordered, (bt != T_BYTE) /* mismatched */);
+                                ch, bt, byte_adr_idx, MemNode::unordered, false /* require_atomic_access */,
+                                false /* unaligned */, (bt != T_BYTE) /* mismatched */);
 
   iff = kit.create_and_map_if(head, __ Bool(__ CmpI(q, __ intcon(0)), BoolTest::ne),
                               PROB_FAIR, COUNT_UNKNOWN);
@@ -1338,7 +1355,8 @@ void PhaseStringOpts::getChars(GraphKit& kit, Node* arg, Node* dst_array, BasicT
   } else {
     Node* index = __ SubI(charPos, __ intcon((bt == T_BYTE) ? 1 : 2));
     st = __ store_to_memory(kit.control(), kit.array_element_address(dst_array, index, T_BYTE),
-                            sign, bt, byte_adr_idx, MemNode::unordered, (bt != T_BYTE) /* mismatched */);
+                            sign, bt, byte_adr_idx, MemNode::unordered, false /* require_atomic_access */,
+                            false /* unaligned */, (bt != T_BYTE) /* mismatched */);
 
     final_merge->init_req(merge_index + 1, kit.control());
     final_mem->init_req(merge_index + 1, st);
@@ -1531,7 +1549,8 @@ void PhaseStringOpts::copy_constant_string(GraphKit& kit, IdealKit& ideal, ciTyp
       } else {
         val = readChar(src_array, i++);
       }
-      __ store(__ ctrl(), adr, __ ConI(val), T_CHAR, byte_adr_idx, MemNode::unordered, true /* mismatched */);
+      __ store(__ ctrl(), adr, __ ConI(val), T_CHAR, byte_adr_idx, MemNode::unordered, false /* require_atomic_access */,
+               true /* mismatched */);
       index = __ AddI(index, __ ConI(2));
     }
     if (src_is_byte) {
@@ -1618,7 +1637,8 @@ Node* PhaseStringOpts::copy_char(GraphKit& kit, Node* val, Node* dst_array, Node
   }
   if (!dcon || !dbyte) {
     // Destination is UTF16. Store a char.
-    __ store(__ ctrl(), adr, val, T_CHAR, byte_adr_idx, MemNode::unordered, true /* mismatched */);
+    __ store(__ ctrl(), adr, val, T_CHAR, byte_adr_idx, MemNode::unordered, false /* require_atomic_access */,
+             true /* mismatched */);
     __ set(end, __ AddI(start, __ ConI(2)));
   }
   if (!dcon) {

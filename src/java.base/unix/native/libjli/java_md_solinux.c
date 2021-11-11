@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -188,6 +188,7 @@ ContainsLibJVM(const char *env) {
     char serverPattern[] = "lib/server";
     char *envpath;
     char *path;
+    char* save_ptr = NULL;
     jboolean clientPatternFound;
     jboolean serverPatternFound;
 
@@ -207,7 +208,7 @@ ContainsLibJVM(const char *env) {
      * we have a suspicious path component, check if it contains a libjvm.so
      */
     envpath = JLI_StringDup(env);
-    for (path = JLI_StrTok(envpath, ":"); path != NULL; path = JLI_StrTok(NULL, ":")) {
+    for (path = strtok_r(envpath, ":", &save_ptr); path != NULL; path = strtok_r(NULL, ":", &save_ptr)) {
         if (clientPatternFound && JLI_StrStr(path, clientPattern) != NULL) {
             if (JvmExists(path)) {
                 JLI_MemFree(envpath);
@@ -728,10 +729,17 @@ void SplashFreeLibrary() {
 }
 
 /*
- * Block current thread and continue execution in a new thread
+ * Signature adapter for pthread_create() or thr_create().
+ */
+static void* ThreadJavaMain(void* args) {
+    return (void*)(intptr_t)JavaMain(args);
+}
+
+/*
+ * Block current thread and continue execution in a new thread.
  */
 int
-ContinueInNewThread0(int (JNICALL *continuation)(void *), jlong stack_size, void * args) {
+CallJavaMainInNewThread(jlong stack_size, void* args) {
     int rslt;
 #ifndef __solaris__
     pthread_t tid;
@@ -740,35 +748,35 @@ ContinueInNewThread0(int (JNICALL *continuation)(void *), jlong stack_size, void
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
 
     if (stack_size > 0) {
-      pthread_attr_setstacksize(&attr, stack_size);
+        pthread_attr_setstacksize(&attr, stack_size);
     }
     pthread_attr_setguardsize(&attr, 0); // no pthread guard page on java threads
 
-    if (pthread_create(&tid, &attr, (void *(*)(void*))continuation, (void*)args) == 0) {
-      void * tmp;
-      pthread_join(tid, &tmp);
-      rslt = (int)(intptr_t)tmp;
+    if (pthread_create(&tid, &attr, ThreadJavaMain, args) == 0) {
+        void* tmp;
+        pthread_join(tid, &tmp);
+        rslt = (int)(intptr_t)tmp;
     } else {
-     /*
-      * Continue execution in current thread if for some reason (e.g. out of
-      * memory/LWP)  a new thread can't be created. This will likely fail
-      * later in continuation as JNI_CreateJavaVM needs to create quite a
-      * few new threads, anyway, just give it a try..
-      */
-      rslt = continuation(args);
+       /*
+        * Continue execution in current thread if for some reason (e.g. out of
+        * memory/LWP)  a new thread can't be created. This will likely fail
+        * later in JavaMain as JNI_CreateJavaVM needs to create quite a
+        * few new threads, anyway, just give it a try..
+        */
+        rslt = JavaMain(args);
     }
 
     pthread_attr_destroy(&attr);
 #else /* __solaris__ */
     thread_t tid;
     long flags = 0;
-    if (thr_create(NULL, stack_size, (void *(*)(void *))continuation, args, flags, &tid) == 0) {
-      void * tmp;
-      thr_join(tid, NULL, &tmp);
-      rslt = (int)(intptr_t)tmp;
+    if (thr_create(NULL, stack_size, ThreadJavaMain, args, flags, &tid) == 0) {
+        void* tmp;
+        thr_join(tid, NULL, &tmp);
+        rslt = (int)(intptr_t)tmp;
     } else {
-      /* See above. Continue in current thread if thr_create() failed */
-      rslt = continuation(args);
+        /* See above. Continue in current thread if thr_create() failed */
+        rslt = JavaMain(args);
     }
 #endif /* !__solaris__ */
     return rslt;
@@ -816,3 +824,24 @@ ProcessPlatformOption(const char *arg)
 {
     return JNI_FALSE;
 }
+
+#ifndef __solaris__
+
+/*
+ * Provide a CounterGet() implementation based on gettimeofday() which
+ * is universally available, even though it may not be 'high resolution'
+ * compared to platforms that provide gethrtime() (like Solaris). It is
+ * also subject to time-of-day changes, but alternatives may not be
+ * known to be available at either build time or run time.
+ */
+uint64_t CounterGet() {
+    uint64_t result = 0;
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != -1) {
+        result = 1000000LL * (uint64_t)tv.tv_sec;
+        result += (uint64_t)tv.tv_usec;
+    }
+    return result;
+}
+
+#endif // !__solaris__

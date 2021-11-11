@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -685,6 +685,7 @@ public:
     add_req(ctrl);
     add_req(memop);
   }
+  virtual int Opcode() const;
   virtual uint size_of() const { return sizeof(*this); }
 
   virtual void emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const;
@@ -977,6 +978,7 @@ class MachCallRuntimeNode : public MachCallNode {
   virtual uint size_of() const; // Size is bigger
 public:
   const char *_name;            // Printable name, if _method is NULL
+  bool _leaf_no_fp;             // Is this CallLeafNoFP?
   MachCallRuntimeNode() : MachCallNode() {
     init_class_id(Class_MachCallRuntime);
   }
@@ -997,7 +999,25 @@ public:
 // Machine-specific versions of halt nodes
 class MachHaltNode : public MachReturnNode {
 public:
+  bool _reachable;
+  const char* _halt_reason;
   virtual JVMState* jvms() const;
+  bool is_reachable() const {
+    return _reachable;
+  }
+};
+
+class MachMemBarNode : public MachNode {
+  virtual uint size_of() const; // Size is bigger
+public:
+  const TypePtr* _adr_type;     // memory effects
+  MachMemBarNode() : MachNode() {
+    init_class_id(Class_MachMemBar);
+    _adr_type = TypePtr::BOTTOM; // the default: all of memory
+  }
+
+  void set_adr_type(const TypePtr* atp) { _adr_type = atp; }
+  virtual const TypePtr *adr_type() const;
 };
 
 

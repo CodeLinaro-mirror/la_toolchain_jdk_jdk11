@@ -311,7 +311,6 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   nonstatic_field(Method,                      _vtable_index,                                 int)                                   \
   nonstatic_field(Method,                      _intrinsic_id,                                 u2)                                    \
   nonstatic_field(Method,                      _flags,                                        u2)                                    \
-  nonproduct_nonstatic_field(Method,           _compiled_invocation_count,                    int)                                   \
   volatile_nonstatic_field(Method,             _code,                                         CompiledMethod*)                       \
   nonstatic_field(Method,                      _i2i_entry,                                    address)                               \
   volatile_nonstatic_field(Method,             _from_compiled_entry,                          address)                               \
@@ -609,6 +608,8 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
      static_field(StubRoutines,                _aescrypt_decryptBlock,                        address)                               \
      static_field(StubRoutines,                _cipherBlockChaining_encryptAESCrypt,          address)                               \
      static_field(StubRoutines,                _cipherBlockChaining_decryptAESCrypt,          address)                               \
+     static_field(StubRoutines,                _electronicCodeBook_encryptAESCrypt,           address)                               \
+     static_field(StubRoutines,                _electronicCodeBook_decryptAESCrypt,           address)                               \
      static_field(StubRoutines,                _counterMode_AESCrypt,                         address)                               \
      static_field(StubRoutines,                _ghash_processBlocks,                          address)                               \
      static_field(StubRoutines,                _base64_encodeBlock,                           address)                               \
@@ -949,7 +950,7 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   c2_nonstatic_field(Node,                     _outcnt,                                       node_idx_t)                            \
   c2_nonstatic_field(Node,                     _outmax,                                       node_idx_t)                            \
   c2_nonstatic_field(Node,                     _idx,                                          const node_idx_t)                      \
-  c2_nonstatic_field(Node,                     _class_id,                                     jushort)                               \
+  c2_nonstatic_field(Node,                     _class_id,                                     juint)                                 \
   c2_nonstatic_field(Node,                     _flags,                                        jushort)                               \
                                                                                                                                      \
   c2_nonstatic_field(Compile,                  _root,                                         RootNode*)                             \
@@ -1118,11 +1119,11 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   /* FileMapInfo fields (CDS archive related) */                                                                                     \
   /********************************************/                                                                                     \
                                                                                                                                      \
-  CDS_ONLY(nonstatic_field(FileMapInfo,                            _header,                   FileMapInfo::FileMapHeader*))          \
-  CDS_ONLY(   static_field(FileMapInfo,                            _current_info,             FileMapInfo*))                         \
-  CDS_ONLY(nonstatic_field(FileMapInfo::FileMapHeader,             _space[0],                 FileMapInfo::FileMapHeader::space_info))\
-  CDS_ONLY(nonstatic_field(FileMapInfo::FileMapHeader::space_info, _addr._base,               char*))                                \
-  CDS_ONLY(nonstatic_field(FileMapInfo::FileMapHeader::space_info, _used,                     size_t))                               \
+  CDS_ONLY(nonstatic_field(FileMapInfo,        _header,                   FileMapHeader*))                                           \
+  CDS_ONLY(   static_field(FileMapInfo,        _current_info,             FileMapInfo*))                                             \
+  CDS_ONLY(nonstatic_field(FileMapHeader,      _space[0],                 CDSFileMapRegion))                                         \
+  CDS_ONLY(nonstatic_field(CDSFileMapRegion,   _addr._base,               char*))                                                    \
+  CDS_ONLY(nonstatic_field(CDSFileMapRegion,   _used,                     size_t))                                                   \
                                                                                                                                      \
   /******************/                                                                                                               \
   /* VMError fields */                                                                                                               \
@@ -1382,14 +1383,15 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
                                                                           \
   declare_toplevel_type(Threads)                                          \
   declare_toplevel_type(ThreadShadow)                                     \
-           declare_type(Thread, ThreadShadow)                             \
-           declare_type(NamedThread, Thread)                              \
-           declare_type(WatcherThread, Thread)                            \
-           declare_type(JavaThread, Thread)                               \
-           declare_type(JvmtiAgentThread, JavaThread)                     \
-           declare_type(ServiceThread, JavaThread)                        \
-  declare_type(CompilerThread, JavaThread)                                \
-  declare_type(CodeCacheSweeperThread, JavaThread)                        \
+    declare_type(Thread, ThreadShadow)                                    \
+      declare_type(NonJavaThread, Thread)                                 \
+        declare_type(NamedThread, NonJavaThread)                          \
+        declare_type(WatcherThread, NonJavaThread)                        \
+      declare_type(JavaThread, Thread)                                    \
+        declare_type(JvmtiAgentThread, JavaThread)                        \
+        declare_type(ServiceThread, JavaThread)                           \
+        declare_type(CompilerThread, JavaThread)                          \
+        declare_type(CodeCacheSweeperThread, JavaThread)                  \
   declare_toplevel_type(OSThread)                                         \
   declare_toplevel_type(JavaFrameAnchor)                                  \
                                                                           \
@@ -1441,6 +1443,7 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_type(BufferBlob,               RuntimeBlob)                     \
   declare_type(AdapterBlob,              BufferBlob)                      \
   declare_type(MethodHandlesAdapterBlob, BufferBlob)                      \
+  declare_type(VtableBlob,               BufferBlob)                      \
   declare_type(CompiledMethod,           CodeBlob)                        \
   declare_type(nmethod,                  CompiledMethod)                  \
   declare_type(RuntimeStub,              RuntimeBlob)                     \
@@ -1548,6 +1551,10 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_c2_type(MaxNode, AddNode)                                       \
   declare_c2_type(MaxINode, MaxNode)                                      \
   declare_c2_type(MinINode, MaxNode)                                      \
+  declare_c2_type(MaxFNode, MaxNode)                                      \
+  declare_c2_type(MinFNode, MaxNode)                                      \
+  declare_c2_type(MaxDNode, MaxNode)                                      \
+  declare_c2_type(MinDNode, MaxNode)                                      \
   declare_c2_type(StartNode, MultiNode)                                   \
   declare_c2_type(StartOSRNode, StartNode)                                \
   declare_c2_type(ParmNode, ProjNode)                                     \
@@ -1787,6 +1794,10 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_c2_type(ReverseBytesLNode, Node)                                \
   declare_c2_type(ReductionNode, Node)                                    \
   declare_c2_type(VectorNode, Node)                                       \
+  declare_c2_type(AbsVBNode, VectorNode)                                   \
+  declare_c2_type(AbsVSNode, VectorNode)                                   \
+  declare_c2_type(AbsVINode, VectorNode)                                   \
+  declare_c2_type(AbsVLNode, VectorNode)                                   \
   declare_c2_type(AddVBNode, VectorNode)                                  \
   declare_c2_type(AddVSNode, VectorNode)                                  \
   declare_c2_type(AddVINode, VectorNode)                                  \
@@ -1803,6 +1814,7 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_c2_type(SubVLNode, VectorNode)                                  \
   declare_c2_type(SubVFNode, VectorNode)                                  \
   declare_c2_type(SubVDNode, VectorNode)                                  \
+  declare_c2_type(MulVBNode, VectorNode)                                  \
   declare_c2_type(MulVSNode, VectorNode)                                  \
   declare_c2_type(MulVLNode, VectorNode)                                  \
   declare_c2_type(MulReductionVLNode, ReductionNode)                      \
@@ -1811,6 +1823,8 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_c2_type(MulVFNode, VectorNode)                                  \
   declare_c2_type(MulReductionVFNode, ReductionNode)                      \
   declare_c2_type(MulVDNode, VectorNode)                                  \
+  declare_c2_type(NegVFNode, VectorNode)                                  \
+  declare_c2_type(NegVDNode, VectorNode)                                  \
   declare_c2_type(FmaVDNode, VectorNode)                                  \
   declare_c2_type(FmaVFNode, VectorNode)                                  \
   declare_c2_type(CMoveVFNode, VectorNode)                                \
@@ -1834,6 +1848,10 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_c2_type(AndVNode, VectorNode)                                   \
   declare_c2_type(OrVNode, VectorNode)                                    \
   declare_c2_type(XorVNode, VectorNode)                                   \
+  declare_c2_type(MaxVNode, VectorNode)                                   \
+  declare_c2_type(MinVNode, VectorNode)                                   \
+  declare_c2_type(MaxReductionVNode, ReductionNode)                       \
+  declare_c2_type(MinReductionVNode, ReductionNode)                       \
   declare_c2_type(LoadVectorNode, LoadNode)                               \
   declare_c2_type(StoreVectorNode, StoreNode)                             \
   declare_c2_type(ReplicateBNode, VectorNode)                             \
@@ -1871,6 +1889,10 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_c2_type(OverflowMulLNode, OverflowLNode)                        \
   declare_c2_type(FmaDNode, Node)                                         \
   declare_c2_type(FmaFNode, Node)                                         \
+  declare_c2_type(CopySignDNode, Node)                                    \
+  declare_c2_type(CopySignFNode, Node)                                    \
+  declare_c2_type(SignumDNode, Node)                                      \
+  declare_c2_type(SignumFNode, Node)                                      \
                                                                           \
   /*********************/                                                 \
   /* Adapter Blob Entries */                                              \
@@ -1960,8 +1982,8 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
    declare_integer_type(AccessFlags)  /* FIXME: wrong type (not integer) */\
   declare_toplevel_type(address)      /* FIXME: should this be an integer type? */\
    declare_integer_type(BasicType)   /* FIXME: wrong type (not integer) */\
-  declare_toplevel_type(BreakpointInfo)                                   \
-  declare_toplevel_type(BreakpointInfo*)                                  \
+  JVMTI_ONLY(declare_toplevel_type(BreakpointInfo))                       \
+  JVMTI_ONLY(declare_toplevel_type(BreakpointInfo*))                      \
   declare_toplevel_type(CodeBlob*)                                        \
   declare_toplevel_type(RuntimeBlob*)                                     \
   declare_toplevel_type(CompressedWriteStream*)                           \
@@ -2005,9 +2027,8 @@ typedef PaddedEnd<ObjectMonitor>              PaddedObjectMonitor;
   declare_toplevel_type(Annotations*)                                     \
   declare_type(OopMapValue, StackObj)                                     \
   declare_type(FileMapInfo, CHeapObj<mtInternal>)                         \
-  declare_type(FileMapInfo::FileMapHeaderBase, CHeapObj<mtClass>)         \
-  declare_type(FileMapInfo::FileMapHeader, FileMapInfo::FileMapHeaderBase)\
-  declare_toplevel_type(FileMapInfo::FileMapHeader::space_info)           \
+  declare_toplevel_type(FileMapHeader)                                    \
+  declare_toplevel_type(CDSFileMapRegion)                                 \
                                                                           \
   /************/                                                          \
   /* GC types */                                                          \

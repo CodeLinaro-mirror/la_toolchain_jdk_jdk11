@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2008, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -388,6 +388,51 @@ Java_sun_nio_fs_UnixNativeDispatcher_fclose(JNIEnv* env, jclass this, jlong stre
     if (fclose(fp) == EOF && errno != EINTR) {
         throwUnixException(env, errno);
     }
+}
+
+JNIEXPORT void JNICALL
+Java_sun_nio_fs_UnixNativeDispatcher_rewind(JNIEnv* env, jclass this, jlong stream)
+{
+    FILE* fp = jlong_to_ptr(stream);
+    int saved_errno;
+
+    errno = 0;
+    rewind(fp);
+    saved_errno = errno;
+    if (ferror(fp)) {
+        throwUnixException(env, saved_errno);
+    }
+}
+
+/**
+ * This function returns line length without NUL terminator or -1 on EOF.
+ */
+JNIEXPORT jint JNICALL
+Java_sun_nio_fs_UnixNativeDispatcher_getlinelen(JNIEnv* env, jclass this, jlong stream)
+{
+    FILE* fp = jlong_to_ptr(stream);
+    size_t lineSize = 0;
+    char * lineBuffer = NULL;
+    int saved_errno;
+
+    ssize_t res = getline(&lineBuffer, &lineSize, fp);
+    saved_errno = errno;
+
+    /* Should free lineBuffer no matter result, according to man page */
+    if (lineBuffer != NULL)
+        free(lineBuffer);
+
+    if (feof(fp))
+        return -1;
+
+    /* On successfull return res >= 0, otherwise res is -1 */
+    if (res == -1)
+        throwUnixException(env, saved_errno);
+
+    if (res > INT_MAX)
+        throwUnixException(env, EOVERFLOW);
+
+    return (jint)res;
 }
 
 JNIEXPORT jint JNICALL
@@ -1132,8 +1177,11 @@ Java_sun_nio_fs_UnixNativeDispatcher_getpwnam0(JNIEnv* env, jclass this,
 
         if (res != 0 || p == NULL || p->pw_name == NULL || *(p->pw_name) == '\0') {
             /* not found or error */
-            if (errno != 0 && errno != ENOENT && errno != ESRCH)
+            if (errno != 0 && errno != ENOENT && errno != ESRCH &&
+                errno != EBADF && errno != EPERM)
+            {
                 throwUnixException(env, errno);
+            }
         } else {
             uid = p->pw_uid;
         }
@@ -1174,7 +1222,9 @@ Java_sun_nio_fs_UnixNativeDispatcher_getgrnam0(JNIEnv* env, jclass this,
         retry = 0;
         if (res != 0 || g == NULL || g->gr_name == NULL || *(g->gr_name) == '\0') {
             /* not found or error */
-            if (errno != 0 && errno != ENOENT && errno != ESRCH) {
+            if (errno != 0 && errno != ENOENT && errno != ESRCH &&
+                errno != EBADF && errno != EPERM)
+            {
                 if (errno == ERANGE) {
                     /* insufficient buffer size so need larger buffer */
                     buflen += ENT_BUF_SIZE;

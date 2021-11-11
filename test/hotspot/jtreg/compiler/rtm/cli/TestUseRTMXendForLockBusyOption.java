@@ -28,8 +28,8 @@
  * @library /test/lib /
  * @modules java.base/jdk.internal.misc
  *          java.management
- *
- * @run main/othervm compiler.rtm.cli.TestUseRTMXendForLockBusyOption
+ * @requires vm.rtm.compiler
+ * @run driver compiler.rtm.cli.TestUseRTMXendForLockBusyOption
  */
 
 package compiler.rtm.cli;

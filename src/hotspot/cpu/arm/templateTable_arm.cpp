@@ -527,19 +527,20 @@ void TemplateTable::ldc2_w() {
 
   __ add(Rbase, Rcpool, AsmOperand(Rindex, lsl, LogBytesPerWord));
 
-  Label Condy, exit;
-#ifdef __ABI_HARD__
-  Label Long;
   // get type from tags
   __ add(Rtemp, Rtags, tags_offset);
   __ ldrb(Rtemp, Address(Rtemp, Rindex));
+
+  Label Condy, exit;
+#ifdef __ABI_HARD__
+  Label NotDouble;
   __ cmp(Rtemp, JVM_CONSTANT_Double);
-  __ b(Long, ne);
+  __ b(NotDouble, ne);
   __ ldr_double(D0_tos, Address(Rbase, base_offset));
 
   __ push(dtos);
   __ b(exit);
-  __ bind(Long);
+  __ bind(NotDouble);
 #endif
 
   __ cmp(Rtemp, JVM_CONSTANT_Long);
@@ -2373,7 +2374,7 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
       const Address mask(Rcounters, in_bytes(MethodCounters::backedge_mask_offset()));
       __ increment_mask_and_jump(Address(Rcounters, be_offset), increment, mask,
                                  Rcnt, R4_tmp, eq, &backedge_counter_overflow);
-    } else {
+    } else { // not TieredCompilation
       // Increment backedge counter in MethodCounters*
       __ get_method_counters(Rmethod, Rcounters, dispatch, true /*saveRegs*/,
                              Rdisp, R3_bytecode,
@@ -2446,7 +2447,7 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
   __ dispatch_only(vtos);
 
   if (UseLoopCounter) {
-    if (ProfileInterpreter) {
+    if (ProfileInterpreter && !TieredCompilation) {
       // Out-of-line code to allocate method data oop.
       __ bind(profile_method);
 

@@ -91,6 +91,7 @@ class JvmtiExport : public AllStatic {
   JVMTI_SUPPORT_FLAG(can_force_early_return)
 
   JVMTI_SUPPORT_FLAG(early_vmstart_recorded)
+  JVMTI_SUPPORT_FLAG(can_get_owned_monitor_info) // includes can_get_owned_monitor_stack_depth_info
 
   friend class JvmtiEventControllerPrivate;  // should only modify these flags
   JVMTI_SUPPORT_FLAG(should_post_single_step)
@@ -159,15 +160,13 @@ class JvmtiExport : public AllStatic {
   // internal implementation.  Also called from JvmtiDeferredEvent::post()
   static void post_dynamic_code_generated_internal(const char *name, const void *code_begin, const void *code_end) NOT_JVMTI_RETURN;
 
+  static void post_class_unload_internal(const char *name) NOT_JVMTI_RETURN;
  private:
 
   // GenerateEvents support to allow posting of CompiledMethodLoad and
   // DynamicCodeGenerated events for a given environment.
   friend class JvmtiCodeBlobEvents;
 
-  static void post_compiled_method_load(JvmtiEnv* env, const jmethodID method, const jint length,
-                                        const void *code_begin, const jint map_length,
-                                        const jvmtiAddrLocationMap* map) NOT_JVMTI_RETURN;
   static void post_dynamic_code_generated(JvmtiEnv* env, const char *name, const void *code_begin,
                                           const void *code_end) NOT_JVMTI_RETURN;
 
@@ -187,6 +186,13 @@ class JvmtiExport : public AllStatic {
   // are incomplete. This flag is used by RedefineClasses to know if the
   // dependency information is complete or not.
   static bool _all_dependencies_are_recorded;
+
+  static void post_method_exit_inner(JavaThread* thread,
+                                     methodHandle& mh,
+                                     JvmtiThreadState *state,
+                                     bool exception_exit,
+                                     frame current_frame,
+                                     jvalue& value);
 
  public:
   inline static bool has_redefined_a_class() {
@@ -328,12 +334,15 @@ class JvmtiExport : public AllStatic {
     JVMTI_ONLY(return _should_post_class_file_load_hook);
     NOT_JVMTI(return false;)
   }
+  static bool is_early_phase() NOT_JVMTI_RETURN_(false);
+  static bool has_early_class_hook_env() NOT_JVMTI_RETURN_(false);
   // Return true if the class was modified by the hook.
   static bool post_class_file_load_hook(Symbol* h_name, Handle class_loader,
                                         Handle h_protection_domain,
                                         unsigned char **data_ptr, unsigned char **end_ptr,
                                         JvmtiCachedClassFileData **cache_ptr) NOT_JVMTI_RETURN_(false);
   static void post_native_method_bind(Method* method, address* function_ptr) NOT_JVMTI_RETURN;
+  static void post_compiled_method_load(JvmtiEnv* env, nmethod *nm) NOT_JVMTI_RETURN;
   static void post_compiled_method_load(nmethod *nm) NOT_JVMTI_RETURN;
   static void post_dynamic_code_generated(const char *name, const void *code_begin, const void *code_end) NOT_JVMTI_RETURN;
 
@@ -420,7 +429,7 @@ class JvmtiCodeBlobDesc : public CHeapObj<mtInternal> {
  public:
   JvmtiCodeBlobDesc(const char *name, address code_begin, address code_end) {
     assert(name != NULL, "all code blobs must be named");
-    strncpy(_name, name, sizeof(_name));
+    strncpy(_name, name, sizeof(_name) - 1);
     _name[sizeof(_name)-1] = '\0';
     _code_begin = code_begin;
     _code_end = code_end;

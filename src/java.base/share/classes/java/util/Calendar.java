@@ -2205,7 +2205,8 @@ public abstract class Calendar implements Serializable, Cloneable, Comparable<Ca
         }
 
         String calendarType = getCalendarType();
-        if (style == ALL_STYLES || isStandaloneStyle(style) || isNarrowFormatStyle(style)) {
+        if (style == ALL_STYLES || isStandaloneStyle(style) || isNarrowFormatStyle(style) ||
+            field == ERA && (style & SHORT) == SHORT) {
             Map<String, Integer> map;
             map = CalendarDataUtility.retrieveFieldValueNames(calendarType, field, style, locale);
 
@@ -2232,7 +2233,7 @@ public abstract class Calendar implements Serializable, Cloneable, Comparable<Ca
         if (strings != null) {
             Map<String,Integer> names = new HashMap<>();
             for (int i = 0; i < strings.length; i++) {
-                if (strings[i].length() == 0) {
+                if (strings[i].isEmpty()) {
                     continue;
                 }
                 names.put(strings[i], i);
@@ -2724,7 +2725,9 @@ public abstract class Calendar implements Serializable, Cloneable, Comparable<Ca
                 lenient == that.lenient &&
                 firstDayOfWeek == that.firstDayOfWeek &&
                 minimalDaysInFirstWeek == that.minimalDaysInFirstWeek &&
-                zone.equals(that.zone);
+                (zone instanceof ZoneInfo ?
+                    zone.equals(that.zone) :
+                    zone.equals(that.getTimeZone()));
         } catch (Exception e) {
             // Note: GregorianCalendar.computeTime throws
             // IllegalArgumentException if the ERA value is invalid

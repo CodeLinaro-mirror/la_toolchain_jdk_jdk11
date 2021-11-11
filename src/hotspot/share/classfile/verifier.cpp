@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -122,8 +122,15 @@ void Verifier::trace_class_resolution(Klass* resolve_class, InstanceKlass* verif
 void Verifier::log_end_verification(outputStream* st, const char* klassName, Symbol* exception_name, TRAPS) {
   if (HAS_PENDING_EXCEPTION) {
     st->print("Verification for %s has", klassName);
-    st->print_cr(" exception pending %s ",
+    oop message = java_lang_Throwable::message(PENDING_EXCEPTION);
+    if (message != NULL) {
+      char* ex_msg = java_lang_String::as_utf8_string(message);
+      st->print_cr(" exception pending '%s %s'",
+                 PENDING_EXCEPTION->klass()->external_name(), ex_msg);
+    } else {
+      st->print_cr(" exception pending %s ",
                  PENDING_EXCEPTION->klass()->external_name());
+    }
   } else if (exception_name != NULL) {
     st->print_cr("Verification for %s failed", klassName);
   }
@@ -2237,6 +2244,7 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
   // Get field name and signature
   Symbol* field_name = cp->name_ref_at(index);
   Symbol* field_sig = cp->signature_ref_at(index);
+  bool is_getfield = false;
 
   if (!SignatureVerifier::is_valid_type_signature(field_sig)) {
     class_format_error(
@@ -2287,11 +2295,9 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
       break;
     }
     case Bytecodes::_getfield: {
+      is_getfield = true;
       stack_object_type = current_frame->pop_stack(
         target_class_type, CHECK_VERIFY(this));
-      for (int i = 0; i < n; i++) {
-        current_frame->push_stack(field_type[i], CHECK_VERIFY(this));
-      }
       goto check_protected;
     }
     case Bytecodes::_putfield: {
@@ -2321,7 +2327,15 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
     check_protected: {
       if (_this_type == stack_object_type)
         break; // stack_object_type must be assignable to _current_class_type
-      if (was_recursively_verified()) return;
+      if (was_recursively_verified()) {
+        if (is_getfield) {
+          // Push field type for getfield.
+          for (int i = 0; i < n; i++) {
+            current_frame->push_stack(field_type[i], CHECK_VERIFY(this));
+          }
+        }
+        return;
+      }
       Symbol* ref_class_name =
         cp->klass_name_at(cp->klass_ref_index_at(index));
       if (!name_in_supers(ref_class_name, current_class()))
@@ -2349,6 +2363,12 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
       break;
     }
     default: ShouldNotReachHere();
+  }
+  if (is_getfield) {
+    // Push field type for getfield after doing protection check.
+    for (int i = 0; i < n; i++) {
+      current_frame->push_stack(field_type[i], CHECK_VERIFY(this));
+    }
   }
 }
 
@@ -2984,18 +3004,16 @@ void ClassVerifier::verify_anewarray(
     }
     // add one dimension to component
     length++;
-    arr_sig_str = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, length);
-    arr_sig_str[0] = '[';
-    strncpy(&arr_sig_str[1], component_name, length - 1);
+    arr_sig_str = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, length + 1);
+    int n = os::snprintf(arr_sig_str, length + 1, "[%s", component_name);
+    assert(n == length, "Unexpected number of characters in string");
   } else {         // it's an object or interface
     const char* component_name = component_type.name()->as_utf8();
     // add one dimension to component with 'L' prepended and ';' postpended.
     length = (int)strlen(component_name) + 3;
-    arr_sig_str = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, length);
-    arr_sig_str[0] = '[';
-    arr_sig_str[1] = 'L';
-    strncpy(&arr_sig_str[2], component_name, length - 2);
-    arr_sig_str[length - 1] = ';';
+    arr_sig_str = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, length + 1);
+    int n = os::snprintf(arr_sig_str, length + 1, "[L%s;", component_name);
+    assert(n == length, "Unexpected number of characters in string");
   }
   Symbol* arr_sig = create_temporary_symbol(
     arr_sig_str, length, CHECK_VERIFY(this));

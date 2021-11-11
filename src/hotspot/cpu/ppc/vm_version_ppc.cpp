@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2018, SAP SE. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,12 +32,15 @@
 #include "runtime/java.hpp"
 #include "runtime/os.hpp"
 #include "runtime/stubCodeGenerator.hpp"
+#include "runtime/vm_version.hpp"
 #include "utilities/align.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/globalDefinitions.hpp"
-#include "vm_version_ppc.hpp"
 
 #include <sys/sysinfo.h>
+#if defined(_AIX)
+#include <libperfstat.h>
+#endif
 
 #if defined(LINUX) && defined(VM_LITTLE_ENDIAN)
 #include <sys/auxv.h>
@@ -63,7 +66,9 @@ void VM_Version::initialize() {
 
   // If PowerArchitecturePPC64 hasn't been specified explicitly determine from features.
   if (FLAG_IS_DEFAULT(PowerArchitecturePPC64)) {
-    if (VM_Version::has_darn()) {
+    if (VM_Version::has_brw()) {
+      FLAG_SET_ERGO(uintx, PowerArchitecturePPC64, 10);
+    } else if (VM_Version::has_darn()) {
       FLAG_SET_ERGO(uintx, PowerArchitecturePPC64, 9);
     } else if (VM_Version::has_lqarx()) {
       FLAG_SET_ERGO(uintx, PowerArchitecturePPC64, 8);
@@ -80,12 +85,13 @@ void VM_Version::initialize() {
 
   bool PowerArchitecturePPC64_ok = false;
   switch (PowerArchitecturePPC64) {
-    case 9: if (!VM_Version::has_darn()   ) break;
-    case 8: if (!VM_Version::has_lqarx()  ) break;
-    case 7: if (!VM_Version::has_popcntw()) break;
-    case 6: if (!VM_Version::has_cmpb()   ) break;
-    case 5: if (!VM_Version::has_popcntb()) break;
-    case 0: PowerArchitecturePPC64_ok = true; break;
+    case 10: if (!VM_Version::has_brw()    ) break;
+    case  9: if (!VM_Version::has_darn()   ) break;
+    case  8: if (!VM_Version::has_lqarx()  ) break;
+    case  7: if (!VM_Version::has_popcntw()) break;
+    case  6: if (!VM_Version::has_cmpb()   ) break;
+    case  5: if (!VM_Version::has_popcntb()) break;
+    case  0: PowerArchitecturePPC64_ok = true; break;
     default: break;
   }
   guarantee(PowerArchitecturePPC64_ok, "PowerArchitecturePPC64 cannot be set to "
@@ -147,12 +153,23 @@ void VM_Version::initialize() {
       FLAG_SET_DEFAULT(UseCharacterCompareIntrinsics, false);
     }
   }
+
+  if (PowerArchitecturePPC64 >= 10) {
+    if (FLAG_IS_DEFAULT(UseByteReverseInstructions)) {
+      FLAG_SET_ERGO(bool, UseByteReverseInstructions, true);
+    }
+  } else {
+    if (UseByteReverseInstructions) {
+      warning("UseByteReverseInstructions specified, but needs at least Power10.");
+      FLAG_SET_DEFAULT(UseByteReverseInstructions, false);
+    }
+  }
 #endif
 
   // Create and print feature-string.
   char buf[(num_features+1) * 16]; // Max 16 chars per feature.
   jio_snprintf(buf, sizeof(buf),
-               "ppc64%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+               "ppc64%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
                (has_fsqrt()   ? " fsqrt"   : ""),
                (has_isel()    ? " isel"    : ""),
                (has_lxarxeh() ? " lxarxeh" : ""),
@@ -170,7 +187,8 @@ void VM_Version::initialize() {
                (has_stdbrx()  ? " stdbrx"  : ""),
                (has_vshasig() ? " sha"     : ""),
                (has_tm()      ? " rtm"     : ""),
-               (has_darn()    ? " darn"    : "")
+               (has_darn()    ? " darn"    : ""),
+               (has_brw()     ? " brw"     : "")
                // Make sure number of %s matches num_features!
               );
   _features_string = os::strdup(buf);
@@ -214,6 +232,10 @@ void VM_Version::initialize() {
   }
 
   assert(AllocatePrefetchStyle >= 0, "AllocatePrefetchStyle should be positive");
+
+  if (FLAG_IS_DEFAULT(ContendedPaddingWidth) && (cache_line_size > ContendedPaddingWidth)) {
+    ContendedPaddingWidth = cache_line_size;
+  }
 
   // If running on Power8 or newer hardware, the implementation uses the available vector instructions.
   // In all other cases, the implementation uses only generally available instructions.
@@ -309,6 +331,7 @@ void VM_Version::initialize() {
     FLAG_SET_DEFAULT(UseSHA, false);
   }
 
+#ifdef COMPILER2
   if (FLAG_IS_DEFAULT(UseSquareToLenIntrinsic)) {
     UseSquareToLenIntrinsic = true;
   }
@@ -324,6 +347,7 @@ void VM_Version::initialize() {
   if (FLAG_IS_DEFAULT(UseMontgomerySquareIntrinsic)) {
     UseMontgomerySquareIntrinsic = true;
   }
+#endif
 
   if (UseVectorizedMismatchIntrinsic) {
     warning("UseVectorizedMismatchIntrinsic specified, but not available on this CPU.");
@@ -370,15 +394,135 @@ void VM_Version::initialize() {
     if (UseRTMDeopt) {
       FLAG_SET_DEFAULT(UseRTMDeopt, false);
     }
+#ifdef COMPILER2
     if (PrintPreciseRTMLockingStatistics) {
       FLAG_SET_DEFAULT(PrintPreciseRTMLockingStatistics, false);
     }
+#endif
   }
 
   // This machine allows unaligned memory accesses
   if (FLAG_IS_DEFAULT(UseUnalignedAccesses)) {
     FLAG_SET_DEFAULT(UseUnalignedAccesses, true);
   }
+
+  check_virtualizations();
+}
+
+void VM_Version::check_virtualizations() {
+#if defined(_AIX)
+  int rc = 0;
+  perfstat_partition_total_t pinfo;
+  rc = perfstat_partition_total(NULL, &pinfo, sizeof(perfstat_partition_total_t), 1);
+  if (rc == 1) {
+    Abstract_VM_Version::_detected_virtualization = PowerVM;
+  }
+#else
+  const char* info_file = "/proc/ppc64/lparcfg";
+  // system_type=...qemu indicates PowerKVM
+  // e.g. system_type=IBM pSeries (emulated by qemu)
+  char line[500];
+  FILE* fp = fopen(info_file, "r");
+  if (fp == NULL) {
+    return;
+  }
+  const char* system_type="system_type=";  // in case this line contains qemu, it is KVM
+  const char* num_lpars="NumLpars="; // in case of non-KVM : if this line is found it is PowerVM
+  bool num_lpars_found = false;
+
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    if (strncmp(line, system_type, strlen(system_type)) == 0) {
+      if (strstr(line, "qemu") != 0) {
+        Abstract_VM_Version::_detected_virtualization = PowerKVM;
+        fclose(fp);
+        return;
+      }
+    }
+    if (strncmp(line, num_lpars, strlen(num_lpars)) == 0) {
+      num_lpars_found = true;
+    }
+  }
+  if (num_lpars_found) {
+    Abstract_VM_Version::_detected_virtualization = PowerVM;
+  } else {
+    Abstract_VM_Version::_detected_virtualization = PowerFullPartitionMode;
+  }
+  fclose(fp);
+#endif
+}
+
+void VM_Version::print_platform_virtualization_info(outputStream* st) {
+#if defined(_AIX)
+  // more info about perfstat API see
+  // https://www.ibm.com/support/knowledgecenter/en/ssw_aix_72/com.ibm.aix.prftools/idprftools_perfstat_glob_partition.htm
+  int rc = 0;
+  perfstat_partition_total_t pinfo;
+  memset(&pinfo, 0, sizeof(perfstat_partition_total_t));
+  rc = perfstat_partition_total(NULL, &pinfo, sizeof(perfstat_partition_total_t), 1);
+  if (rc != 1) {
+    return;
+  } else {
+    st->print_cr("Virtualization type   : PowerVM");
+  }
+  // CPU information
+  perfstat_cpu_total_t cpuinfo;
+  memset(&cpuinfo, 0, sizeof(perfstat_cpu_total_t));
+  rc = perfstat_cpu_total(NULL, &cpuinfo, sizeof(perfstat_cpu_total_t), 1);
+  if (rc != 1) {
+    return;
+  }
+
+  st->print_cr("Processor description : %s", cpuinfo.description);
+  st->print_cr("Processor speed       : %llu Hz", cpuinfo.processorHZ);
+
+  st->print_cr("LPAR partition name           : %s", pinfo.name);
+  st->print_cr("LPAR partition number         : %u", pinfo.lpar_id);
+  st->print_cr("LPAR partition type           : %s", pinfo.type.b.shared_enabled ? "shared" : "dedicated");
+  st->print_cr("LPAR mode                     : %s", pinfo.type.b.donate_enabled ? "donating" : pinfo.type.b.capped ? "capped" : "uncapped");
+  st->print_cr("LPAR partition group ID       : %u", pinfo.group_id);
+  st->print_cr("LPAR shared pool ID           : %u", pinfo.pool_id);
+
+  st->print_cr("AMS (active memory sharing)   : %s", pinfo.type.b.ams_capable ? "capable" : "not capable");
+  st->print_cr("AMS (active memory sharing)   : %s", pinfo.type.b.ams_enabled ? "on" : "off");
+  st->print_cr("AME (active memory expansion) : %s", pinfo.type.b.ame_enabled ? "on" : "off");
+
+  if (pinfo.type.b.ame_enabled) {
+    st->print_cr("AME true memory in bytes      : %llu", pinfo.true_memory);
+    st->print_cr("AME expanded memory in bytes  : %llu", pinfo.expanded_memory);
+  }
+
+  st->print_cr("SMT : %s", pinfo.type.b.smt_capable ? "capable" : "not capable");
+  st->print_cr("SMT : %s", pinfo.type.b.smt_enabled ? "on" : "off");
+  int ocpus = pinfo.online_cpus > 0 ?  pinfo.online_cpus : 1;
+  st->print_cr("LPAR threads              : %d", cpuinfo.ncpus/ocpus);
+  st->print_cr("LPAR online virtual cpus  : %d", pinfo.online_cpus);
+  st->print_cr("LPAR logical cpus         : %d", cpuinfo.ncpus);
+  st->print_cr("LPAR maximum virtual cpus : %u", pinfo.max_cpus);
+  st->print_cr("LPAR minimum virtual cpus : %u", pinfo.min_cpus);
+  st->print_cr("LPAR entitled capacity    : %4.2f", (double) (pinfo.entitled_proc_capacity/100.0));
+  st->print_cr("LPAR online memory        : %llu MB", pinfo.online_memory);
+  st->print_cr("LPAR maximum memory       : %llu MB", pinfo.max_memory);
+  st->print_cr("LPAR minimum memory       : %llu MB", pinfo.min_memory);
+#else
+  const char* info_file = "/proc/ppc64/lparcfg";
+  const char* kw[] = { "system_type=", // qemu indicates PowerKVM
+                       "partition_entitled_capacity=", // entitled processor capacity percentage
+                       "partition_max_entitled_capacity=",
+                       "capacity_weight=", // partition CPU weight
+                       "partition_active_processors=",
+                       "partition_potential_processors=",
+                       "entitled_proc_capacity_available=",
+                       "capped=", // 0 - uncapped, 1 - vcpus capped at entitled processor capacity percentage
+                       "shared_processor_mode=", // (non)dedicated partition
+                       "system_potential_processors=",
+                       "pool=", // CPU-pool number
+                       "pool_capacity=",
+                       "NumLpars=", // on non-KVM machines, NumLpars is not found for full partition mode machines
+                       NULL };
+  if (!print_matching_lines_from_file(info_file, st, kw)) {
+    st->print_cr("  <%s Not Available>", info_file);
+  }
+#endif
 }
 
 bool VM_Version::use_biased_locking() {
@@ -404,6 +548,13 @@ bool VM_Version::use_biased_locking() {
 
 void VM_Version::print_features() {
   tty->print_cr("Version: %s L1_data_cache_line_size=%d", features_string(), L1_data_cache_line_size());
+
+  if (Verbose) {
+    if (ContendedPaddingWidth > 0) {
+      tty->cr();
+      tty->print_cr("ContendedPaddingWidth " INTX_FORMAT, ContendedPaddingWidth);
+    }
+  }
 }
 
 #ifdef COMPILER2
@@ -686,6 +837,7 @@ void VM_Version::determine_features() {
   a->vshasigmaw(VR0, VR1, 1, 0xF);             // code[16] -> vshasig
   // rtm is determined by OS
   a->darn(R7);                                 // code[17] -> darn
+  a->brw(R5, R6);                              // code[18] -> brw
   a->blr();
 
   // Emit function to set one cache line to zero. Emit function descriptor and get pointer to it.
@@ -739,6 +891,7 @@ void VM_Version::determine_features() {
   if (code[feature_cntr++]) features |= vshasig_m;
   // feature rtm_m is determined by OS
   if (code[feature_cntr++]) features |= darn_m;
+  if (code[feature_cntr++]) features |= brw_m;
 
   // Print the detection code.
   if (PrintAssembly) {

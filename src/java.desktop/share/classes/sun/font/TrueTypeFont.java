@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -39,6 +39,9 @@ import java.nio.IntBuffer;
 import java.nio.ShortBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
+import java.security.AccessController;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -180,6 +183,15 @@ public class TrueTypeFont extends FileFont {
     private String localeFamilyName;
     private String localeFullName;
 
+    /*
+     * Used on Windows to validate the font selected by GDI for (sub-pixel
+     * antialiased) rendering. For 'standalone' fonts it's equal to the font
+     * file size, for collection (TTC, OTC) members it's the number of bytes in
+     * the collection file from the start of this font's offset table till the
+     * end of the file.
+     */
+    int fontDataSize;
+
     public TrueTypeFont(String platname, Object nativeNames, int fIndex,
                  boolean javaRasterizer)
         throws FontFormatException
@@ -312,15 +324,10 @@ public class TrueTypeFont extends FileFont {
                 FontUtilities.getLogger().info("open TTF: " + platName);
             }
             try {
-                RandomAccessFile raf = (RandomAccessFile)
-                java.security.AccessController.doPrivileged(
-                    new java.security.PrivilegedAction<Object>() {
-                        public Object run() {
-                            try {
-                                return new RandomAccessFile(platName, "r");
-                            } catch (FileNotFoundException ffne) {
-                            }
-                            return null;
+                RandomAccessFile raf = AccessController.doPrivileged(
+                    new PrivilegedExceptionAction<RandomAccessFile>() {
+                        public RandomAccessFile run() throws FileNotFoundException {
+                            return new RandomAccessFile(platName, "r");
                     }
                 });
                 disposerRecord.channel = raf.getChannel();
@@ -331,9 +338,13 @@ public class TrueTypeFont extends FileFont {
                         ((SunFontManager) fm).addToPool(this);
                     }
                 }
-            } catch (NullPointerException e) {
+            } catch (PrivilegedActionException e) {
                 close();
-                throw new FontFormatException(e.toString());
+                Throwable reason = e.getCause();
+                if (reason == null) {
+                    reason = e;
+                }
+                throw new FontFormatException(reason.toString());
             } catch (ClosedChannelException e) {
                 /* NIO I/O is interruptible, recurse to retry operation.
                  * The call to channel.size() above can throw this exception.
@@ -537,11 +548,13 @@ public class TrueTypeFont extends FileFont {
                 fontIndex = fIndex;
                 buffer = readBlock(TTCHEADERSIZE+4*fIndex, 4);
                 headerOffset = buffer.getInt();
+                fontDataSize = Math.max(0, fileSize - headerOffset);
                 break;
 
             case v1ttTag:
             case trueTag:
             case ottoTag:
+                fontDataSize = fileSize;
                 break;
 
             default:
@@ -567,8 +580,8 @@ public class TrueTypeFont extends FileFont {
                 tableDirectory[i] = table = new DirectoryEntry();
                 table.tag   =  ibuffer.get();
                 /* checksum */ ibuffer.get();
-                table.offset = ibuffer.get();
-                table.length = ibuffer.get();
+                table.offset = ibuffer.get() & 0x7FFFFFFF;
+                table.length = ibuffer.get() & 0x7FFFFFFF;
                 if (table.offset + table.length > fileSize) {
                     throw new FontFormatException("bad table, tag="+table.tag);
                 }
@@ -583,6 +596,10 @@ public class TrueTypeFont extends FileFont {
             if (getDirectoryEntry(hmtxTag) != null
                     && getDirectoryEntry(hheaTag) == null) {
                 throw new FontFormatException("missing hhea table");
+            }
+            ByteBuffer maxpTable = getTableBuffer(maxpTag);
+            if (maxpTable.getChar(4) == 0) {
+                throw new FontFormatException("zero glyphs");
             }
             initNames();
         } catch (Exception e) {
@@ -897,15 +914,6 @@ public class TrueTypeFont extends FileFont {
     }
 
     @Override
-    protected long getLayoutTableCache() {
-        try {
-          return getScaler().getLayoutTableCache();
-        } catch(FontScalerException fe) {
-            return 0L;
-        }
-    }
-
-    @Override
     protected byte[] getTableBytes(int tag) {
         ByteBuffer buffer = getTableBuffer(tag);
         if (buffer == null) {
@@ -1063,24 +1071,36 @@ public class TrueTypeFont extends FileFont {
 
     private void setStrikethroughMetrics(ByteBuffer os_2Table, int upem) {
         if (os_2Table == null || os_2Table.capacity() < 30 || upem < 0) {
-            stSize = .05f;
-            stPos = -.4f;
+            stSize = 0.05f;
+            stPos = -0.4f;
             return;
         }
         ShortBuffer sb = os_2Table.asShortBuffer();
         stSize = sb.get(13) / (float)upem;
         stPos = -sb.get(14) / (float)upem;
+        if (stSize < 0f) {
+            stSize = 0.05f;
+        }
+        if (Math.abs(stPos) > 2.0f) {
+            stPos = -0.4f;
+        }
     }
 
     private void setUnderlineMetrics(ByteBuffer postTable, int upem) {
         if (postTable == null || postTable.capacity() < 12 || upem < 0) {
-            ulSize = .05f;
-            ulPos = .1f;
+            ulSize = 0.05f;
+            ulPos = 0.1f;
             return;
         }
         ShortBuffer sb = postTable.asShortBuffer();
         ulSize = sb.get(5) / (float)upem;
         ulPos = -sb.get(4) / (float)upem;
+        if (ulSize < 0f) {
+            ulSize = 0.05f;
+        }
+        if (Math.abs(ulPos) > 2.0f) {
+            ulPos = 0.1f;
+        }
     }
 
     @Override

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -103,6 +103,7 @@ public class WhiteBox {
     return isClassAlive0(name.replace('.', '/'));
   }
   private native boolean isClassAlive0(String name);
+  public  native int getSymbolRefcount(String name);
 
   private native boolean isMonitorInflated0(Object obj);
   public         boolean isMonitorInflated(Object obj) {
@@ -214,6 +215,9 @@ public class WhiteBox {
   public native long NMTMallocWithPseudoStackAndType(long size, int index, int type);
   public native boolean NMTChangeTrackingLevel();
   public native int NMTGetHashSize();
+  public native long NMTNewArena(long initSize);
+  public native void NMTFreeArena(long arena);
+  public native void NMTArenaMalloc(long arena, long size);
 
   // Compiler
   public native int     matchesMethod(Executable method, String pattern);
@@ -325,6 +329,7 @@ public class WhiteBox {
     return enqueueInitializerForCompilation0(aClass, compLevel);
   }
   private native void    clearMethodState0(Executable method);
+  public  native void    markMethodProfiled(Executable method);
   public         void    clearMethodState(Executable method) {
     Objects.requireNonNull(method);
     clearMethodState0(method);
@@ -537,4 +542,7 @@ public class WhiteBox {
 
   // Decoder
   public native void disableElfSectionCache();
+
+  // Number of loaded AOT libraries
+  public native int aotLibrariesCount();
 }

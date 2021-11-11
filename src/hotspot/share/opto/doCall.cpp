@@ -209,7 +209,7 @@ CallGenerator* Compile::call_generator(ciMethod* callee, int vtable_index, bool 
 
       int morphism = profile.morphism();
       if (speculative_receiver_type != NULL) {
-        if (!too_many_traps(caller, bci, Deoptimization::Reason_speculate_class_check)) {
+        if (!too_many_traps_or_recompiles(caller, bci, Deoptimization::Reason_speculate_class_check)) {
           // We have a speculative type, we should be able to resolve
           // the call. We do that before looking at the profiling at
           // this invoke because it may lead to bimorphic inlining which
@@ -261,7 +261,7 @@ CallGenerator* Compile::call_generator(ciMethod* callee, int vtable_index, bool 
           Deoptimization::DeoptReason reason = morphism == 2 ?
             Deoptimization::Reason_bimorphic : Deoptimization::reason_class_check(speculative_receiver_type != NULL);
           if ((morphism == 1 || (morphism == 2 && next_hit_cg != NULL)) &&
-              !too_many_traps(caller, bci, reason)
+              !too_many_traps_or_recompiles(caller, bci, reason)
              ) {
             // Generate uncommon trap for class check failure path
             // in case of monomorphic or bimorphic virtual call site.
@@ -304,7 +304,9 @@ CallGenerator* Compile::call_generator(ciMethod* callee, int vtable_index, bool 
   // Use a more generic tactic, like a simple call.
   if (call_does_dispatch) {
     const char* msg = "virtual call";
-    if (PrintInlining) print_inlining(callee, jvms->depth() - 1, jvms->bci(), msg);
+    if (C->print_inlining()) {
+      print_inlining(callee, jvms->depth() - 1, jvms->bci(), msg);
+    }
     C->log_inline_failure(msg);
     return CallGenerator::for_virtual_call(callee, vtable_index);
   } else {
@@ -470,7 +472,7 @@ void Parse::do_call() {
   // Push appendix argument (MethodType, CallSite, etc.), if one.
   if (iter().has_appendix()) {
     ciObject* appendix_arg = iter().get_appendix();
-    const TypeOopPtr* appendix_arg_type = TypeOopPtr::make_from_constant(appendix_arg);
+    const TypeOopPtr* appendix_arg_type = TypeOopPtr::make_from_constant(appendix_arg, /* require_const= */ true);
     Node* appendix_arg_node = _gvn.makecon(appendix_arg_type);
     push(appendix_arg_node);
   }
@@ -611,7 +613,6 @@ void Parse::do_call() {
 
   if (cg->is_inline()) {
     // Accumulate has_loops estimate
-    C->set_has_loops(C->has_loops() || cg->method()->has_loops());
     C->env()->notice_inlined_method(cg->method());
   }
 

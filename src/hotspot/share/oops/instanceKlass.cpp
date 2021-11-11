@@ -66,7 +66,7 @@
 #include "prims/jvmtiThreadState.hpp"
 #include "prims/methodComparator.hpp"
 #include "runtime/atomic.hpp"
-#include "runtime/fieldDescriptor.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/javaCalls.hpp"
 #include "runtime/mutexLocker.hpp"
@@ -411,6 +411,8 @@ InstanceKlass::InstanceKlass(const ClassFileParser& parser, unsigned kind, Klass
   _static_field_size(parser.static_field_size()),
   _nonstatic_oop_map_size(nonstatic_oop_map_size(parser.total_oop_map_count())),
   _itable_len(parser.itable_size()),
+  _init_thread(NULL),
+  _init_state(allocated),
   _reference_type(parser.reference_type()),
   _nest_members(NULL),
   _nest_host_index(0),
@@ -687,15 +689,6 @@ bool InstanceKlass::verify_code(bool throw_verifyerror, TRAPS) {
   Verifier::Mode mode =
     throw_verifyerror ? Verifier::ThrowException : Verifier::NoException;
   return Verifier::verify(this, mode, should_verify_class(), THREAD);
-}
-
-
-// Used exclusively by the shared spaces dump mechanism to prevent
-// classes mapped into the shared regions in new VMs from appearing linked.
-
-void InstanceKlass::unlink_class() {
-  assert(is_linked(), "must be linked");
-  _init_state = loaded;
 }
 
 void InstanceKlass::link_class(TRAPS) {
@@ -1049,11 +1042,13 @@ void InstanceKlass::set_initialization_state_and_notify(ClassState state, TRAPS)
   Handle h_init_lock(THREAD, init_lock());
   if (h_init_lock() != NULL) {
     ObjectLocker ol(h_init_lock, THREAD);
+    set_init_thread(NULL); // reset _init_thread before changing _init_state
     set_init_state(state);
     fence_and_clear_init_lock();
     ol.notify_all(CHECK);
   } else {
     assert(h_init_lock() != NULL, "The initialization state should never be set twice");
+    set_init_thread(NULL); // reset _init_thread before changing _init_state
     set_init_state(state);
   }
 }
@@ -1119,7 +1114,7 @@ void InstanceKlass::add_implementor(Klass* k) {
   Klass* ik = implementor();
   if (ik == NULL) {
     set_implementor(k);
-  } else if (ik != this) {
+  } else if (ik != this && ik != k) {
     // There is already an implementor. Use itself as an indicator of
     // more than one implementors.
     set_implementor(this);
@@ -1936,7 +1931,7 @@ jmethodID InstanceKlass::get_jmethod_id(const methodHandle& method_h) {
         // we're single threaded or at a safepoint - no locking needed
         get_jmethod_id_length_value(jmeths, idnum, &length, &id);
       } else {
-        MutexLocker ml(JmethodIdCreation_lock);
+        MutexLockerEx ml(JmethodIdCreation_lock, Mutex::_no_safepoint_check_flag);
         get_jmethod_id_length_value(jmeths, idnum, &length, &id);
       }
     }
@@ -1986,7 +1981,7 @@ jmethodID InstanceKlass::get_jmethod_id(const methodHandle& method_h) {
       id = get_jmethod_id_fetch_or_update(idnum, new_id, new_jmeths,
                                           &to_dealloc_id, &to_dealloc_jmeths);
     } else {
-      MutexLocker ml(JmethodIdCreation_lock);
+      MutexLockerEx ml(JmethodIdCreation_lock, Mutex::_no_safepoint_check_flag);
       id = get_jmethod_id_fetch_or_update(idnum, new_id, new_jmeths,
                                           &to_dealloc_id, &to_dealloc_jmeths);
     }
@@ -2302,10 +2297,12 @@ void InstanceKlass::remove_unshareable_info() {
     return;
   }
 
-  // Unlink the class
-  if (is_linked()) {
-    unlink_class();
-  }
+  // Reset to the 'allocated' state to prevent any premature accessing to
+  // a shared class at runtime while the class is still being loaded and
+  // restored. A class' init_state is set to 'loaded' at runtime when it's
+  // being added to class hierarchy (see SystemDictionary:::add_to_hierarchy()).
+  _init_state = allocated;
+
   {
     MutexLocker ml(Compile_lock);
     init_implementor();
@@ -2352,6 +2349,10 @@ void InstanceKlass::remove_java_mirror() {
 }
 
 void InstanceKlass::restore_unshareable_info(ClassLoaderData* loader_data, Handle protection_domain, TRAPS) {
+  // SystemDictionary::add_to_hierarchy() sets the init_state to loaded
+  // before the InstanceKlass is added to the SystemDictionary. Make
+  // sure the current state is <loaded.
+  assert(!is_loaded(), "invalid init state");
   set_package(loader_data, CHECK);
   Klass::restore_unshareable_info(loader_data, protection_domain, CHECK);
 
@@ -2653,7 +2654,7 @@ bool InstanceKlass::is_same_class_package(const Klass* class2) const {
   // and package entries. Both must be the same. This rule
   // applies even to classes that are defined in the unnamed
   // package, they still must have the same class loader.
-  if (oopDesc::equals(classloader1, classloader2) && (classpkg1 == classpkg2)) {
+  if ((classloader1 == classloader2) && (classpkg1 == classpkg2)) {
     return true;
   }
 
@@ -2664,7 +2665,7 @@ bool InstanceKlass::is_same_class_package(const Klass* class2) const {
 // and classname information is enough to determine a class's package
 bool InstanceKlass::is_same_class_package(oop other_class_loader,
                                           const Symbol* other_class_name) const {
-  if (!oopDesc::equals(class_loader(), other_class_loader)) {
+  if (class_loader() != other_class_loader) {
     return false;
   }
   if (name()->fast_compare(other_class_name) == 0) {
@@ -2717,19 +2718,39 @@ bool InstanceKlass::is_override(const methodHandle& super_method, Handle targetc
    return(is_same_class_package(targetclassloader(), targetclassname));
 }
 
+
+static bool is_prohibited_package_slow(Symbol* class_name) {
+  // Caller has ResourceMark
+  int length;
+  jchar* unicode = class_name->as_unicode(length);
+  return (length >= 5 &&
+          unicode[0] == 'j' &&
+          unicode[1] == 'a' &&
+          unicode[2] == 'v' &&
+          unicode[3] == 'a' &&
+          unicode[4] == '/');
+}
+
 // Only boot and platform class loaders can define classes in "java/" packages.
 void InstanceKlass::check_prohibited_package(Symbol* class_name,
                                              ClassLoaderData* loader_data,
                                              TRAPS) {
   if (!loader_data->is_boot_class_loader_data() &&
       !loader_data->is_platform_class_loader_data() &&
-      class_name != NULL) {
+      class_name != NULL && class_name->utf8_length() >= 5) {
     ResourceMark rm(THREAD);
-    char* name = class_name->as_C_string();
-    if (strncmp(name, JAVAPKG, JAVAPKG_LEN) == 0 && name[JAVAPKG_LEN] == '/') {
+    bool prohibited;
+    const jbyte* base = class_name->base();
+    if ((base[0] | base[1] | base[2] | base[3] | base[4]) & 0x80) {
+      prohibited = is_prohibited_package_slow(class_name);
+    } else {
+      char* name = class_name->as_C_string();
+      prohibited = (strncmp(name, JAVAPKG, JAVAPKG_LEN) == 0 && name[JAVAPKG_LEN] == '/');
+    }
+    if (prohibited) {
       TempNewSymbol pkg_name = InstanceKlass::package_from_name(class_name, CHECK);
       assert(pkg_name != NULL, "Error in parsing package name starting with 'java/'");
-      name = pkg_name->as_C_string();
+      char* name = pkg_name->as_C_string();
       const char* class_loader_name = loader_data->loader_name_and_id();
       StringUtils::replace_no_expand(name, "/", ".");
       const char* msg_text1 = "Class loader (instance of): ";
@@ -2814,6 +2835,18 @@ InstanceKlass* InstanceKlass::compute_enclosing_class(bool* inner_is_member, TRA
     constantPoolHandle i_cp(THREAD, constants());
     if (ooff != 0) {
       Klass* ok = i_cp->klass_at(ooff, CHECK_NULL);
+      if (!ok->is_instance_klass()) {
+        // If the outer class is not an instance klass then it cannot have
+        // declared any inner classes.
+        ResourceMark rm(THREAD);
+        Exceptions::fthrow(
+          THREAD_AND_LOCATION,
+          vmSymbols::java_lang_IncompatibleClassChangeError(),
+          "%s and %s disagree on InnerClasses attribute",
+          ok->external_name(),
+          external_name());
+        return NULL;
+      }
       outer_klass = InstanceKlass::cast(ok);
       *inner_is_member = true;
     }
@@ -2955,6 +2988,13 @@ void InstanceKlass::adjust_default_methods(InstanceKlass* holder, bool* trace_na
 
 // On-stack replacement stuff
 void InstanceKlass::add_osr_nmethod(nmethod* n) {
+#ifndef PRODUCT
+  if (TieredCompilation) {
+    nmethod* prev = lookup_osr_nmethod(n->method(), n->osr_entry_bci(), n->comp_level(), true);
+    assert(prev == NULL || !prev->is_in_use() COMPILER2_PRESENT(|| StressRecompilation),
+           "redundant OSR recompilation detected. memory leak in CodeCache!");
+  }
+#endif
   // only one compilation can be active
   {
     // This is a short non-blocking critical region, so the no safepoint check is ok.
@@ -3073,7 +3113,9 @@ nmethod* InstanceKlass::lookup_osr_nmethod(const Method* m, int bci, int comp_le
     }
     osr = osr->osr_link();
   }
-  if (best != NULL && best->comp_level() >= comp_level && match_level == false) {
+
+  assert(match_level == false || best == NULL, "shouldn't pick up anything if match_level is set");
+  if (best != NULL && best->comp_level() >= comp_level) {
     return best;
   }
   return NULL;
@@ -3094,7 +3136,7 @@ static void print_vtable(intptr_t* start, int len, outputStream* st) {
   for (int i = 0; i < len; i++) {
     intptr_t e = start[i];
     st->print("%d : " INTPTR_FORMAT, i, e);
-    if (e != 0 && ((Metadata*)e)->is_metaspace_object()) {
+    if (MetaspaceObj::is_valid((Metadata*)e)) {
       st->print(" ");
       ((Metadata*)e)->print_value_on(st);
     }
@@ -3671,6 +3713,7 @@ void InstanceKlass::set_init_state(ClassState state) {
   bool good_state = is_shared() ? (_init_state <= state)
                                                : (_init_state < state);
   assert(good_state || state == allocated, "illegal state transition");
+  assert(_init_thread == NULL, "should be cleared before state change");
   _init_state = (u1)state;
 }
 #endif

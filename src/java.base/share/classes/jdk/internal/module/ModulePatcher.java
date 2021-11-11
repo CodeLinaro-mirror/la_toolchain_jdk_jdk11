@@ -42,7 +42,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -78,7 +77,7 @@ public final class ModulePatcher {
      */
     public ModulePatcher(Map<String, List<String>> input) {
         if (input.isEmpty()) {
-            this.map = Collections.emptyMap();
+            this.map = Map.of();
         } else {
             Map<String, List<Path>> map = new HashMap<>();
             for (Map.Entry<String, List<String>> e : input.entrySet()) {
@@ -553,7 +552,7 @@ public final class ModulePatcher {
         public Stream<String> list() throws IOException {
             return Files.walk(dir, Integer.MAX_VALUE)
                         .map(f -> Resources.toResourceName(dir, f))
-                        .filter(s -> s.length() > 0);
+                        .filter(s -> !s.isEmpty());
         }
     }
 

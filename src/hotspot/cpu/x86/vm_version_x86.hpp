@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,8 +25,8 @@
 #ifndef CPU_X86_VM_VM_VERSION_X86_HPP
 #define CPU_X86_VM_VM_VERSION_X86_HPP
 
+#include "runtime/abstract_vm_version.hpp"
 #include "runtime/globals_extension.hpp"
-#include "runtime/vm_version.hpp"
 
 class VM_Version : public Abstract_VM_Version {
   friend class VMStructs;
@@ -88,7 +88,8 @@ class VM_Version : public Abstract_VM_Version {
                         : 1,
                osxsave  : 1,
                avx      : 1,
-                        : 3;
+                        : 2,
+               hv       : 1;
     } bits;
   };
 
@@ -241,7 +242,7 @@ class VM_Version : public Abstract_VM_Version {
                            : 1,
                       gfni : 1,
                       vaes : 1,
-                vpclmulqdq : 1,
+         avx512_vpclmulqdq : 1,
                avx512_vnni : 1,
              avx512_bitalg : 1,
                            : 1,
@@ -334,8 +335,9 @@ protected:
 #define CPU_FMA ((uint64_t)UCONST64(0x800000000))      // FMA instructions
 #define CPU_VZEROUPPER ((uint64_t)UCONST64(0x1000000000))       // Vzeroupper instruction
 #define CPU_AVX512_VPOPCNTDQ ((uint64_t)UCONST64(0x2000000000)) // Vector popcount
-#define CPU_VPCLMULQDQ ((uint64_t)UCONST64(0x4000000000)) //Vector carryless multiplication
+#define CPU_AVX512_VPCLMULQDQ ((uint64_t)UCONST64(0x4000000000)) //Vector carryless multiplication
 #define CPU_VAES ((uint64_t)UCONST64(0x8000000000))    // Vector AES instructions
+#define CPU_HV_PRESENT ((uint64_t)UCONST64(0x400000000000)) // for hypervisor detection
 
   enum Extended_Family {
     // AMD
@@ -357,7 +359,7 @@ protected:
     CPU_MODEL_HASWELL_E3     = 0x3c,
     CPU_MODEL_HASWELL_E7     = 0x3f,
     CPU_MODEL_BROADWELL      = 0x3d,
-    CPU_MODEL_SKYLAKE        = CPU_MODEL_HASWELL_E3
+    CPU_MODEL_SKYLAKE        = 0x55
   };
 
   // cpuid information block.  All info derived from executing cpuid with
@@ -544,12 +546,14 @@ protected:
           result |= CPU_AVX512VL;
         if (_cpuid_info.sef_cpuid7_ecx.bits.avx512_vpopcntdq != 0)
           result |= CPU_AVX512_VPOPCNTDQ;
-        if (_cpuid_info.sef_cpuid7_ecx.bits.vpclmulqdq != 0)
-          result |= CPU_VPCLMULQDQ;
+        if (_cpuid_info.sef_cpuid7_ecx.bits.avx512_vpclmulqdq != 0)
+          result |= CPU_AVX512_VPCLMULQDQ;
         if (_cpuid_info.sef_cpuid7_ecx.bits.vaes != 0)
           result |= CPU_VAES;
       }
     }
+    if (_cpuid_info.std_cpuid1_ecx.bits.hv != 0)
+      result |= CPU_HV_PRESENT;
     if(_cpuid_info.sef_cpuid7_ebx.bits.bmi1 != 0)
       result |= CPU_BMI1;
     if (_cpuid_info.std_cpuid1_edx.bits.tsc != 0)
@@ -683,6 +687,9 @@ public:
 
   // Initialization
   static void initialize();
+
+  // Override Abstract_VM_Version implementation
+  static void print_platform_virtualization_info(outputStream*);
 
   // Override Abstract_VM_Version implementation
   static bool use_biased_locking();
@@ -828,12 +835,16 @@ public:
   static bool supports_fma()        { return (_features & CPU_FMA) != 0 && supports_avx(); }
   static bool supports_vzeroupper() { return (_features & CPU_VZEROUPPER) != 0; }
   static bool supports_vpopcntdq()  { return (_features & CPU_AVX512_VPOPCNTDQ) != 0; }
-  static bool supports_vpclmulqdq() { return (_features & CPU_VPCLMULQDQ) != 0; }
+  static bool supports_avx512_vpclmulqdq() { return (_features & CPU_AVX512_VPCLMULQDQ) != 0; }
   static bool supports_vaes()       { return (_features & CPU_VAES) != 0; }
+  static bool supports_hv()         { return (_features & CPU_HV_PRESENT) != 0; }
 
   // Intel features
   static bool is_intel_family_core() { return is_intel() &&
                                        extended_cpu_family() == CPU_FAMILY_INTEL_CORE; }
+
+  static bool is_intel_skylake() { return is_intel_family_core() &&
+                                          extended_cpu_model() == CPU_MODEL_SKYLAKE; }
 
   static bool is_intel_tsc_synched_at_init()  {
     if (is_intel_family_core()) {
@@ -928,6 +939,15 @@ public:
   // that can be used for efficient implementation of
   // the intrinsic for java.lang.Thread.onSpinWait()
   static bool supports_on_spin_wait() { return supports_sse2(); }
+
+#ifdef __APPLE__
+  // Is the CPU running emulated (for example macOS Rosetta running x86_64 code on M1 ARM (aarch64)
+  static bool is_cpu_emulated();
+#endif
+
+  // support functions for virtualization detection
+ private:
+  static void check_virtualizations();
 };
 
 #endif // CPU_X86_VM_VM_VERSION_X86_HPP

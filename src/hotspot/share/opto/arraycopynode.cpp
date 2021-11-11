@@ -30,6 +30,9 @@
 #include "opto/graphKit.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "utilities/macros.hpp"
+#if INCLUDE_SHENANDOAHGC
+#include "gc/shenandoah/c2/shenandoahBarrierSetC2.hpp"
+#endif
 
 ArrayCopyNode::ArrayCopyNode(Compile* C, bool alloc_tightly_coupled, bool has_negative_length_guard)
   : CallNode(arraycopy_type(), NULL, TypeRawPtr::BOTTOM),
@@ -76,11 +79,11 @@ ArrayCopyNode* ArrayCopyNode::make(GraphKit* kit, bool may_throw,
   return ac;
 }
 
-void ArrayCopyNode::connect_outputs(GraphKit* kit) {
+void ArrayCopyNode::connect_outputs(GraphKit* kit, bool deoptimize_on_exception) {
   kit->set_all_memory_call(this, true);
   kit->set_control(kit->gvn().transform(new ProjNode(this,TypeFunc::Control)));
   kit->set_i_o(kit->gvn().transform(new ProjNode(this, TypeFunc::I_O)));
-  kit->make_slow_call_ex(this, kit->env()->Throwable_klass(), true);
+  kit->make_slow_call_ex(this, kit->env()->Throwable_klass(), true, deoptimize_on_exception);
   kit->set_all_memory_call(this);
 }
 
@@ -136,7 +139,7 @@ int ArrayCopyNode::get_count(PhaseGVN *phase) const {
       // array must be too.
 
       assert((get_length_if_constant(phase) == -1) == !ary_src->size()->is_con() ||
-             phase->is_IterGVN(), "inconsistent");
+             phase->is_IterGVN() || StressReflectiveCode, "inconsistent");
 
       if (ary_src->size()->is_con()) {
         return ary_src->size()->get_con();
@@ -205,6 +208,11 @@ Node* ArrayCopyNode::try_clone_instance(PhaseGVN *phase, bool can_reshape, int c
 
     Node* v = LoadNode::make(*phase, ctl, mem->memory_at(fieldidx), next_src, adr_type, type, bt, MemNode::unordered);
     v = phase->transform(v);
+#if INCLUDE_SHENANDOAHGC
+    if (UseShenandoahGC && bt == T_OBJECT) {
+      v = ShenandoahBarrierSetC2::bsc2()->arraycopy_load_reference_barrier(phase, v);
+    }
+#endif
     Node* s = StoreNode::make(*phase, ctl, mem->memory_at(fieldidx), next_dest, adr_type, v, bt, MemNode::unordered);
     s = phase->transform(s);
     mem->set_memory_at(fieldidx, s);
@@ -320,13 +328,12 @@ bool ArrayCopyNode::prepare_array_copy(PhaseGVN *phase, bool can_reshape,
   return true;
 }
 
-const TypePtr* ArrayCopyNode::get_address_type(PhaseGVN *phase, Node* n) {
-  const Type* at = phase->type(n);
-  assert(at != Type::TOP, "unexpected type");
-  const TypePtr* atp = at->isa_ptr();
+const TypePtr* ArrayCopyNode::get_address_type(PhaseGVN* phase, const TypePtr* atp, Node* n) {
+  if (atp == TypeOopPtr::BOTTOM) {
+    atp = phase->type(n)->isa_ptr();
+  }
   // adjust atp to be the correct array element address type
-  atp = atp->add_offset(Type::OffsetBot);
-  return atp;
+  return atp->add_offset(Type::OffsetBot);
 }
 
 void ArrayCopyNode::array_copy_test_overlap(PhaseGVN *phase, bool can_reshape, bool disjoint_bases, int count, Node*& forward_ctl, Node*& backward_ctl) {
@@ -373,6 +380,11 @@ Node* ArrayCopyNode::array_copy_forward(PhaseGVN *phase,
     if (count > 0) {
       Node* v = LoadNode::make(*phase, forward_ctl, start_mem_src, adr_src, atp_src, value_type, copy_type, MemNode::unordered);
       v = phase->transform(v);
+#if INCLUDE_SHENANDOAHGC
+      if (UseShenandoahGC && copy_type == T_OBJECT) {
+        v = ShenandoahBarrierSetC2::bsc2()->arraycopy_load_reference_barrier(phase, v);
+      }
+#endif
       mem = StoreNode::make(*phase, forward_ctl, mem, adr_dest, atp_dest, v, copy_type, MemNode::unordered);
       mem = phase->transform(mem);
       for (int i = 1; i < count; i++) {
@@ -381,6 +393,11 @@ Node* ArrayCopyNode::array_copy_forward(PhaseGVN *phase,
         Node* next_dest = phase->transform(new AddPNode(base_dest,adr_dest,off));
         v = LoadNode::make(*phase, forward_ctl, same_alias ? mem : start_mem_src, next_src, atp_src, value_type, copy_type, MemNode::unordered);
         v = phase->transform(v);
+#if INCLUDE_SHENANDOAHGC
+        if (UseShenandoahGC && copy_type == T_OBJECT) {
+          v = ShenandoahBarrierSetC2::bsc2()->arraycopy_load_reference_barrier(phase, v);
+        }
+#endif
         mem = StoreNode::make(*phase, forward_ctl,mem,next_dest,atp_dest,v, copy_type, MemNode::unordered);
         mem = phase->transform(mem);
       }
@@ -422,11 +439,21 @@ Node* ArrayCopyNode::array_copy_backward(PhaseGVN *phase,
         Node* next_dest = phase->transform(new AddPNode(base_dest,adr_dest,off));
         Node* v = LoadNode::make(*phase, backward_ctl, same_alias ? mem : start_mem_src, next_src, atp_src, value_type, copy_type, MemNode::unordered);
         v = phase->transform(v);
+#if INCLUDE_SHENANDOAHGC
+        if (UseShenandoahGC && copy_type == T_OBJECT) {
+          v = ShenandoahBarrierSetC2::bsc2()->arraycopy_load_reference_barrier(phase, v);
+        }
+#endif
         mem = StoreNode::make(*phase, backward_ctl,mem,next_dest,atp_dest,v, copy_type, MemNode::unordered);
         mem = phase->transform(mem);
       }
       Node* v = LoadNode::make(*phase, backward_ctl, same_alias ? mem : start_mem_src, adr_src, atp_src, value_type, copy_type, MemNode::unordered);
       v = phase->transform(v);
+#if INCLUDE_SHENANDOAHGC
+      if (UseShenandoahGC && copy_type == T_OBJECT) {
+        v = ShenandoahBarrierSetC2::bsc2()->arraycopy_load_reference_barrier(phase, v);
+      }
+#endif
       mem = StoreNode::make(*phase, backward_ctl, mem, adr_dest, atp_dest, v, copy_type, MemNode::unordered);
       mem = phase->transform(mem);
     } else if(can_reshape) {
@@ -485,7 +512,8 @@ bool ArrayCopyNode::finish_transform(PhaseGVN *phase, bool can_reshape,
   } else {
     if (in(TypeFunc::Control) != ctl) {
       // we can't return new memory and control from Ideal at parse time
-      assert(!is_clonebasic(), "added control for clone?");
+      assert(!is_clonebasic() SHENANDOAHGC_ONLY(|| UseShenandoahGC), "added control for clone?");
+      SHENANDOAHGC_ONLY(phase->record_for_igvn(this);)
       return false;
     }
   }
@@ -557,8 +585,8 @@ Node *ArrayCopyNode::Ideal(PhaseGVN *phase, bool can_reshape) {
 
   Node* src = in(ArrayCopyNode::Src);
   Node* dest = in(ArrayCopyNode::Dest);
-  const TypePtr* atp_src = get_address_type(phase, src);
-  const TypePtr* atp_dest = get_address_type(phase, dest);
+  const TypePtr* atp_src = get_address_type(phase, _src_type, src);
+  const TypePtr* atp_dest = get_address_type(phase, _dest_type, dest);
   uint alias_idx_src = phase->C->get_alias_index(atp_src);
   uint alias_idx_dest = phase->C->get_alias_index(atp_dest);
 

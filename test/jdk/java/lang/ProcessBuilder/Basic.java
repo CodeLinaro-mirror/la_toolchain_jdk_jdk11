@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,7 +27,7 @@
  *      5026830 5023243 5070673 4052517 4811767 6192449 6397034 6413313
  *      6464154 6523983 6206031 4960438 6631352 6631966 6850957 6850958
  *      4947220 7018606 7034570 4244896 5049299 8003488 8054494 8058464
- *      8067796
+ *      8067796 8224905 8263729
  * @key intermittent
  * @summary Basic tests for Process and Environment Variable code
  * @modules java.base/java.lang:open
@@ -73,6 +73,10 @@ public class Basic {
 
     /* used for AIX only */
     static final String libpath = System.getenv("LIBPATH");
+
+    /* Used for regex String matching for long error messages */
+    static final String PERMISSION_DENIED_ERROR_MSG = "(Permission denied|error=13)";
+    static final String NO_SUCH_FILE_ERROR_MSG = "(No such file|error=2)";
 
     /**
      * Returns the number of milliseconds since time given by
@@ -305,7 +309,7 @@ public class Basic {
         } catch (IOException e) {
             String m = e.getMessage();
             if (EnglishUnix.is() &&
-                ! matches(m, "Permission denied"))
+                ! matches(m, PERMISSION_DENIED_ERROR_MSG))
                 unexpected(e);
         } catch (Throwable t) { unexpected(t); }
     }
@@ -415,7 +419,7 @@ public class Basic {
                         } catch (IOException e) {
                             String m = e.getMessage();
                             if (EnglishUnix.is() &&
-                                ! matches(m, "No such file"))
+                                ! matches(m, NO_SUCH_FILE_ERROR_MSG))
                                 unexpected(e);
                         } catch (Throwable t) { unexpected(t); }
 
@@ -428,7 +432,7 @@ public class Basic {
                         } catch (IOException e) {
                             String m = e.getMessage();
                             if (EnglishUnix.is() &&
-                                ! matches(m, "No such file"))
+                                ! matches(m, NO_SUCH_FILE_ERROR_MSG))
                                 unexpected(e);
                         } catch (Throwable t) { unexpected(t); }
 
@@ -1982,7 +1986,7 @@ public class Basic {
         } catch (IOException e) {
             String m = e.getMessage();
             if (EnglishUnix.is() &&
-                ! matches(m, "No such file or directory"))
+                ! matches(m, NO_SUCH_FILE_ERROR_MSG))
                 unexpected(e);
         } catch (Throwable t) { unexpected(t); }
 
@@ -1998,8 +2002,8 @@ public class Basic {
                 String m = e.getMessage();
                 Pattern p = Pattern.compile(programName);
                 if (! matches(m, programName)
-                    || (EnglishUnix.is()
-                        && ! matches(m, "No such file or directory")))
+                    || (EnglishUnix.is() &&
+                        ! matches(m, NO_SUCH_FILE_ERROR_MSG)))
                     unexpected(e);
             } catch (Throwable t) { unexpected(t); }
 
@@ -2015,7 +2019,7 @@ public class Basic {
             String m = e.getMessage();
             if (! matches(m, "in directory")
                 || (EnglishUnix.is() &&
-                    ! matches(m, "No such file or directory")))
+                    ! matches(m, NO_SUCH_FILE_ERROR_MSG)))
                 unexpected(e);
         } catch (Throwable t) { unexpected(t); }
 
@@ -2090,10 +2094,34 @@ public class Basic {
             final int cases = 4;
             for (int i = 0; i < cases; i++) {
                 final int action = i;
-                List<String> childArgs = new ArrayList<String>(javaChildArgs);
+                List<String> childArgs = new ArrayList<>(javaChildArgs);
+                final ProcessBuilder pb = new ProcessBuilder(childArgs);
+                {
+                    // Redirect any child VM error output away from the stream being tested
+                    // and to the log file. For background see:
+                    // 8231297: java/lang/ProcessBuilder/Basic.java test fails intermittently
+                    // Destroying the process may, depending on the timing, cause some output
+                    // from the child VM.
+                    // This test requires the thread reading from the subprocess be blocked
+                    // in the read from the subprocess; there should be no bytes to read.
+                    // Modify the argument list shared with ProcessBuilder to redirect VM output.
+                    assert (childArgs.get(1).equals("-XX:+DisplayVMOutputToStderr")) : "Expected arg 1 to be \"-XX:+DisplayVMOutputToStderr\"";
+                    switch (action & 0x1) {
+                        case 0:
+                            childArgs.set(1, "-XX:+DisplayVMOutputToStderr");
+                            pb.redirectError(INHERIT);
+                            break;
+                        case 1:
+                            childArgs.set(1, "-XX:+DisplayVMOutputToStdout");
+                            pb.redirectOutput(INHERIT);
+                            break;
+                        default:
+                            throw new Error();
+                    }
+                }
                 childArgs.add("sleep");
                 final byte[] bytes = new byte[10];
-                final Process p = new ProcessBuilder(childArgs).start();
+                final Process p = pb.start();
                 final CountDownLatch latch = new CountDownLatch(1);
                 final InputStream s;
                 switch (action & 0x1) {
@@ -2182,8 +2210,10 @@ public class Basic {
                             // Check that reader failed because stream was
                             // asynchronously closed.
                             // e.printStackTrace();
+                            String msg = e.getMessage();
                             if (EnglishUnix.is() &&
-                                ! (e.getMessage().matches(".*Bad file.*")))
+                                ! (msg.matches(".*Bad file.*") ||
+                                        msg.matches(".*Stream closed.*")))
                                 unexpected(e);
                         }
                         catch (Throwable t) { unexpected(t); }}};
@@ -2275,7 +2305,7 @@ public class Basic {
             new File("./emptyCommand").delete();
             String m = e.getMessage();
             if (EnglishUnix.is() &&
-                ! matches(m, "Permission denied"))
+                ! matches(m, PERMISSION_DENIED_ERROR_MSG))
                 unexpected(e);
         } catch (Throwable t) { unexpected(t); }
 
@@ -2428,6 +2458,7 @@ public class Basic {
                 public void run() {
                     try {
                         aboutToWaitFor.countDown();
+                        Thread.currentThread().interrupt();
                         boolean result = p.waitFor(30L * 1000L, TimeUnit.MILLISECONDS);
                         fail("waitFor() wasn't interrupted, its return value was: " + result);
                     } catch (InterruptedException success) {
@@ -2437,7 +2468,38 @@ public class Basic {
 
             thread.start();
             aboutToWaitFor.await();
-            Thread.sleep(1000);
+            thread.interrupt();
+            thread.join(10L * 1000L);
+            check(millisElapsedSince(start) < 10L * 1000L);
+            check(!thread.isAlive());
+            p.destroy();
+        } catch (Throwable t) { unexpected(t); }
+
+        //----------------------------------------------------------------
+        // Check that Process.waitFor(Long.MAX_VALUE, TimeUnit.MILLISECONDS)
+        // interrupt works as expected, if interrupted while waiting.
+        //----------------------------------------------------------------
+        try {
+            List<String> childArgs = new ArrayList<String>(javaChildArgs);
+            childArgs.add("sleep");
+            final Process p = new ProcessBuilder(childArgs).start();
+            final long start = System.nanoTime();
+            final CountDownLatch aboutToWaitFor = new CountDownLatch(1);
+
+            final Thread thread = new Thread() {
+                public void run() {
+                    try {
+                        aboutToWaitFor.countDown();
+                        Thread.currentThread().interrupt();
+                        boolean result = p.waitFor(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
+                        fail("waitFor() wasn't interrupted, its return value was: " + result);
+                    } catch (InterruptedException success) {
+                    } catch (Throwable t) { unexpected(t); }
+                }
+            };
+
+            thread.start();
+            aboutToWaitFor.await();
             thread.interrupt();
             thread.join(10L * 1000L);
             check(millisElapsedSince(start) < 10L * 1000L);

@@ -43,6 +43,7 @@
 #include "oops/typeArrayOop.inline.hpp"
 #include "prims/jvmtiExport.hpp"
 #include "runtime/arguments.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/javaCalls.hpp"
 #include "runtime/reflection.hpp"
@@ -419,7 +420,7 @@ oop Reflection::array_component_type(oop mirror, TRAPS) {
     assert(lower_dim->is_array_klass(), "just checking");
     result2 = lower_dim->java_mirror();
   }
-  assert(oopDesc::equals(result, result2), "results must be consistent");
+  assert(result == result2, "results must be consistent");
 #endif //ASSERT
   return result;
 }

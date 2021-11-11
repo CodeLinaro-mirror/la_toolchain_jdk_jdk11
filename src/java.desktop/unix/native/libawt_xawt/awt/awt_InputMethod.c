@@ -1244,8 +1244,12 @@ StatusDrawCallback(XIC ic, XPointer client_data,
                 statusWindow->status[MAX_STATUS_LEN - 1] = '\0';
             } else {
                 char *mbstr = wcstombsdmp(text->string.wide_char, text->length);
+                if (mbstr == NULL) {
+                    goto finally;
+                }
                 strncpy(statusWindow->status, mbstr, MAX_STATUS_LEN);
                 statusWindow->status[MAX_STATUS_LEN - 1] = '\0';
+                free(mbstr);
             }
             statusWindow->on = True;
             onoffStatusWindow(pX11IMData, statusWindow->parent, True);
@@ -1329,7 +1333,15 @@ static void DestroyXIMCallback(XIM im, XPointer client_data, XPointer call_data)
     /* free the old pX11IMData and set it to null. this also avoids crashing
      * the jvm if the XIM server reappears */
     while (x11InputMethodGRefListHead != NULL) {
-        getX11InputMethodData(env, x11InputMethodGRefListHead->inputMethodGRef);
+        if (getX11InputMethodData(env,
+                x11InputMethodGRefListHead->inputMethodGRef) == NULL) {
+            /* Clear possible exceptions
+             */
+            if ((*env)->ExceptionOccurred(env)) {
+                (*env)->ExceptionDescribe(env);
+                (*env)->ExceptionClear(env);
+            }
+        }
     }
     AWT_UNLOCK();
 }
@@ -1671,7 +1683,7 @@ JNIEXPORT jboolean JNICALL Java_sun_awt_X11InputMethodBase_isCompositionEnabledN
 {
     X11InputMethodData *pX11IMData = NULL;
     char * ret = NULL;
-#if defined(_LP64) && !defined(_LITTLE_ENDIAN)
+#if defined(__linux__) && defined(_LP64) && !defined(_LITTLE_ENDIAN)
     // XIMPreeditState value which is used for XGetICValues must be 32bit on BigEndian XOrg's xlib
     unsigned int state = XIMPreeditUnKnown;
 #else

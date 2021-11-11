@@ -321,7 +321,7 @@ jdk.jshell_COPY += .jsh .properties
 
 ################################################################################
 
-jdk.internal.le_COPY += .properties
+jdk.internal.le_COPY += .properties .caps .txt
 
 ################################################################################
 
@@ -644,7 +644,7 @@ endif
 
 ifneq ($(wildcard $(IMPORT_MODULES_CLASSES)/$(MODULE)), )
   $(JDK_OUTPUTDIR)/modules/$(MODULE)/_imported.marker: \
-      $(call CacheFind, $(IMPORT_MODULES_CLASSES)/$(MODULE))
+      $(call FindFiles, $(IMPORT_MODULES_CLASSES)/$(MODULE))
 	$(call MakeDir, $(@D))
         # Do not delete marker and build meta data files
 	$(RM) -r $(filter-out $(@D)/_%, $(wildcard $(@D)/*))

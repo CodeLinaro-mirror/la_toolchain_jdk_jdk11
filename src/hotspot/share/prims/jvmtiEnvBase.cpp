@@ -25,6 +25,7 @@
 #include "precompiled.hpp"
 #include "classfile/systemDictionary.hpp"
 #include "jvmtifiles/jvmtiEnv.hpp"
+#include "memory/iterator.hpp"
 #include "memory/resourceArea.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "oops/objArrayOop.hpp"
@@ -51,7 +52,7 @@
 #include "runtime/vframe.hpp"
 #include "runtime/vframe_hp.hpp"
 #include "runtime/vmThread.hpp"
-#include "runtime/vm_operations.hpp"
+#include "runtime/vmOperations.hpp"
 
 ///////////////////////////////////////////////////////////////
 //
@@ -722,13 +723,13 @@ JvmtiEnvBase::get_locked_objects_in_frame(JavaThread* calling_thread, JavaThread
                                  javaVFrame *jvf, GrowableArray<jvmtiMonitorStackDepthInfo*>* owned_monitors_list, jint stack_depth) {
   jvmtiError err = JVMTI_ERROR_NONE;
   ResourceMark rm;
+  HandleMark hm;
 
   GrowableArray<MonitorInfo*>* mons = jvf->monitors();
   if (mons->is_empty()) {
     return err;  // this javaVFrame holds no monitors
   }
 
-  HandleMark hm;
   oop wait_obj = NULL;
   {
     // save object of current wait() call (if any) for later comparison
@@ -1018,7 +1019,6 @@ JvmtiEnvBase::get_object_monitor_usage(JavaThread* calling_thread, jobject objec
       // as lightweight locks before inflating the monitor are not included.
       // We have to count the number of recursive monitor entries the hard way.
       // We pass a handle to survive any GCs along the way.
-      ResourceMark rm;
       ret.entry_count = count_locked_objects(owning_thread, hobj);
     }
     // implied else: entry_count == 0
@@ -1080,7 +1080,7 @@ JvmtiEnvBase::get_object_monitor_usage(JavaThread* calling_thread, jobject objec
           // If the monitor has no owner, then a non-suspended contending
           // thread could potentially change the state of the monitor by
           // entering it. The JVM/TI spec doesn't allow this.
-          if (owning_thread == NULL && !at_safepoint &
+          if (owning_thread == NULL && !at_safepoint &&
               !pending_thread->is_thread_fully_suspended(true, &debug_bits)) {
             if (ret.owner != NULL) {
               destroy_jni_reference(calling_thread, ret.owner);

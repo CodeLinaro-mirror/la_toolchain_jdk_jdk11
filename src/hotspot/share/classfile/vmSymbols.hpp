@@ -125,6 +125,7 @@
   template(getBootClassPathEntryForClass_name,        "getBootClassPathEntryForClass")            \
   template(jdk_internal_vm_PostVMInitHook,            "jdk/internal/vm/PostVMInitHook")           \
   template(sun_net_www_ParseUtil,                     "sun/net/www/ParseUtil")                    \
+  template(java_util_Iterator,                        "java/util/Iterator")                       \
                                                                                                   \
   template(jdk_internal_loader_ClassLoaders_AppClassLoader,      "jdk/internal/loader/ClassLoaders$AppClassLoader")      \
   template(jdk_internal_loader_ClassLoaders_PlatformClassLoader, "jdk/internal/loader/ClassLoaders$PlatformClassLoader") \
@@ -133,6 +134,8 @@
   template(java_lang_VersionProps,                    "java/lang/VersionProps")                   \
   template(java_runtime_name_name,                    "java_runtime_name")                        \
   template(java_runtime_version_name,                 "java_runtime_version")                     \
+  template(java_runtime_vendor_version_name,          "VENDOR_VERSION")                           \
+  template(java_runtime_vendor_vm_bug_url_name,       "VENDOR_URL_VM_BUG")                        \
                                                                                                   \
   /* system initialization */                                                                     \
   template(initPhase1_name,                           "initPhase1")                               \
@@ -439,6 +442,7 @@
   template(fileToEncodedURL_signature,                "(Ljava/io/File;)Ljava/net/URL;")           \
   template(getProtectionDomain_name,                  "getProtectionDomain")                      \
   template(getProtectionDomain_signature,             "(Ljava/security/CodeSource;)Ljava/security/ProtectionDomain;") \
+  template(java_lang_Integer_array_signature,         "[Ljava/lang/Integer;")                     \
   template(url_code_signer_array_void_signature,      "(Ljava/net/URL;[Ljava/security/CodeSigner;)V") \
   template(module_entry_name,                         "module_entry")                             \
   template(resolved_references_name,                  "<resolved_references>")                    \
@@ -466,6 +470,7 @@
   template(float_int_signature,                       "(F)I")                                     \
   template(double_long_signature,                     "(D)J")                                     \
   template(double_double_signature,                   "(D)D")                                     \
+  template(float_float_signature,                     "(F)F")                                     \
   template(int_float_signature,                       "(I)F")                                     \
   template(long_int_signature,                        "(J)I")                                     \
   template(long_long_signature,                       "(J)J")                                     \
@@ -650,10 +655,9 @@
                                                                                                                   \
   /* cds */                                                                                                       \
   template(jdk_internal_loader_ClassLoaders,       "jdk/internal/loader/ClassLoaders")                            \
-  template(jdk_vm_cds_SharedClassInfo,             "jdk/vm/cds/SharedClassInfo")                                  \
-  template(url_void_signature,                     "(Ljava/net/URL;)V")                                           \
   template(toFileURL_name,                         "toFileURL")                                                   \
   template(toFileURL_signature,                    "(Ljava/lang/String;)Ljava/net/URL;")                          \
+  template(url_void_signature,                     "(Ljava/net/URL;)V")                                           \
                                                                                                                   \
   /*end*/
 
@@ -746,6 +750,7 @@
   do_class(java_lang_StrictMath,          "java/lang/StrictMath")                                                       \
   do_signature(double2_double_signature,  "(DD)D")                                                                      \
   do_signature(double3_double_signature,  "(DDD)D")                                                                     \
+  do_signature(float2_float_signature,    "(FF)F")                                                                      \
   do_signature(float3_float_signature,    "(FFF)F")                                                                     \
   do_signature(int2_int_signature,        "(II)I")                                                                      \
   do_signature(long2_long_signature,      "(JJ)J")                                                                      \
@@ -755,6 +760,7 @@
   do_name(tan_name,"tan")       do_name(atan2_name,"atan2")     do_name(sqrt_name,"sqrt")                               \
   do_name(log_name,"log")       do_name(log10_name,"log10")     do_name(pow_name,"pow")                                 \
   do_name(exp_name,"exp")       do_name(min_name,"min")         do_name(max_name,"max")                                 \
+  do_name(floor_name, "floor")  do_name(ceil_name, "ceil")      do_name(rint_name, "rint")                              \
                                                                                                                         \
   do_name(addExact_name,"addExact")                                                                                     \
   do_name(decrementExact_name,"decrementExact")                                                                         \
@@ -764,9 +770,17 @@
   do_name(negateExact_name,"negateExact")                                                                               \
   do_name(subtractExact_name,"subtractExact")                                                                           \
   do_name(fma_name, "fma")                                                                                              \
+  do_name(copySign_name, "copySign")                                                                                    \
+  do_name(signum_name,"signum")                                                                                         \
                                                                                                                         \
   do_intrinsic(_dabs,                     java_lang_Math,         abs_name,   double_double_signature,           F_S)   \
+  do_intrinsic(_fabs,                     java_lang_Math,         abs_name,   float_float_signature,           F_S)   \
+  do_intrinsic(_iabs,                     java_lang_Math,         abs_name,   int_int_signature,           F_S)   \
+  do_intrinsic(_labs,                     java_lang_Math,         abs_name,   long_long_signature,           F_S)   \
   do_intrinsic(_dsin,                     java_lang_Math,         sin_name,   double_double_signature,           F_S)   \
+  do_intrinsic(_floor,                    java_lang_Math,         floor_name, double_double_signature,           F_S)   \
+  do_intrinsic(_ceil,                     java_lang_Math,         ceil_name,  double_double_signature,           F_S)   \
+  do_intrinsic(_rint,                     java_lang_Math,         rint_name,  double_double_signature,           F_S)   \
   do_intrinsic(_dcos,                     java_lang_Math,         cos_name,   double_double_signature,           F_S)   \
   do_intrinsic(_dtan,                     java_lang_Math,         tan_name,   double_double_signature,           F_S)   \
   do_intrinsic(_datan2,                   java_lang_Math,         atan2_name, double2_double_signature,          F_S)   \
@@ -792,6 +806,14 @@
   do_intrinsic(_subtractExactL,           java_lang_Math,         subtractExact_name, long2_long_signature,      F_S)   \
   do_intrinsic(_fmaD,                     java_lang_Math,         fma_name,           double3_double_signature,  F_S)   \
   do_intrinsic(_fmaF,                     java_lang_Math,         fma_name,           float3_float_signature,    F_S)   \
+  do_intrinsic(_maxF,                     java_lang_Math,         max_name,           float2_float_signature,    F_S)   \
+  do_intrinsic(_minF,                     java_lang_Math,         min_name,           float2_float_signature,    F_S)   \
+  do_intrinsic(_maxD,                     java_lang_Math,         max_name,           double2_double_signature,  F_S)   \
+  do_intrinsic(_minD,                     java_lang_Math,         min_name,           double2_double_signature,  F_S)   \
+  do_intrinsic(_dcopySign,                java_lang_Math,         copySign_name,      double2_double_signature,  F_S)   \
+  do_intrinsic(_fcopySign,                java_lang_Math,         copySign_name,      float2_float_signature,    F_S)   \
+  do_intrinsic(_dsignum,                  java_lang_Math,         signum_name,        double_double_signature,   F_S)   \
+  do_intrinsic(_fsignum,                  java_lang_Math,         signum_name,        float_float_signature,     F_S)   \
                                                                                                                         \
   do_intrinsic(_floatToRawIntBits,        java_lang_Float,        floatToRawIntBits_name,   float_int_signature, F_S)   \
    do_name(     floatToRawIntBits_name,                          "floatToRawIntBits")                                   \
@@ -1004,6 +1026,12 @@
    do_name(     decrypt_name,                                      "implDecrypt")                                       \
    do_signature(byteArray_int_int_byteArray_int_signature,         "([BII[BI)I")                                        \
                                                                                                                         \
+  do_class(com_sun_crypto_provider_electronicCodeBook, "com/sun/crypto/provider/ElectronicCodeBook")                    \
+   do_intrinsic(_electronicCodeBook_encryptAESCrypt, com_sun_crypto_provider_electronicCodeBook, ecb_encrypt_name, byteArray_int_int_byteArray_int_signature, F_R)  \
+   do_intrinsic(_electronicCodeBook_decryptAESCrypt, com_sun_crypto_provider_electronicCodeBook, ecb_decrypt_name, byteArray_int_int_byteArray_int_signature, F_R)  \
+   do_name(ecb_encrypt_name, "implECBEncrypt")                                                                          \
+   do_name(ecb_decrypt_name, "implECBDecrypt")                                                                          \
+                                                                                                                        \
   do_class(com_sun_crypto_provider_counterMode,      "com/sun/crypto/provider/CounterMode")                             \
    do_intrinsic(_counterMode_AESCrypt, com_sun_crypto_provider_counterMode, crypt_name, byteArray_int_int_byteArray_int_signature, F_R)   \
    do_name(     crypt_name,                                 "implCrypt")                                                    \
@@ -1066,6 +1094,7 @@
                                                                                                                         \
   /* support for Unsafe */                                                                                              \
   do_class(jdk_internal_misc_Unsafe,               "jdk/internal/misc/Unsafe")                                          \
+  do_class(sun_misc_Unsafe,                        "sun/misc/Unsafe")                                                   \
                                                                                                                         \
   do_intrinsic(_allocateInstance,         jdk_internal_misc_Unsafe,     allocateInstance_name, allocateInstance_signature, F_RN) \
    do_name(     allocateInstance_name,                                  "allocateInstance")                                      \

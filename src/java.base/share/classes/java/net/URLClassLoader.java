@@ -458,6 +458,11 @@ public class URLClassLoader extends SecureClassLoader implements Closeable {
                                 return defineClass(name, res);
                             } catch (IOException e) {
                                 throw new ClassNotFoundException(name, e);
+                            } catch (ClassFormatError e2) {
+                                if (res.getDataError() != null) {
+                                    e2.addSuppressed(res.getDataError());
+                                }
+                                throw e2;
                             }
                         } else {
                             return null;
@@ -778,7 +783,7 @@ public class URLClassLoader extends SecureClassLoader implements Closeable {
                 locUrl = ((JarURLConnection)urlConnection).getJarFileURL();
             }
             String host = locUrl.getHost();
-            if (host != null && (host.length() > 0))
+            if (host != null && !host.isEmpty())
                 p = new SocketPermission(host,
                                          SecurityConstants.SOCKET_CONNECT_ACCEPT_ACTION);
         }

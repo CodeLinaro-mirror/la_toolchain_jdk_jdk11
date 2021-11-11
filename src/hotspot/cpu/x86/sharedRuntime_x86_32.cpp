@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,7 +37,9 @@
 #include "runtime/safepointMechanism.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/vframeArray.hpp"
+#include "runtime/vm_version.hpp"
 #include "utilities/align.hpp"
+#include "utilities/macros.hpp"
 #include "vmreg_x86.inline.hpp"
 #ifdef COMPILER1
 #include "c1/c1_Runtime1.hpp"
@@ -45,7 +47,10 @@
 #ifdef COMPILER2
 #include "opto/runtime.hpp"
 #endif
-#include "vm_version_x86.hpp"
+#if INCLUDE_SHENANDOAHGC
+#include "gc/shenandoah/shenandoahBarrierSet.hpp"
+#include "gc/shenandoah/shenandoahBarrierSetAssembler.hpp"
+#endif
 
 #define __ masm->
 
@@ -310,18 +315,19 @@ void RegisterSaver::restore_live_registers(MacroAssembler* masm, bool restore_ve
   }
 
   if (restore_vectors) {
+    off = additional_frame_bytes - ymm_bytes;
+    // Restore upper half of YMM registers.
+    for (int n = 0; n < num_xmm_regs; n++) {
+      __ vinsertf128_high(as_XMMRegister(n), Address(rsp, n*16+off));
+    }
+
     if (UseAVX > 2) {
       // Restore upper half of ZMM registers.
       for (int n = 0; n < num_xmm_regs; n++) {
         __ vinsertf64x4_high(as_XMMRegister(n), Address(rsp, n*32));
       }
-      __ addptr(rsp, zmm_bytes);
     }
-    // Restore upper half of YMM registers.
-    for (int n = 0; n < num_xmm_regs; n++) {
-      __ vinsertf128_high(as_XMMRegister(n), Address(rsp, n*16));
-    }
-    __ addptr(rsp, ymm_bytes);
+    __ addptr(rsp, additional_frame_bytes);
   }
 
   __ pop_FPU_state();
@@ -1524,7 +1530,8 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                                 int compile_id,
                                                 BasicType* in_sig_bt,
                                                 VMRegPair* in_regs,
-                                                BasicType ret_type) {
+                                                BasicType ret_type,
+                                                address critical_entry) {
   if (method->is_method_handle_intrinsic()) {
     vmIntrinsics::ID iid = method->intrinsic_id();
     intptr_t start = (intptr_t)__ pc();
@@ -1547,7 +1554,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                        (OopMapSet*)NULL);
   }
   bool is_critical_native = true;
-  address native_func = method->critical_native_function();
+  address native_func = critical_entry;
   if (native_func == NULL) {
     native_func = method->native_function();
     is_critical_native = false;
@@ -1837,7 +1844,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
 
   __ get_thread(thread);
 
-  if (is_critical_native) {
+  if (is_critical_native SHENANDOAHGC_ONLY(&& !UseShenandoahGC)) {
     check_needs_gc_for_critical_native(masm, thread, stack_slots, total_c_args, total_in_args,
                                        oop_handle_offset, oop_maps, in_regs, in_sig_bt);
   }
@@ -1875,6 +1882,12 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   //
   OopMap* map = new OopMap(stack_slots * 2, 0 /* arg_slots*/);
 
+#if INCLUDE_SHENANDOAHGC
+  // Inbound arguments that need to be pinned for critical natives
+  GrowableArray<int> pinned_args(total_in_args);
+  // Current stack slot for storing register based array argument
+  int pinned_slot = oop_handle_offset;
+#endif
   // Mark location of rbp,
   // map->set_callee_saved(VMRegImpl::stack2reg( stack_slots - 2), stack_slots * 2, 0, rbp->as_VMReg());
 
@@ -1886,7 +1899,31 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     switch (in_sig_bt[i]) {
       case T_ARRAY:
         if (is_critical_native) {
+#if INCLUDE_SHENANDOAHGC
+          VMRegPair in_arg = in_regs[i];
+          if (UseShenandoahGC) {
+            // gen_pin_object handles save and restore
+            // of any clobbered registers
+            ShenandoahBarrierSet::assembler()->gen_pin_object(masm, thread, in_arg);
+            pinned_args.append(i);
+
+            // rax has pinned array
+            VMRegPair result_reg(rax->as_VMReg());
+            if (!in_arg.first()->is_stack()) {
+              assert(pinned_slot <= stack_slots, "overflow");
+              simple_move32(masm, result_reg, VMRegImpl::stack2reg(pinned_slot));
+              pinned_slot += VMRegImpl::slots_per_word;
+            } else {
+              // Write back pinned value, it will be used to unpin this argument
+              __ movptr(Address(rbp, reg2offset_in(in_arg.first())), result_reg.first()->as_Register());
+            }
+            // We have the array in register, use it
+            in_arg = result_reg;
+          }
+          unpack_array_argument(masm, in_arg, in_elem_bt[i], out_regs[c_arg + 1], out_regs[c_arg]);
+#else
           unpack_array_argument(masm, in_regs[i], in_elem_bt[i], out_regs[c_arg + 1], out_regs[c_arg]);
+#endif
           c_arg++;
           break;
         }
@@ -2082,6 +2119,29 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   default       : ShouldNotReachHere();
   }
 
+#if INCLUDE_SHENANDOAHGC
+  if (UseShenandoahGC) {
+    // unpin pinned arguments
+    pinned_slot = oop_handle_offset;
+    if (pinned_args.length() > 0) {
+      // save return value that may be overwritten otherwise.
+      save_native_result(masm, ret_type, stack_slots);
+      for (int index = 0; index < pinned_args.length(); index ++) {
+        int i = pinned_args.at(index);
+        assert(pinned_slot <= stack_slots, "overflow");
+        if (!in_regs[i].first()->is_stack()) {
+          int offset = pinned_slot * VMRegImpl::stack_slot_size;
+          __ movl(in_regs[i].first()->as_Register(), Address(rsp, offset));
+          pinned_slot += VMRegImpl::slots_per_word;
+        }
+        // gen_pin_object handles save and restore
+        // of any other clobbered registers
+        ShenandoahBarrierSet::assembler()->gen_unpin_object(masm, thread, in_regs[i]);
+      }
+      restore_native_result(masm, ret_type, stack_slots);
+    }
+  }
+#endif
   // Switch thread to "native transition" state before reading the synchronization state.
   // This additional state is necessary because reading and testing the synchronization
   // state is not atomic w.r.t. GC, as this scenario demonstrates:

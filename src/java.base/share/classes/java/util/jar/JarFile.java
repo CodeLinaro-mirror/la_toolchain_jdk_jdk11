@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -147,18 +147,22 @@ import java.util.zip.ZipFile;
  */
 public
 class JarFile extends ZipFile {
-    private final static Runtime.Version BASE_VERSION;
-    private final static int BASE_VERSION_FEATURE;
-    private final static Runtime.Version RUNTIME_VERSION;
-    private final static boolean MULTI_RELEASE_ENABLED;
-    private final static boolean MULTI_RELEASE_FORCED;
+    private static final Runtime.Version BASE_VERSION;
+    private static final int BASE_VERSION_FEATURE;
+    private static final Runtime.Version RUNTIME_VERSION;
+    private static final boolean MULTI_RELEASE_ENABLED;
+    private static final boolean MULTI_RELEASE_FORCED;
+    private static final ThreadLocal<Boolean> isInitializing = new ThreadLocal<>();
+    // The maximum size of array to allocate. Some VMs reserve some header words in an array.
+    private static final int MAX_ARRAY_SIZE = Integer.MAX_VALUE - 8;
+
     private SoftReference<Manifest> manRef;
     private JarEntry manEntry;
     private JarVerifier jv;
     private boolean jvInitialized;
     private boolean verify;
     private final Runtime.Version version;  // current version
-    private final int versionFeature;         // version.feature()
+    private final int versionFeature;       // version.feature()
     private boolean isMultiRelease;         // is jar multi-release?
 
     // indicates if Class-Path attribute present
@@ -418,7 +422,13 @@ class JarFile extends ZipFile {
                 if (verify) {
                     byte[] b = getBytes(manEntry);
                     if (!jvInitialized) {
-                        jv = new JarVerifier(b);
+                        if (JUZFA.getManifestNum(this) == 1) {
+                            jv = new JarVerifier(manEntry.getName(), b);
+                        } else {
+                            if (JarVerifier.debug != null) {
+                                JarVerifier.debug.println("Multiple MANIFEST.MF found. Treat JAR file as unsigned");
+                            }
+                        }
                     }
                     man = new Manifest(jv, new ByteArrayInputStream(b));
                 } else {
@@ -796,7 +806,11 @@ class JarFile extends ZipFile {
      */
     private byte[] getBytes(ZipEntry ze) throws IOException {
         try (InputStream is = super.getInputStream(ze)) {
-            int len = (int)ze.getSize();
+            long uncompressedSize = ze.getSize();
+            if (uncompressedSize > MAX_ARRAY_SIZE) {
+                throw new IOException("Unsupported size: " + uncompressedSize);
+            }
+            int len = (int)uncompressedSize;
             int bytesRead;
             byte[] b;
             // trust specified entry sizes when reasonably small
@@ -1031,9 +1045,19 @@ class JarFile extends ZipFile {
             throw new RuntimeException(e);
         }
         if (jv != null && !jvInitialized) {
-            initializeVerifier();
-            jvInitialized = true;
+            isInitializing.set(Boolean.TRUE);
+            try {
+                initializeVerifier();
+                jvInitialized = true;
+            } finally {
+                isInitializing.set(Boolean.FALSE);
+            }
         }
+    }
+
+    static boolean isInitializing() {
+        Boolean value = isInitializing.get();
+        return (value == null) ? false : value;
     }
 
     /*

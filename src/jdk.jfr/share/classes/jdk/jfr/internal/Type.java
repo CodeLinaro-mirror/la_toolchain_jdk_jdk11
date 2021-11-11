@@ -27,6 +27,7 @@ package jdk.jfr.internal;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -71,10 +72,11 @@ public class Type implements Comparable<Type> {
     private final String name;
     private final String superType;
     private final boolean constantPool;
-    private final long id;
-    private final ArrayList<ValueDescriptor> fields = new ArrayList<>();
+    private List<ValueDescriptor> fields = new ArrayList<>();
     private Boolean simpleType; // calculated lazy
     private boolean remove = true;
+    private long id;
+
     /**
      * Creates a type
      *
@@ -182,6 +184,10 @@ public class Type implements Comparable<Type> {
     }
 
     public List<ValueDescriptor> getFields() {
+        if (fields instanceof ArrayList) {
+            ((ArrayList<ValueDescriptor>) fields).trimToSize();
+            fields = Collections.unmodifiableList(fields);
+        }
         return fields;
     }
 
@@ -215,7 +221,7 @@ public class Type implements Comparable<Type> {
     }
 
     void trimFields() {
-        fields.trimToSize();
+        getFields();
     }
 
     void setAnnotations(List<AnnotationElement> annotations) {
@@ -317,5 +323,9 @@ public class Type implements Comparable<Type> {
 
     public boolean getRemove() {
         return remove;
+    }
+
+    public void setId(long id) {
+        this.id = id;
     }
 }

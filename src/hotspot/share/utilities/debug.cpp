@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,7 @@
 #include "gc/shared/collectedHeap.hpp"
 #include "interpreter/bytecodeHistogram.hpp"
 #include "interpreter/interpreter.hpp"
+#include "memory/allocation.hpp"
 #include "memory/resourceArea.hpp"
 #include "memory/universe.hpp"
 #include "oops/oop.inline.hpp"
@@ -52,6 +53,7 @@
 #include "runtime/vframe.hpp"
 #include "runtime/vm_version.hpp"
 #include "services/heapDumper.hpp"
+#include "services/memTracker.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/events.hpp"
 #include "utilities/formatBuffer.hpp"
@@ -92,6 +94,21 @@ static void* g_assertion_context = NULL;
      configuration error: ASSERT et al. must not be defined in PRODUCT version
 #  endif
 #endif // PRODUCT
+
+#ifdef ASSERT
+// This is to test that error reporting works if we assert during dynamic
+// initialization of the hotspot. See JDK-8214975.
+struct Crasher {
+  Crasher() {
+    // Using getenv - no other mechanism would work yet.
+    const char* s = ::getenv("HOTSPOT_FATAL_ERROR_DURING_DYNAMIC_INITIALIZATION");
+    if (s != NULL && ::strcmp(s, "1") == 0) {
+      fatal("HOTSPOT_FATAL_ERROR_DURING_DYNAMIC_INITIALIZATION");
+    }
+  }
+};
+static Crasher g_crasher;
+#endif // ASSERT
 
 ATTRIBUTE_PRINTF(1, 2)
 void warning(const char* format, ...) {
@@ -237,8 +254,7 @@ void report_vm_status_error(const char* file, int line, const char* error_msg,
   report_vm_error(file, line, error_msg, "error %s(%d), %s", os::errno_name(status), status, detail);
 }
 
-void report_fatal(const char* file, int line, const char* detail_fmt, ...)
-{
+void report_fatal(VMErrorType error_type, const char* file, int line, const char* detail_fmt, ...) {
   if (Debugging || error_is_suppressed(file, line)) return;
   va_list detail_args;
   va_start(detail_args, detail_fmt);
@@ -248,7 +264,9 @@ void report_fatal(const char* file, int line, const char* detail_fmt, ...)
     context = g_assertion_context;
   }
 #endif // CAN_SHOW_REGISTERS_ON_ASSERT
-  VMError::report_and_die(Thread::current_or_null(), context, file, line, "fatal error", detail_fmt, detail_args);
+  VMError::report_and_die(error_type, "fatal error", detail_fmt, detail_args,
+                          Thread::current_or_null(), NULL, NULL, context,
+                          file, line, 0);
   va_end(detail_args);
 }
 
@@ -318,7 +336,7 @@ void report_java_out_of_memory(const char* message) {
 
     if (CrashOnOutOfMemoryError) {
       tty->print_cr("Aborting due to java.lang.OutOfMemoryError: %s", message);
-      fatal("OutOfMemory encountered: %s", message);
+      report_fatal(OOM_JAVA_HEAP_FATAL, __FILE__, __LINE__, "OutOfMemory encountered: %s", message);
     }
 
     if (ExitOnOutOfMemoryError) {
@@ -624,6 +642,7 @@ void help() {
   tty->print_cr("  pns(void* sp, void* fp, void* pc)  - print native (i.e. mixed) stack trace. E.g.");
   tty->print_cr("                   pns($sp, $rbp, $pc) on Linux/amd64 and Solaris/amd64 or");
   tty->print_cr("                   pns($sp, $ebp, $pc) on Linux/x86 or");
+  tty->print_cr("                   pns($sp, $fp, $pc)  on Linux/AArch64 or");
   tty->print_cr("                   pns($sp, 0, $pc)    on Linux/ppc64 or");
   tty->print_cr("                   pns($sp + 0x7ff, 0, $pc) on Solaris/SPARC");
   tty->print_cr("                 - in gdb do 'set overload-resolution off' before calling pns()");
@@ -707,11 +726,16 @@ static ucontext_t g_stored_assertion_context;
 void initialize_assert_poison() {
   char* page = os::reserve_memory(os::vm_page_size());
   if (page) {
+    MemTracker::record_virtual_memory_type(page, mtInternal);
     if (os::commit_memory(page, os::vm_page_size(), false) &&
         os::protect_memory(page, os::vm_page_size(), os::MEM_PROT_NONE)) {
       g_assert_poison = page;
     }
   }
+}
+
+void disarm_assert_poison() {
+  g_assert_poison = &g_dummy;
 }
 
 static void store_context(const void* context) {
@@ -726,7 +750,14 @@ static void store_context(const void* context) {
 bool handle_assert_poison_fault(const void* ucVoid, const void* faulting_address) {
   if (faulting_address == g_assert_poison) {
     // Disarm poison page.
-    os::protect_memory((char*)g_assert_poison, os::vm_page_size(), os::MEM_PROT_RWX);
+    if (os::protect_memory((char*)g_assert_poison, os::vm_page_size(), os::MEM_PROT_RWX) == false) {
+#ifdef ASSERT
+      fprintf(stderr, "Assertion poison page cannot be unprotected - mprotect failed with %d (%s)",
+              errno, os::strerror(errno));
+      fflush(stderr);
+#endif
+      return false; // unprotecting memory may fail in OOM situations, as surprising as this sounds.
+    }
     // Store Context away.
     if (ucVoid) {
       const intx my_tid = os::current_thread_id();
@@ -740,4 +771,3 @@ bool handle_assert_poison_fault(const void* ucVoid, const void* faulting_address
   return false;
 }
 #endif // CAN_SHOW_REGISTERS_ON_ASSERT
-

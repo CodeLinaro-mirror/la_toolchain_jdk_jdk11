@@ -206,6 +206,7 @@ bool AOTCompiledMethod::make_not_entrant_helper(int new_state) {
   return true;
 }
 
+#ifdef TIERED
 bool AOTCompiledMethod::make_entrant() {
   assert(!method()->is_old(), "reviving evolved method!");
   assert(*_state_adr != not_entrant, "%s", method()->has_aot_code() ? "has_aot_code() not cleared" : "caller didn't check has_aot_code()");
@@ -240,16 +241,7 @@ bool AOTCompiledMethod::make_entrant() {
 
   return true;
 }
-
-// We don't have full dependencies for AOT methods, so flushing is
-// more conservative than for nmethods.
-void AOTCompiledMethod::flush_evol_dependents_on(InstanceKlass* dependee) {
-  if (is_java_method()) {
-    clear_inline_caches();
-    mark_for_deoptimization();
-    make_not_entrant();
-  }
-}
+#endif // TIERED
 
 // Iterate over metadata calling this function.   Used by RedefineClasses
 // Copied from nmethod::metadata_do

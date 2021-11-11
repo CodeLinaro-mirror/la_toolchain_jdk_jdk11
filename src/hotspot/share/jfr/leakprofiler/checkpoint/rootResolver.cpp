@@ -30,7 +30,6 @@
 #include "jfr/leakprofiler/checkpoint/rootResolver.hpp"
 #include "memory/iterator.hpp"
 #include "oops/klass.hpp"
-#include "oops/markOop.hpp"
 #include "oops/oop.hpp"
 #include "prims/jvmtiThreadState.hpp"
 #include "prims/privilegedStack.hpp"
@@ -377,7 +376,7 @@ bool ReferenceToThreadRootClosure::do_thread_stack_detailed(JavaThread* jt) {
 
   JvmtiThreadState* const jvmti_thread_state = jt->jvmti_thread_state();
   if (jvmti_thread_state != NULL) {
-    jvmti_thread_state->oops_do(&rcl);
+    jvmti_thread_state->oops_do(&rcl, NULL);
   }
 
   return rcl.complete();

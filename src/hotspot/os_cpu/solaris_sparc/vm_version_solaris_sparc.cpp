@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,7 +27,7 @@
 #include "memory/allocation.hpp"
 #include "memory/allocation.inline.hpp"
 #include "runtime/os.hpp"
-#include "vm_version_sparc.hpp"
+#include "runtime/vm_version.hpp"
 
 #include <sys/auxv.h>
 #include <sys/systeminfo.h>
@@ -343,12 +343,9 @@ void VM_Version::platform_features() {
 
   uint32_t av = avs[AV_HW1_IDX];
 
-  // These are SPARC V8 legacy features.
-
-  assert((av & AV_SPARC_MUL32)  == 0, "unsupported V8");
-  assert((av & AV_SPARC_DIV32)  == 0, "unsupported V8");
-  assert((av & AV_SPARC_FSMULD) == 0, "unsupported V8");
-  assert((av & AV_SPARC_V8PLUS) == 0, "unsupported V8");
+  // Obsolete and 32b legacy mode capabilites NOT probed here, despite being
+  // set by Solaris 11.4 (onward) also on V9; AV_SPARC_MUL32, AV_SPARC_DIV32
+  // and AV_SPARC_FSMULD (and AV_SPARC_V8PLUS).
 
   if (av & AV_SPARC_POPC) features |= ISA_popc_msk;
   if (av & AV_SPARC_VIS)  features |= ISA_vis1_msk;
@@ -360,10 +357,15 @@ void VM_Version::platform_features() {
 #define AV_SPARC_FMAF         0x00000100 // Fused Multiply-Add
 #endif
 
+#ifndef AV_SPARC_FJATHHPC
+#define AV_SPARC_FJATHHPC     0x00001000 // Fujitsu HPC (Athena) instrs
+#endif
+
   if (av & AV_SPARC_ASI_BLK_INIT) features |= ISA_blk_init_msk;
   if (av & AV_SPARC_FMAF)         features |= ISA_fmaf_msk;
   if (av & AV_SPARC_VIS3)         features |= ISA_vis3_msk;
   if (av & AV_SPARC_HPC)          features |= ISA_hpc_msk;
+  if (av & AV_SPARC_FJATHHPC)     features |= ISA_fjathhpc_msk;
   if (av & AV_SPARC_IMA)          features |= ISA_ima_msk;
   if (av & AV_SPARC_AES)          features |= ISA_aes_msk;
   if (av & AV_SPARC_DES)          features |= ISA_des_msk;
@@ -463,14 +465,13 @@ void VM_Version::platform_features() {
 
   Sysinfo machine(SI_MACHINE);
 
-  bool is_sun4v = machine.match("sun4v");   // All Oracle SPARC + Fujitsu Athena+/++
+  bool is_sun4v = machine.match("sun4v");   // All Oracle SPARC + Fujitsu Athena(+/++)
   bool is_sun4u = machine.match("sun4u");   // All other Fujitsu
 
-  // Handle Athena+/++ conservatively (simply because we are lacking info.).
+  // Handle Athena(+/++) conservatively (simply because we are lacking info.).
 
-  bool an_athena = has_athena_plus() || has_athena_plus2();
-  bool do_sun4v  = is_sun4v && !an_athena;
-  bool do_sun4u  = is_sun4u ||  an_athena;
+  bool do_sun4v  = is_sun4v && !is_athena();
+  bool do_sun4u  = is_sun4u ||  is_athena();
 
   uint64_t synthetic = 0;
 

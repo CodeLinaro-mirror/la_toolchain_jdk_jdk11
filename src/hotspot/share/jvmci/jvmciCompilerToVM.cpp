@@ -37,6 +37,7 @@
 #include "jvmci/jvmciCompilerToVM.hpp"
 #include "jvmci/jvmciCodeInstaller.hpp"
 #include "jvmci/jvmciRuntime.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/flags/jvmFlag.hpp"
 #include "runtime/frame.inline.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
@@ -364,6 +365,10 @@ C2V_VMENTRY(jobject, findUniqueConcreteMethod, (JNIEnv *, jobject, jobject jvmci
   Klass* holder = CompilerToVM::asKlass(jvmci_type);
   if (holder->is_interface()) {
     THROW_MSG_0(vmSymbols::java_lang_InternalError(), err_msg("Interface %s should be handled in Java code", holder->external_name()));
+  }
+
+  if (method->can_be_statically_bound()) {
+    THROW_MSG_0(vmSymbols::java_lang_InternalError(), err_msg("Effectively static method %s.%s should be handled in Java code", method->method_holder()->external_name(), method->external_name()));
   }
 
   methodHandle ucm;
@@ -1035,7 +1040,7 @@ C2V_VMENTRY(jobject, iterateFrames, (JNIEnv*, jobject compilerToVM, jobjectArray
   jobjectArray methods = initial_methods;
 
   int frame_number = 0;
-  vframe* vf = vframe::new_vframe(fst.current(), fst.register_map(), thread);
+  vframe* vf = vframe::new_vframe(fst, thread);
 
   while (true) {
     // look for the given method
@@ -1144,7 +1149,7 @@ C2V_VMENTRY(jobject, iterateFrames, (JNIEnv*, jobject compilerToVM, jobjectArray
           if (fst.current()->sp() != stack_pointer) {
             THROW_MSG_NULL(vmSymbols::java_lang_IllegalStateException(), "stack frame not found after deopt")
           }
-          vf = vframe::new_vframe(fst.current(), fst.register_map(), thread);
+          vf = vframe::new_vframe(fst, thread);
           if (!vf->is_compiled_frame()) {
             THROW_MSG_NULL(vmSymbols::java_lang_IllegalStateException(), "compiled stack frame expected")
           }
@@ -1171,7 +1176,7 @@ C2V_VMENTRY(jobject, iterateFrames, (JNIEnv*, jobject compilerToVM, jobjectArray
       break;
     }
     fst.next();
-    vf = vframe::new_vframe(fst.current(), fst.register_map(), thread);
+    vf = vframe::new_vframe(fst, thread);
     frame_number = 0;
   } // end of frame loop
 
@@ -1490,6 +1495,18 @@ C2V_VMENTRY(void, compileToBytecode, (JNIEnv*, jobject, jobject lambda_form_hand
   }
 C2V_END
 
+C2V_VMENTRY(void, ensureLinked, (JNIEnv* env, jobject, jobject jvmci_type))
+  if (jvmci_type == NULL) {
+    THROW(vmSymbols::java_lang_NullPointerException());
+  }
+
+  Klass* klass = CompilerToVM::asKlass(jvmci_type);
+  if (klass != NULL && klass->is_instance_klass()) {
+    InstanceKlass* k = InstanceKlass::cast(klass);
+    k->link_class(CHECK);
+  }
+C2V_END
+
 #define CC (char*)  /*cast a literal from (const char*)*/
 #define FN_PTR(f) CAST_FROM_FN_PTR(void*, &(c2v_ ## f))
 
@@ -1578,6 +1595,7 @@ JNINativeMethod CompilerToVM::methods[] = {
   {CC "interpreterFrameSize",                         CC "(" BYTECODE_FRAME ")I",                                                           FN_PTR(interpreterFrameSize)},
   {CC "compileToBytecode",                            CC "(" OBJECT ")V",                                                                   FN_PTR(compileToBytecode)},
   {CC "getFlagValue",                                 CC "(" STRING ")" OBJECT,                                                             FN_PTR(getFlagValue)},
+  {CC "ensureLinked",                                 CC "(" HS_RESOLVED_KLASS ")V",                                                        FN_PTR(ensureLinked)},
 };
 
 int CompilerToVM::methods_count() {

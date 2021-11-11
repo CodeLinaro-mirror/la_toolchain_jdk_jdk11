@@ -462,6 +462,8 @@ public:
     return !_replaced_nodes.is_empty();
   }
 
+  void disconnect_from_root(PhaseIterGVN *igvn);
+
   // Standard Node stuff
   virtual int            Opcode() const;
   virtual bool           pinned() const { return true; }
@@ -681,6 +683,8 @@ public:
   void  set_override_symbolic_info(bool f) { _override_symbolic_info = f; }
   bool  override_symbolic_info() const     { return _override_symbolic_info; }
 
+  DEBUG_ONLY( bool validate_symbolic_info() const; )
+
 #ifndef PRODUCT
   virtual void  dump_spec(outputStream *st) const;
   virtual void  dump_compact_spec(outputStream *st) const;
@@ -809,6 +813,7 @@ public:
                    const TypePtr* adr_type)
     : CallLeafNode(tf, addr, name, adr_type)
   {
+    init_class_id(Class_CallLeafNoFP);
   }
   virtual int   Opcode() const;
 };
@@ -980,9 +985,11 @@ private:
     Coarsened,    // Lock was coarsened
     Nested        // Nested lock
   } _kind;
+
+  static const char* _kind_names[Nested+1];
+
 #ifndef PRODUCT
   NamedCounter* _counter;
-  static const char* _kind_names[Nested+1];
 #endif
 
 protected:
@@ -1025,7 +1032,7 @@ public:
   bool is_nested()      const { return (_kind == Nested); }
 
   const char * kind_as_string() const;
-  void log_lock_optimization(Compile* c, const char * tag) const;
+  void log_lock_optimization(Compile* c, const char * tag, Node* bad_lock = NULL) const;
 
   void set_non_esc_obj() { _kind = NonEscObj; set_eliminated_lock_counter(); }
   void set_coarsened()   { _kind = Coarsened; set_eliminated_lock_counter(); }

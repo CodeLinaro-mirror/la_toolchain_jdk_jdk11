@@ -37,6 +37,7 @@
 #include "opto/node.hpp"
 #include "opto/opcodes.hpp"
 #include "opto/regmask.hpp"
+#include "opto/rootnode.hpp"
 #include "opto/type.hpp"
 #include "utilities/copy.hpp"
 #include "utilities/macros.hpp"
@@ -502,6 +503,10 @@ Node *Node::clone() const {
     C->add_macro_node(n);
   if (is_expensive())
     C->add_expensive_node(n);
+  if (n->is_reduction()) {
+    // Do not copy reduction information. This must be explicitly set by the calling code.
+    n->remove_flag(Node::Flag_is_reduction);
+  }
   BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
   bs->register_potential_barrier_node(n);
   // If the cloned node is a range check dependent CastII, add it to the list.
@@ -567,10 +572,13 @@ void Node::setup_is_top() {
 //------------------------------~Node------------------------------------------
 // Fancy destructor; eagerly attempt to reclaim Node numberings and storage
 void Node::destruct() {
-  // Eagerly reclaim unique Node numberings
   Compile* compile = Compile::current();
+  // If this is the most recently created node, reclaim its index. Otherwise,
+  // record the node as dead to keep liveness information accurate.
   if ((uint)_idx+1 == compile->unique()) {
     compile->set_unique(compile->unique()-1);
+  } else {
+    compile->record_dead_node(_idx);
   }
   // Clear debug info:
   Node_Notes* nn = compile->node_notes_at(_idx);
@@ -701,8 +709,25 @@ bool Node::is_dead() const {
   dump();
   return true;
 }
-#endif
 
+bool Node::is_reachable_from_root() const {
+  ResourceMark rm;
+  Unique_Node_List wq;
+  wq.push((Node*)this);
+  RootNode* root = Compile::current()->root();
+  for (uint i = 0; i < wq.size(); i++) {
+    Node* m = wq.at(i);
+    if (m == root) {
+      return true;
+    }
+    for (DUIterator_Fast jmax, j = m->fast_outs(jmax); j < jmax; j++) {
+      Node* u = m->fast_out(j);
+      wq.push(u);
+    }
+  }
+  return false;
+}
+#endif
 
 //------------------------------is_unreachable---------------------------------
 bool Node::is_unreachable(PhaseIterGVN &igvn) const {
@@ -1309,6 +1334,9 @@ static void kill_dead_code( Node *dead, PhaseIterGVN *igvn ) {
 
   while (nstack.size() > 0) {
     dead = nstack.pop();
+    if (dead->Opcode() == Op_SafePoint) {
+      dead->as_SafePoint()->disconnect_from_root(igvn);
+    }
     if (dead->outcnt() > 0) {
       // Keep dead node on stack until all uses are processed.
       nstack.push(dead);
@@ -2100,7 +2128,8 @@ void Node::verify_edges(Unique_Node_List &visited) {
       }
       assert( cnt == 0,"Mismatched edge count.");
     } else if (n == NULL) {
-      assert(i >= req() || i == 0 || is_Region() || is_Phi(), "only regions or phis have null data edges");
+      assert(i >= req() || i == 0 || is_Region() || is_Phi() || is_ArrayCopy()
+              || (is_Unlock() && i == req()-1), "only region, phi, arraycopy or unlock nodes have null data edges");
     } else {
       assert(n->is_top(), "sanity");
       // Nothing to check.
@@ -2114,65 +2143,78 @@ void Node::verify_edges(Unique_Node_List &visited) {
   }
 }
 
-//------------------------------verify_recur-----------------------------------
-static const Node *unique_top = NULL;
-
-void Node::verify_recur(const Node *n, int verify_depth,
-                        VectorSet &old_space, VectorSet &new_space) {
-  if ( verify_depth == 0 )  return;
-  if (verify_depth > 0)  --verify_depth;
-
+// Verify all nodes if verify_depth is negative
+void Node::verify(Node* n, int verify_depth) {
+  assert(verify_depth != 0, "depth should not be 0");
+  ResourceMark rm;
+  ResourceArea* area = Thread::current()->resource_area();
+  VectorSet old_space(area);
+  VectorSet new_space(area);
+  Node_List worklist(area);
+  worklist.push(n);
   Compile* C = Compile::current();
+  uint last_index_on_current_depth = 0;
+  verify_depth--; // Visiting the first node on depth 1
+  // Only add nodes to worklist if verify_depth is negative (visit all nodes) or greater than 0
+  bool add_to_worklist = verify_depth != 0;
 
-  // Contained in new_space or old_space?
-  VectorSet *v = C->node_arena()->contains(n) ? &new_space : &old_space;
-  // Check for visited in the proper space.  Numberings are not unique
-  // across spaces so we need a separate VectorSet for each space.
-  if( v->test_set(n->_idx) ) return;
 
-  if (n->is_Con() && n->bottom_type() == Type::TOP) {
-    if (C->cached_top_node() == NULL)
-      C->set_cached_top_node((Node*)n);
-    assert(C->cached_top_node() == n, "TOP node must be unique");
-  }
+  for (uint list_index = 0; list_index < worklist.size(); list_index++) {
+    n = worklist[list_index];
 
-  for( uint i = 0; i < n->len(); i++ ) {
-    Node *x = n->in(i);
-    if (!x || x->is_top()) continue;
-
-    // Verify my input has a def-use edge to me
-    if (true /*VerifyDefUse*/) {
-      // Count use-def edges from n to x
-      int cnt = 0;
-      for( uint j = 0; j < n->len(); j++ )
-        if( n->in(j) == x )
-          cnt++;
-      // Count def-use edges from x to n
-      uint max = x->_outcnt;
-      for( uint k = 0; k < max; k++ )
-        if (x->_out[k] == n)
-          cnt--;
-      assert( cnt == 0, "mismatched def-use edge counts" );
+    if (n->is_Con() && n->bottom_type() == Type::TOP) {
+      if (C->cached_top_node() == NULL) {
+        C->set_cached_top_node((Node*)n);
+      }
+      assert(C->cached_top_node() == n, "TOP node must be unique");
     }
 
-    verify_recur(x, verify_depth, old_space, new_space);
+    for (uint i = 0; i < n->len(); i++) {
+      Node* x = n->in(i);
+      if (!x || x->is_top()) {
+        continue;
+      }
+
+      // Verify my input has a def-use edge to me
+      // Count use-def edges from n to x
+      int cnt = 0;
+      for (uint j = 0; j < n->len(); j++) {
+        if (n->in(j) == x) {
+          cnt++;
+        }
+      }
+
+      // Count def-use edges from x to n
+      uint max = x->_outcnt;
+      for (uint k = 0; k < max; k++) {
+        if (x->_out[k] == n) {
+          cnt--;
+        }
+      }
+      assert(cnt == 0, "mismatched def-use edge counts");
+
+      // Contained in new_space or old_space?
+      VectorSet* v = C->node_arena()->contains(x) ? &new_space : &old_space;
+      // Check for visited in the proper space. Numberings are not unique
+      // across spaces so we need a separate VectorSet for each space.
+      if (add_to_worklist && !v->test_set(x->_idx)) {
+        worklist.push(x);
+      }
+    }
+
+    if (verify_depth > 0 && list_index == last_index_on_current_depth) {
+      // All nodes on this depth were processed and its inputs are on the worklist. Decrement verify_depth and
+      // store the current last list index which is the last node in the list with the new depth. All nodes
+      // added afterwards will have a new depth again. Stop adding new nodes if depth limit is reached (=0).
+      verify_depth--;
+      if (verify_depth == 0) {
+        add_to_worklist = false;
+      }
+      last_index_on_current_depth = worklist.size() - 1;
+    }
   }
-
-}
-
-//------------------------------verify-----------------------------------------
-// Check Def-Use info for my subgraph
-void Node::verify() const {
-  Compile* C = Compile::current();
-  Node* old_top = C->cached_top_node();
-  ResourceMark rm;
-  ResourceArea *area = Thread::current()->resource_area();
-  VectorSet old_space(area), new_space(area);
-  verify_recur(this, -1, old_space, new_space);
-  C->set_cached_top_node(old_top);
 }
 #endif
-
 
 //------------------------------walk-------------------------------------------
 // Graph walk, with both pre-order and post-order functions
@@ -2338,6 +2380,29 @@ void Node::ensure_control_or_add_prec(Node* c) {
   } else if (in(0) != c) {
     add_prec(c);
   }
+}
+
+bool Node::is_dead_loop_safe() const {
+  if (is_Phi()) {
+    return true;
+  }
+  if (is_Proj() && in(0) == NULL)  {
+    return true;
+  }
+  if ((_flags & (Flag_is_dead_loop_safe | Flag_is_Con)) != 0) {
+    if (!is_Proj()) {
+      return true;
+    }
+    if (in(0)->is_Allocate()) {
+      return false;
+    }
+    // MemNode::can_see_stored_value() peeks through the boxing call
+    if (in(0)->is_CallStaticJava() && in(0)->as_CallStaticJava()->is_boxing_method()) {
+      return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 //=============================================================================

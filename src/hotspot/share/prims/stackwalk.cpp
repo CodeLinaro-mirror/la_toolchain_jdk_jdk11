@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -48,7 +48,7 @@ void BaseFrameStream::setup_magic_on_entry(objArrayHandle frames_array) {
 bool BaseFrameStream::check_magic(objArrayHandle frames_array) {
   oop   m1 = frames_array->obj_at(magic_pos);
   jlong m2 = _anchor;
-  if (oopDesc::equals(m1, _thread->threadObj()) && m2 == address_value())  return true;
+  if (m1 == _thread->threadObj() && m2 == address_value())  return true;
   return false;
 }
 
@@ -79,7 +79,7 @@ BaseFrameStream* BaseFrameStream::from_current(JavaThread* thread, jlong magic,
 {
   assert(thread != NULL && thread->is_Java_thread(), "");
   oop m1 = frames_array->obj_at(magic_pos);
-  if (!oopDesc::equals(m1, thread->threadObj())) return NULL;
+  if (m1 != thread->threadObj()) return NULL;
   if (magic == 0L)                    return NULL;
   BaseFrameStream* stream = (BaseFrameStream*) (intptr_t) magic;
   if (!stream->is_valid_in(thread, frames_array))   return NULL;
@@ -284,6 +284,9 @@ void LiveFrameStream::fill_live_stackframe(Handle stackFrame,
                                            const methodHandle& method, TRAPS) {
   fill_stackframe(stackFrame, method, CHECK);
   if (_jvf != NULL) {
+    ResourceMark rm(THREAD);
+    HandleMark hm(THREAD);
+
     StackValueCollection* locals = _jvf->locals();
     StackValueCollection* expressions = _jvf->expressions();
     GrowableArray<MonitorInfo*>* monitors = _jvf->monitors();

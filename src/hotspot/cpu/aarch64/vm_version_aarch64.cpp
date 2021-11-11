@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2015, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -29,17 +29,13 @@
 #include "memory/resourceArea.hpp"
 #include "runtime/java.hpp"
 #include "runtime/stubCodeGenerator.hpp"
+#include "runtime/vm_version.hpp"
 #include "utilities/macros.hpp"
-#include "vm_version_aarch64.hpp"
 
 #include OS_HEADER_INLINE(os)
 
-#ifndef BUILTIN_SIM
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
-#else
-#define getauxval(hwcap) 0
-#endif
 
 #ifndef HWCAP_AES
 #define HWCAP_AES   (1<<3)
@@ -91,10 +87,6 @@ class VM_Version_StubGenerator: public StubCodeGenerator {
     StubCodeMark mark(this, "VM_Version", "getPsrInfo_stub");
 #   define __ _masm->
     address start = __ pc();
-
-#ifdef BUILTIN_SIM
-    __ c_stub_prolog(1, 0, MacroAssembler::ret_type_void);
-#endif
 
     // void getPsrInfo(VM_Version::PsrInfo* psr_info);
 
@@ -167,7 +159,11 @@ void VM_Version::get_processor_features() {
     SoftwarePrefetchHintDistance &= ~7;
   }
 
-  unsigned long auxv = getauxval(AT_HWCAP);
+  if (FLAG_IS_DEFAULT(ContendedPaddingWidth) && (dcache_line > ContendedPaddingWidth)) {
+    ContendedPaddingWidth = dcache_line;
+  }
+
+  uint64_t auxv = getauxval(AT_HWCAP);
 
   char buf[512];
 
@@ -177,7 +173,7 @@ void VM_Version::get_processor_features() {
   if (FILE *f = fopen("/proc/cpuinfo", "r")) {
     char buf[128], *p;
     while (fgets(buf, sizeof (buf), f) != NULL) {
-      if (p = strchr(buf, ':')) {
+      if ((p = strchr(buf, ':')) != NULL) {
         long v = strtol(p+1, NULL, 0);
         if (strncmp(buf, "CPU implementer", sizeof "CPU implementer" - 1) == 0) {
           _cpu = v;
@@ -220,9 +216,11 @@ void VM_Version::get_processor_features() {
     if (FLAG_IS_DEFAULT(UseSIMDForMemoryOps)) {
       FLAG_SET_DEFAULT(UseSIMDForMemoryOps, true);
     }
+#ifdef COMPILER2
     if (FLAG_IS_DEFAULT(UseFPUForSpilling)) {
       FLAG_SET_DEFAULT(UseFPUForSpilling, true);
     }
+#endif
   }
 
   // Cortex A53
@@ -241,6 +239,19 @@ void VM_Version::get_processor_features() {
     // A73 is faster with short-and-easy-for-speculative-execution-loop
     if (FLAG_IS_DEFAULT(UseSimpleArrayEquals)) {
       FLAG_SET_DEFAULT(UseSimpleArrayEquals, true);
+    }
+  }
+
+  // Neoverse N1
+  if (_cpu == CPU_ARM && (_model == 0xd0c || _model2 == 0xd0c)) {
+    if (FLAG_IS_DEFAULT(UseSIMDForMemoryOps)) {
+      FLAG_SET_DEFAULT(UseSIMDForMemoryOps, true);
+    }
+  }
+
+  if (_cpu == CPU_ARM) {
+    if (FLAG_IS_DEFAULT(UseSignumIntrinsic)) {
+      FLAG_SET_DEFAULT(UseSignumIntrinsic, true);
     }
   }
 
@@ -299,11 +310,11 @@ void VM_Version::get_processor_features() {
     }
   } else {
     if (UseAES) {
-      warning("UseAES specified, but not supported on this CPU");
+      warning("AES instructions are not available on this CPU");
       FLAG_SET_DEFAULT(UseAES, false);
     }
     if (UseAESIntrinsics) {
-      warning("UseAESIntrinsics specified, but not supported on this CPU");
+      warning("AES intrinsics are not available on this CPU");
       FLAG_SET_DEFAULT(UseAESIntrinsics, false);
     }
   }
@@ -375,6 +386,10 @@ void VM_Version::get_processor_features() {
     FLAG_SET_DEFAULT(UseGHASHIntrinsics, false);
   }
 
+  if (FLAG_IS_DEFAULT(UseBASE64Intrinsics)) {
+    UseBASE64Intrinsics = true;
+  }
+
   if (is_zva_enabled()) {
     if (FLAG_IS_DEFAULT(UseBlockZeroing)) {
       FLAG_SET_DEFAULT(UseBlockZeroing, true);
@@ -392,6 +407,15 @@ void VM_Version::get_processor_features() {
     FLAG_SET_DEFAULT(UseUnalignedAccesses, true);
   }
 
+  if (FLAG_IS_DEFAULT(UseBarriersForVolatile)) {
+    UseBarriersForVolatile = (_features & CPU_DMB_ATOMICS) != 0;
+  }
+
+  if (FLAG_IS_DEFAULT(UsePopCountInstruction)) {
+    UsePopCountInstruction = true;
+  }
+
+#ifdef COMPILER2
   if (FLAG_IS_DEFAULT(UseMultiplyToLenIntrinsic)) {
     UseMultiplyToLenIntrinsic = true;
   }
@@ -404,14 +428,6 @@ void VM_Version::get_processor_features() {
     UseMulAddIntrinsic = true;
   }
 
-  if (FLAG_IS_DEFAULT(UseBarriersForVolatile)) {
-    UseBarriersForVolatile = (_features & CPU_DMB_ATOMICS) != 0;
-  }
-
-  if (FLAG_IS_DEFAULT(UsePopCountInstruction)) {
-    UsePopCountInstruction = true;
-  }
-
   if (FLAG_IS_DEFAULT(UseMontgomeryMultiplyIntrinsic)) {
     UseMontgomeryMultiplyIntrinsic = true;
   }
@@ -419,7 +435,6 @@ void VM_Version::get_processor_features() {
     UseMontgomerySquareIntrinsic = true;
   }
 
-#ifdef COMPILER2
   if (FLAG_IS_DEFAULT(OptoScheduling)) {
     OptoScheduling = true;
   }

@@ -42,6 +42,7 @@ class MemNode : public Node {
 private:
   bool _unaligned_access; // Unaligned access from unsafe
   bool _mismatched_access; // Mismatched access from unsafe: byte read in integer array for instance
+  bool _unsafe_access;     // Access of unsafe origin.
 protected:
 #ifdef ASSERT
   const TypePtr* _adr_type;     // What kind of memory is being addressed?
@@ -62,22 +63,23 @@ public:
   } MemOrd;
 protected:
   MemNode( Node *c0, Node *c1, Node *c2, const TypePtr* at )
-    : Node(c0,c1,c2   ), _unaligned_access(false), _mismatched_access(false) {
+    : Node(c0,c1,c2   ), _unaligned_access(false), _mismatched_access(false), _unsafe_access(false) {
     init_class_id(Class_Mem);
     debug_only(_adr_type=at; adr_type();)
   }
   MemNode( Node *c0, Node *c1, Node *c2, const TypePtr* at, Node *c3 )
-    : Node(c0,c1,c2,c3), _unaligned_access(false), _mismatched_access(false) {
+    : Node(c0,c1,c2,c3), _unaligned_access(false), _mismatched_access(false), _unsafe_access(false) {
     init_class_id(Class_Mem);
     debug_only(_adr_type=at; adr_type();)
   }
   MemNode( Node *c0, Node *c1, Node *c2, const TypePtr* at, Node *c3, Node *c4)
-    : Node(c0,c1,c2,c3,c4), _unaligned_access(false), _mismatched_access(false) {
+    : Node(c0,c1,c2,c3,c4), _unaligned_access(false), _mismatched_access(false), _unsafe_access(false) {
     init_class_id(Class_Mem);
     debug_only(_adr_type=at; adr_type();)
   }
 
   virtual Node* find_previous_arraycopy(PhaseTransform* phase, Node* ld_alloc, Node*& mem, bool can_see_stored_value) const { return NULL; }
+  ArrayCopyNode* find_array_copy_clone(PhaseTransform* phase, Node* ld_alloc, Node* mem) const;
   static bool check_if_adr_maybe_raw(Node* adr);
 
 public:
@@ -137,6 +139,8 @@ public:
   bool is_unaligned_access() const { return _unaligned_access; }
   void set_mismatched_access() { _mismatched_access = true; }
   bool is_mismatched_access() const { return _mismatched_access; }
+  void set_unsafe_access() { _unsafe_access = true; }
+  bool is_unsafe_access() const { return _unsafe_access; }
 
 #ifndef PRODUCT
   static void dump_adr_type(const Node* mem, const TypePtr* adr_type, outputStream *st);
@@ -207,7 +211,7 @@ public:
   static Node* make(PhaseGVN& gvn, Node *c, Node *mem, Node *adr,
                     const TypePtr* at, const Type *rt, BasicType bt,
                     MemOrd mo, ControlDependency control_dependency = DependsOnlyOnTest,
-                    bool unaligned = false, bool mismatched = false);
+                    bool unaligned = false, bool mismatched = false, bool unsafe = false);
 
   virtual uint hash()   const;  // Check the type
 
@@ -388,7 +392,7 @@ public:
   bool require_atomic_access() const { return _require_atomic_access; }
   static LoadLNode* make_atomic(Node* ctl, Node* mem, Node* adr, const TypePtr* adr_type,
                                 const Type* rt, MemOrd mo, ControlDependency control_dependency = DependsOnlyOnTest,
-                                bool unaligned = false, bool mismatched = false);
+                                bool unaligned = false, bool mismatched = false, bool unsafe = false);
 #ifndef PRODUCT
   virtual void dump_spec(outputStream *st) const {
     LoadNode::dump_spec(st);
@@ -440,7 +444,7 @@ public:
   bool require_atomic_access() const { return _require_atomic_access; }
   static LoadDNode* make_atomic(Node* ctl, Node* mem, Node* adr, const TypePtr* adr_type,
                                 const Type* rt, MemOrd mo, ControlDependency control_dependency = DependsOnlyOnTest,
-                                bool unaligned = false, bool mismatched = false);
+                                bool unaligned = false, bool mismatched = false, bool unsafe = false);
 #ifndef PRODUCT
   virtual void dump_spec(outputStream *st) const {
     LoadNode::dump_spec(st);
@@ -607,6 +611,8 @@ public:
 
   // have all possible loads of the value stored been optimized away?
   bool value_never_loaded(PhaseTransform *phase) const;
+
+  MemBarNode* trailing_membar() const;
 };
 
 //------------------------------StoreBNode-------------------------------------
@@ -814,8 +820,10 @@ public:
   virtual const Type *bottom_type() const { return _type; }
   virtual uint ideal_reg() const;
   virtual const class TypePtr *adr_type() const { return _adr_type; }  // returns bottom_type of address
+  virtual const Type* Value(PhaseGVN* phase) const;
 
   bool result_not_used() const;
+  MemBarNode* trailing_membar() const;
 };
 
 class LoadStoreConditionalNode : public LoadStoreNode {
@@ -824,6 +832,7 @@ public:
     ExpectedIn = MemNode::ValueIn+1 // One more input than MemNode
   };
   LoadStoreConditionalNode(Node *c, Node *mem, Node *adr, Node *val, Node *ex);
+  virtual const Type* Value(PhaseGVN* phase) const;
 };
 
 //------------------------------StorePConditionalNode---------------------------
@@ -1142,6 +1151,20 @@ class MemBarNode: public MultiNode {
   // Memory type this node is serializing.  Usually either rawptr or bottom.
   const TypePtr* _adr_type;
 
+  // How is this membar related to a nearby memory access?
+  enum {
+    Standalone,
+    TrailingLoad,
+    TrailingStore,
+    LeadingStore,
+    TrailingLoadStore,
+    LeadingLoadStore
+  } _kind;
+
+#ifdef ASSERT
+  uint _pair_idx;
+#endif
+
 public:
   enum {
     Precedent = TypeFunc::Parms  // optional edge to force precedence
@@ -1159,6 +1182,24 @@ public:
   static MemBarNode* make(Compile* C, int opcode,
                           int alias_idx = Compile::AliasIdxBot,
                           Node* precedent = NULL);
+
+  MemBarNode* trailing_membar() const;
+  MemBarNode* leading_membar() const;
+
+  void set_trailing_load() { _kind = TrailingLoad; }
+  bool trailing_load() const { return _kind == TrailingLoad; }
+  bool trailing_store() const { return _kind == TrailingStore; }
+  bool leading_store() const { return _kind == LeadingStore; }
+  bool trailing_load_store() const { return _kind == TrailingLoadStore; }
+  bool leading_load_store() const { return _kind == LeadingLoadStore; }
+  bool trailing() const { return _kind == TrailingLoad || _kind == TrailingStore || _kind == TrailingLoadStore; }
+  bool leading() const { return _kind == LeadingStore || _kind == LeadingLoadStore; }
+  bool standalone() const { return _kind == Standalone; }
+
+  static void set_store_pair(MemBarNode* leading, MemBarNode* trailing);
+  static void set_load_store_pair(MemBarNode* leading, MemBarNode* trailing);
+
+  void remove(PhaseIterGVN *igvn);
 };
 
 // "Acquire" - no following ref can move before (but earlier refs can
@@ -1336,7 +1377,7 @@ public:
   // Called when the associated AllocateNode is expanded into CFG.
   Node* complete_stores(Node* rawctl, Node* rawmem, Node* rawptr,
                         intptr_t header_size, Node* size_in_bytes,
-                        PhaseGVN* phase);
+                        PhaseIterGVN* phase);
 
  private:
   void remove_extra_zeroes();

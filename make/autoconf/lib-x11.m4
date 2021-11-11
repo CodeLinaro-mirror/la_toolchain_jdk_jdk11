@@ -68,6 +68,10 @@ AC_DEFUN_ONCE([LIB_SETUP_X11],
             x_libraries="$SYSROOT/usr/lib64"
           elif test -f "$SYSROOT/usr/lib/libX11.so"; then
             x_libraries="$SYSROOT/usr/lib"
+          elif test -f "$SYSROOT/usr/lib/$OPENJDK_TARGET_CPU-$OPENJDK_TARGET_OS-$OPENJDK_TARGET_ABI/libX11.so"; then
+            x_libraries="$SYSROOT/usr/lib/$OPENJDK_TARGET_CPU-$OPENJDK_TARGET_OS-$OPENJDK_TARGET_ABI/libX11.so"
+          elif test -f "$SYSROOT/usr/lib/$OPENJDK_TARGET_CPU_AUTOCONF-$OPENJDK_TARGET_OS-$OPENJDK_TARGET_ABI/libX11.so"; then
+            x_libraries="$SYSROOT/usr/lib/$OPENJDK_TARGET_CPU_AUTOCONF-$OPENJDK_TARGET_OS-$OPENJDK_TARGET_ABI/libX11.so"
           fi
         fi
       fi
@@ -117,7 +121,7 @@ AC_DEFUN_ONCE([LIB_SETUP_X11],
 
     if test "x$X11_HEADERS_OK" = xno; then
       HELP_MSG_MISSING_DEPENDENCY([x11])
-      AC_MSG_ERROR([Could not find all X11 headers (shape.h Xrender.h Xrander.h XTest.h Intrinsic.h). $HELP_MSG])
+      AC_MSG_ERROR([Could not find all X11 headers (shape.h Xrender.h Xrandr.h XTest.h Intrinsic.h). $HELP_MSG])
     fi
 
     # If XLinearGradient isn't available in Xrender.h, signal that it needs to be

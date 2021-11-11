@@ -46,6 +46,7 @@
 #include "gc/shared/referenceProcessorPhaseTimes.hpp"
 #include "gc/shared/spaceDecorator.hpp"
 #include "gc/shared/weakProcessor.hpp"
+#include "memory/iterator.hpp"
 #include "memory/resourceArea.hpp"
 #include "logging/log.hpp"
 #include "oops/access.inline.hpp"
@@ -55,7 +56,7 @@
 #include "runtime/handles.inline.hpp"
 #include "runtime/threadCritical.hpp"
 #include "runtime/vmThread.hpp"
-#include "runtime/vm_operations.hpp"
+#include "runtime/vmOperations.hpp"
 #include "services/memoryService.hpp"
 #include "utilities/stack.inline.hpp"
 

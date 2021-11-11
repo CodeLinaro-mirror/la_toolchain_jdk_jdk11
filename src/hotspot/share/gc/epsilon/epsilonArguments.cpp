@@ -29,8 +29,6 @@
 #include "gc/shared/gcArguments.inline.hpp"
 #include "runtime/globals.hpp"
 #include "runtime/globals_extension.hpp"
-#include "runtime/vm_version.hpp"
-#include "utilities/macros.hpp"
 
 size_t EpsilonArguments::conservative_max_heap_alignment() {
   return UseLargePages ? os::large_page_size() : os::vm_page_size();
@@ -46,13 +44,25 @@ void EpsilonArguments::initialize() {
     FLAG_SET_DEFAULT(ExitOnOutOfMemoryError, true);
   }
 
+  // Warn users that non-resizable heap might be better for some configurations.
+  // We are not adjusting the heap size by ourselves, because it affects startup time.
+  if (InitialHeapSize != MaxHeapSize) {
+    log_warning(gc)("Consider setting -Xms equal to -Xmx to avoid resizing hiccups");
+  }
+
+  // Warn users that AlwaysPreTouch might be better for some configurations.
+  // We are not turning this on by ourselves, because it affects startup time.
+  if (FLAG_IS_DEFAULT(AlwaysPreTouch) && !AlwaysPreTouch) {
+    log_warning(gc)("Consider enabling -XX:+AlwaysPreTouch to avoid memory commit hiccups");
+  }
+
   if (EpsilonMaxTLABSize < MinTLABSize) {
-    warning("EpsilonMaxTLABSize < MinTLABSize, adjusting it to " SIZE_FORMAT, MinTLABSize);
+    log_warning(gc)("EpsilonMaxTLABSize < MinTLABSize, adjusting it to " SIZE_FORMAT, MinTLABSize);
     EpsilonMaxTLABSize = MinTLABSize;
   }
 
   if (!EpsilonElasticTLAB && EpsilonElasticTLABDecay) {
-    warning("Disabling EpsilonElasticTLABDecay because EpsilonElasticTLAB is disabled");
+    log_warning(gc)("Disabling EpsilonElasticTLABDecay because EpsilonElasticTLAB is disabled");
     FLAG_SET_DEFAULT(EpsilonElasticTLABDecay, false);
   }
 

@@ -36,10 +36,17 @@ class DataLayout;
 class KlassClosure;
 class ClassLoaderData;
 class Symbol;
+class Thread;
 
 // The following classes are C++ `closures` for iterating over objects, roots and spaces
 
 class Closure : public StackObj { };
+
+// Thread iterator
+class ThreadClosure: public Closure {
+ public:
+  virtual void do_thread(Thread* thread) = 0;
+};
 
 // OopClosure is used for iterating through references to Java objects.
 class OopClosure : public Closure {
@@ -309,6 +316,9 @@ public:
 
   // Read/write the 32-bit unsigned integer pointed to by p.
   virtual void do_u4(u4* p) = 0;
+
+  // Read/write the bool pointed to by p.
+  virtual void do_bool(bool* p) = 0;
 
   // Read/write the region specified.
   virtual void do_region(u_char* start, size_t size) = 0;

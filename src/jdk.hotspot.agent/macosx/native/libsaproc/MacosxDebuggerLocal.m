@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2002, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,8 +24,6 @@
 
 #include <objc/objc-runtime.h>
 #import <Foundation/Foundation.h>
-#import <JavaNativeFoundation/JavaNativeFoundation.h>
-#import <JavaRuntimeSupport/JavaRuntimeSupport.h>
 
 #include <jni.h>
 
@@ -243,7 +241,12 @@ jlong lookupByNameIncore(
     CHECK_EXCEPTION_(0);
   }
   symbolName_cstr = (*env)->GetStringUTFChars(env, symbolName, &isCopy);
-  CHECK_EXCEPTION_(0);
+  if ((*env)->ExceptionOccurred(env)) {
+    if (objectName_cstr != NULL) {
+      (*env)->ReleaseStringUTFChars(env, objectName, objectName_cstr);
+    }
+    return 0;
+  }
 
   print_debug("look for %s \n", symbolName_cstr);
   addr = (jlong) lookup_symbol(ph, objectName_cstr, symbolName_cstr);
@@ -253,6 +256,39 @@ jlong lookupByNameIncore(
   }
   (*env)->ReleaseStringUTFChars(env, symbolName, symbolName_cstr);
   return addr;
+}
+
+/* Create a pool and initiate a try block to catch any exception */
+#define JNI_COCOA_ENTER(env) \
+ NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init]; \
+ @try {
+
+/* Don't allow NSExceptions to escape to Java.
+ * If there is a Java exception that has been thrown that should escape.
+ * And ensure we drain the auto-release pool.
+ */
+#define JNI_COCOA_EXIT(env) \
+ } \
+ @catch (NSException *e) { \
+     NSLog(@"%@", [e callStackSymbols]); \
+ } \
+ @finally { \
+    [pool drain]; \
+ };
+
+static NSString* JavaStringToNSString(JNIEnv *env, jstring jstr) {
+
+    if (jstr == NULL) {
+        return NULL;
+    }
+    jsize len = (*env)->GetStringLength(env, jstr);
+    const jchar *chars = (*env)->GetStringChars(env, jstr, NULL);
+    if (chars == NULL) {
+        return NULL;
+    }
+    NSString *result = [NSString stringWithCharacters:(UniChar *)chars length:len];
+    (*env)->ReleaseStringChars(env, jstr, chars);
+    return result;
 }
 
 /*
@@ -272,8 +308,9 @@ Java_sun_jvm_hotspot_debugger_bsd_BsdDebuggerLocal_lookupByName0(
 
   jlong address = 0;
 
-JNF_COCOA_ENTER(env);
-  NSString *symbolNameString = JNFJavaToNSString(env, symbolName);
+  JNI_COCOA_ENTER(env);
+
+  NSString *symbolNameString = JavaStringToNSString(env, symbolName);
 
   print_debug("lookupInProcess called for %s\n", [symbolNameString UTF8String]);
 
@@ -284,7 +321,7 @@ JNF_COCOA_ENTER(env);
   }
 
   print_debug("address of symbol %s = %llx\n", [symbolNameString UTF8String], address);
-JNF_COCOA_EXIT(env);
+  JNI_COCOA_EXIT(env);
 
   return address;
 }
@@ -373,13 +410,22 @@ Java_sun_jvm_hotspot_debugger_bsd_BsdDebuggerLocal_readBytesFromProcess0(
 
   // Allocate storage for pages and flags.
   pages = malloc(pageCount * sizeof(vm_offset_t));
+  if (pages == NULL) {
+    (*env)->DeleteLocalRef(env, array);
+    return NULL;
+  }
   mapped = calloc(pageCount, sizeof(int));
+  if (mapped == NULL) {
+    (*env)->DeleteLocalRef(env, array);
+    free(pages);
+    return NULL;
+  }
 
   task_t gTask = getTask(env, this_obj);
   // Try to read each of the pages.
   for (i = 0; i < pageCount; i++) {
     result = vm_read(gTask, alignedAddress + i*vm_page_size, vm_page_size,
-		     &pages[i], &byteCount);
+                     &pages[i], &byteCount);
     mapped[i] = (result == KERN_SUCCESS);
     // assume all failures are unmapped pages
   }
@@ -791,7 +837,7 @@ Java_sun_jvm_hotspot_debugger_bsd_BsdDebuggerLocal_attach0__I(
 {
   print_debug("attach0 called for jpid=%d\n", (int)jpid);
 
-JNF_COCOA_ENTER(env);
+  JNI_COCOA_ENTER(env);
 
   kern_return_t result;
   task_t gTask = 0;
@@ -905,7 +951,7 @@ JNF_COCOA_ENTER(env);
     THROW_NEW_DEBUGGER_EXCEPTION("Can't attach symbolicator to the process");
   }
 
-JNF_COCOA_EXIT(env);
+  JNI_COCOA_EXIT(env);
 }
 
 /** For core file,
@@ -953,7 +999,10 @@ Java_sun_jvm_hotspot_debugger_bsd_BsdDebuggerLocal_attach0__Ljava_lang_String_2L
   execName_cstr = (*env)->GetStringUTFChars(env, execName, &isCopy);
   CHECK_EXCEPTION;
   coreName_cstr = (*env)->GetStringUTFChars(env, coreName, &isCopy);
-  CHECK_EXCEPTION;
+  if ((*env)->ExceptionOccurred(env)) {
+    (*env)->ReleaseStringUTFChars(env, execName, execName_cstr);
+    return;
+  }
 
   print_debug("attach: %s %s\n", execName_cstr, coreName_cstr);
 
@@ -996,7 +1045,8 @@ Java_sun_jvm_hotspot_debugger_bsd_BsdDebuggerLocal_detach0(
      Prelease(ph);
      return;
   }
-JNF_COCOA_ENTER(env);
+
+  JNI_COCOA_ENTER(env);
 
   task_t gTask = getTask(env, this_obj);
   kern_return_t k_res = 0;
@@ -1047,5 +1097,5 @@ JNF_COCOA_ENTER(env);
 
   detach_cleanup(gTask, env, this_obj, false);
 
-JNF_COCOA_EXIT(env);
+  JNI_COCOA_EXIT(env);
 }

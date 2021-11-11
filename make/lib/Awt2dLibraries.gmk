@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -244,7 +244,6 @@ $(eval $(call SetupJdkLibrary, BUILD_LIBAWT, \
     LIBS_macosx := -lmlib_image \
         -framework Cocoa \
         -framework OpenGL \
-        -framework JavaNativeFoundation \
         -framework JavaRuntimeSupport \
         -framework ApplicationServices \
         -framework AudioToolbox, \
@@ -371,6 +370,13 @@ else
   BUILD_LIBLCMS_INCLUDE_FILES :=
 endif
 
+ifeq ($(TOOLCHAIN_TYPE), clang)
+ ifeq ($(TOOLCHAIN_VERSION), 10.1)
+   # Work around an optimizer bug seen with Xcode 10.1, but fixed by 10.3
+   BUILD_LIBLCMS_cmsopt.c_CFLAGS := -O0
+ endif
+endif
+
 $(eval $(call SetupJdkLibrary, BUILD_LIBLCMS, \
     NAME := lcms, \
     INCLUDE_FILES := $(BUILD_LIBLCMS_INCLUDE_FILES), \
@@ -383,7 +389,7 @@ $(eval $(call SetupJdkLibrary, BUILD_LIBLCMS, \
         common/awt/debug \
         libawt/java2d, \
     HEADERS_FROM_SRC := $(LIBLCMS_HEADERS_FROM_SRC), \
-    DISABLED_WARNINGS_gcc := format-nonliteral type-limits misleading-indentation, \
+    DISABLED_WARNINGS_gcc := format-nonliteral type-limits misleading-indentation stringop-truncation, \
     DISABLED_WARNINGS_clang := tautological-compare, \
     DISABLED_WARNINGS_solstudio := E_STATEMENT_NOT_REACHED, \
     DISABLED_WARNINGS_microsoft := 4819, \
@@ -503,6 +509,8 @@ else
   LIBFREETYPE_CFLAGS := -I$(BUILD_LIBFREETYPE_HEADER_DIRS)
   ifeq ($(OPENJDK_TARGET_OS), windows)
     LIBFREETYPE_LIBS := $(SUPPORT_OUTPUTDIR)/native/$(MODULE)/libfreetype/freetype.lib
+    # freetype now requires you to manually define this (see ftconfig.h)
+    BUILD_LIBFREETYPE_CFLAGS += -DDLL_EXPORT
   else
     LIBFREETYPE_LIBS := -lfreetype
   endif
@@ -516,8 +524,8 @@ else
       DISABLED_WARNINGS_solstudio := \
          E_STATEMENT_NOT_REACHED \
          E_END_OF_LOOP_CODE_NOT_REACHED, \
-      DISABLED_WARNINGS_microsoft := 4267 4244 4312, \
-      DISABLED_WARNINGS_gcc := implicit-fallthrough, \
+      DISABLED_WARNINGS_microsoft := 4018 4267 4244 4312 4819, \
+      DISABLED_WARNINGS_gcc := implicit-fallthrough cast-function-type bad-function-cast, \
       LDFLAGS := $(LDFLAGS_JDKLIB) \
           $(call SET_SHARED_LIBRARY_ORIGIN), \
   ))
@@ -527,37 +535,57 @@ endif
 
 ###########################################################################
 
-#### Begin harfbuzz configuration
 
-HARFBUZZ_CFLAGS := -DHAVE_OT -DHAVE_FALLBACK -DHAVE_UCDN -DHAVE_ROUND
+ifeq ($(USE_EXTERNAL_HARFBUZZ), true)
+  LIBFONTMANAGER_EXTRA_SRC =
+  BUILD_LIBFONTMANAGER_FONTLIB += $(HARFBUZZ_LIBS)
+else
+  LIBFONTMANAGER_EXTRA_SRC = libharfbuzz
+  HARFBUZZ_CFLAGS := -DHAVE_OT -DHAVE_FALLBACK -DHAVE_UCDN -DHAVE_ROUND
 
-ifneq ($(OPENJDK_TARGET_OS), windows)
-  HARFBUZZ_CFLAGS += -DGETPAGESIZE -DHAVE_MPROTECT -DHAVE_PTHREAD \
-                      -DHAVE_SYSCONF -DHAVE_SYS_MMAN_H -DHAVE_UNISTD_H \
-                      -DHB_NO_PRAGMA_GCC_DIAGNOSTIC
-endif
-ifneq (, $(findstring $(OPENJDK_TARGET_OS), linux macosx))
-  HARFBUZZ_CFLAGS += -DHAVE_INTEL_ATOMIC_PRIMITIVES
-endif
-ifeq ($(OPENJDK_TARGET_OS), solaris)
-  HARFBUZZ_CFLAGS += -DHAVE_SOLARIS_ATOMIC_OPS
-endif
-ifeq ($(OPENJDK_TARGET_OS), macosx)
-  HARFBUZZ_CFLAGS += -DHAVE_CORETEXT
-endif
-ifneq ($(OPENJDK_TARGET_OS), macosx)
-  LIBFONTMANAGER_EXCLUDE_FILES += harfbuzz/hb-coretext.cc
-endif
-# hb-ft.cc is not presently needed, and requires freetype 2.4.2 or later.
-LIBFONTMANAGER_EXCLUDE_FILES += harfbuzz/hb-ft.cc
+  ifneq ($(OPENJDK_TARGET_OS), windows)
+    HARFBUZZ_CFLAGS += -DGETPAGESIZE -DHAVE_MPROTECT -DHAVE_PTHREAD \
+                       -DHAVE_SYSCONF -DHAVE_SYS_MMAN_H -DHAVE_UNISTD_H \
+                       -DHB_NO_PRAGMA_GCC_DIAGNOSTIC
+  endif
+  ifneq (, $(findstring $(OPENJDK_TARGET_OS), linux macosx))
+    HARFBUZZ_CFLAGS += -DHAVE_INTEL_ATOMIC_PRIMITIVES
+  endif
+  ifeq ($(OPENJDK_TARGET_OS), solaris)
+    HARFBUZZ_CFLAGS += -DHAVE_SOLARIS_ATOMIC_OPS
+  endif
+  ifeq ($(OPENJDK_TARGET_OS), macosx)
+    HARFBUZZ_CFLAGS += -DHAVE_CORETEXT
+  endif
+  ifneq ($(OPENJDK_TARGET_OS), macosx)
+    LIBFONTMANAGER_EXCLUDE_FILES += libharfbuzz/hb-coretext.cc
+  endif
+  # hb-ft.cc is not presently needed, and requires freetype 2.4.2 or later.
+  LIBFONTMANAGER_EXCLUDE_FILES += libharfbuzz/hb-ft.cc
 
-LIBFONTMANAGER_CFLAGS += $(HARFBUZZ_CFLAGS)
+  HARFBUZZ_DISABLED_WARNINGS_gcc := type-limits missing-field-initializers strict-aliasing
+  HARFBUZZ_DISABLED_WARNINGS_CXX_gcc := reorder delete-non-virtual-dtor strict-overflow \
+       maybe-uninitialized class-memaccess
+  HARFBUZZ_DISABLED_WARNINGS_clang := unused-value incompatible-pointer-types \
+       tautological-constant-out-of-range-compare int-to-pointer-cast \
+       undef missing-field-initializers
+  HARFBUZZ_DISABLED_WARNINGS_microsoft := 4267 4244 4090 4146 4334 4819 4101 4068 4805 4138
+  HARFBUZZ_DISABLED_WARNINGS_C_solstudio := \
+        E_INTEGER_OVERFLOW_DETECTED \
+        E_ARG_INCOMPATIBLE_WITH_ARG_L \
+        E_ENUM_VAL_OVERFLOWS_INT_MAX
+  HARFBUZZ_DISABLED_WARNINGS_CXX_solstudio := \
+        truncwarn wvarhidenmem wvarhidemem wbadlkginit identexpected \
+        hidevf w_novirtualdescr arrowrtn2 unknownpragma
 
-#### End harfbuzz configuration
+  LIBFONTMANAGER_CFLAGS += $(HARFBUZZ_CFLAGS)
+
+endif
+
 
 LIBFONTMANAGER_EXTRA_HEADER_DIRS := \
-    libfontmanager/harfbuzz \
-    libfontmanager/harfbuzz/hb-ucdn \
+    libharfbuzz \
+    libharfbuzz/hb-ucdn \
     common/awt \
     common/font \
     libawt/java2d \
@@ -566,9 +594,9 @@ LIBFONTMANAGER_EXTRA_HEADER_DIRS := \
     #
 
 LIBFONTMANAGER_CFLAGS += $(LIBFREETYPE_CFLAGS)
-BUILD_LIBFONTMANAGER_FONTLIB += $(LIBFREETYPE_LIBS)
+BUILD_LIBFONTMANAGER_FONTLIB +=  $(LIBFREETYPE_LIBS)
 
-LIBFONTMANAGER_OPTIMIZATION := HIGH
+LIBFONTMANAGER_OPTIMIZATION := HIGHEST
 
 ifeq ($(OPENJDK_TARGET_OS), windows)
   LIBFONTMANAGER_EXCLUDE_FILES += X11FontScaler.c \
@@ -606,21 +634,14 @@ $(eval $(call SetupJdkLibrary, BUILD_LIBFONTMANAGER, \
     OPTIMIZATION := $(LIBFONTMANAGER_OPTIMIZATION), \
     CFLAGS_windows = -DCC_NOEX, \
     EXTRA_HEADER_DIRS := $(LIBFONTMANAGER_EXTRA_HEADER_DIRS), \
+    EXTRA_SRC := $(LIBFONTMANAGER_EXTRA_SRC), \
     WARNINGS_AS_ERRORS_xlc := false, \
-    DISABLED_WARNINGS_gcc := sign-compare int-to-pointer-cast \
-        type-limits missing-field-initializers implicit-fallthrough strict-aliasing, \
-    DISABLED_WARNINGS_CXX_gcc := reorder delete-non-virtual-dtor strict-overflow \
-        maybe-uninitialized, \
-    DISABLED_WARNINGS_clang := unused-value incompatible-pointer-types \
-        tautological-constant-out-of-range-compare int-to-pointer-cast, \
-    DISABLED_WARNINGS_C_solstudio = \
-        E_INTEGER_OVERFLOW_DETECTED \
-        E_ARG_INCOMPATIBLE_WITH_ARG_L \
-        E_ENUM_VAL_OVERFLOWS_INT_MAX, \
-    DISABLED_WARNINGS_CXX_solstudio := \
-        truncwarn wvarhidenmem wvarhidemem wbadlkginit identexpected \
-        hidevf w_novirtualdescr arrowrtn2 unknownpragma, \
-    DISABLED_WARNINGS_microsoft := 4267 4244 4018 4090 4996 4146 4334 4819 4101 4068 4805 4138, \
+    DISABLED_WARNINGS_gcc := sign-compare unused-function int-to-pointer-cast $(HARFBUZZ_DISABLED_WARNINGS_gcc), \
+    DISABLED_WARNINGS_CXX_gcc := $(HARFBUZZ_DISABLED_WARNINGS_CXX_gcc), \
+    DISABLED_WARNINGS_clang := sign-compare $(HARFBUZZ_DISABLED_WARNINGS_clang), \
+    DISABLED_WARNINGS_C_solstudio := $(HARFBUZZ_DISABLED_WARNINGS_C_solstudio), \
+    DISABLED_WARNINGS_CXX_solstudio := $(HARFBUZZ_DISABLED_WARNINGS_CXX_solstudio), \
+    DISABLED_WARNINGS_microsoft := 4018 4996 $(HARFBUZZ_DISABLED_WARNINGS_microsoft), \
     LDFLAGS := $(subst -Xlinker -z -Xlinker defs,, \
         $(subst -Wl$(COMMA)-z$(COMMA)defs,,$(LDFLAGS_JDKLIB))) $(LDFLAGS_CXX_JDK) \
         $(call SET_SHARED_LIBRARY_ORIGIN), \
@@ -628,8 +649,7 @@ $(eval $(call SetupJdkLibrary, BUILD_LIBFONTMANAGER, \
     LDFLAGS_aix := -Wl$(COMMA)-berok, \
     LIBS := $(BUILD_LIBFONTMANAGER_FONTLIB), \
     LIBS_unix := -lawt -ljava -ljvm $(LIBM) $(LIBCXX), \
-    LIBS_macosx := -lawt_lwawt -framework CoreText -framework CoreFoundation \
-        -framework CoreGraphics, \
+    LIBS_macosx := -lawt_lwawt -framework CoreText -framework CoreFoundation -framework CoreGraphics, \
     LIBS_windows := $(WIN_JAVA_LIB) advapi32.lib user32.lib gdi32.lib \
         $(WIN_AWT_LIB), \
 ))
@@ -734,11 +754,11 @@ else # OPENJDK_TARGET_OS not windows
   ifeq ($(ENABLE_HEADLESS_ONLY), false)
     $(BUILD_LIBJAWT): $(BUILD_LIBAWT_XAWT)
   else
-    $(BUILD_LIBJAWT): $(INSTALL_LIBRARIES_HERE)/$(LIBRARY_PREFIX)awt_headless$(SHARED_LIBRARY_SUFFIX)
+    $(BUILD_LIBJAWT): $(call FindLib, $(MODULE), awt_headless)
   endif
 
   ifeq ($(OPENJDK_TARGET_OS), macosx)
-    $(BUILD_LIBJAWT): $(INSTALL_LIBRARIES_HERE)/$(LIBRARY_PREFIX)awt_lwawt$(SHARED_LIBRARY_SUFFIX)
+   $(BUILD_LIBJAWT): $(call FindLib, $(MODULE), awt_lwawt)
   endif
 
 endif # OPENJDK_TARGET_OS
@@ -795,7 +815,8 @@ ifeq ($(ENABLE_HEADLESS_ONLY), false)
     LIBSPLASHSCREEN_EXCLUDE_SRC_PATTERNS := unix
   endif
 
-  LIBSPLASHSCREEN_CFLAGS += -DSPLASHSCREEN -DPNG_NO_MMX_CODE -DPNG_ARM_NEON_OPT=0
+  LIBSPLASHSCREEN_CFLAGS += -DSPLASHSCREEN -DPNG_NO_MMX_CODE \
+                            -DPNG_ARM_NEON_OPT=0 -DPNG_ARM_NEON_IMPLEMENTATION=0
 
   ifeq ($(OPENJDK_TARGET_OS), macosx)
     LIBSPLASHSCREEN_CFLAGS += -DWITH_MACOSX
@@ -821,8 +842,7 @@ ifeq ($(ENABLE_HEADLESS_ONLY), false)
         $(LIBM) -lpthread -liconv -losxapp \
         -framework ApplicationServices \
         -framework Foundation \
-        -framework Cocoa \
-        -framework JavaNativeFoundation
+        -framework Cocoa
   else ifeq ($(OPENJDK_TARGET_OS), windows)
     LIBSPLASHSCREEN_LIBS += kernel32.lib user32.lib gdi32.lib delayimp.lib $(WIN_JAVA_LIB) jvm.lib
   else
@@ -918,7 +938,6 @@ ifeq ($(OPENJDK_TARGET_OS), macosx)
           -framework Cocoa \
           -framework Security \
           -framework ExceptionHandling \
-          -framework JavaNativeFoundation \
           -framework JavaRuntimeSupport \
           -framework OpenGL \
           -framework QuartzCore -ljava, \
@@ -956,7 +975,6 @@ ifeq ($(OPENJDK_TARGET_OS), macosx)
           -framework Cocoa \
           -framework Carbon \
           -framework ApplicationServices \
-          -framework JavaNativeFoundation \
           -framework JavaRuntimeSupport \
           -ljava -ljvm, \
   ))

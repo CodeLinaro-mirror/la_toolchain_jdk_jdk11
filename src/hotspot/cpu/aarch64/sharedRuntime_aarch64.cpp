@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, 2018, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -48,10 +48,6 @@
 #endif
 #if INCLUDE_JVMCI
 #include "jvmci/jvmciJavaClasses.hpp"
-#endif
-
-#ifdef BUILTIN_SIM
-#include "../../../../../../simulator/simulator.hpp"
 #endif
 
 #define __ masm->
@@ -102,15 +98,15 @@ class RegisterSaver {
     // Capture info about frame layout
   enum layout {
                 fpu_state_off = 0,
-                fpu_state_end = fpu_state_off+FPUStateSizeInWords-1,
+                fpu_state_end = fpu_state_off + FPUStateSizeInWords - 1,
                 // The frame sender code expects that rfp will be in
                 // the "natural" place and will override any oopMap
                 // setting for it. We must therefore force the layout
                 // so that it agrees with the frame sender code.
-                r0_off = fpu_state_off+FPUStateSizeInWords,
-                rfp_off = r0_off + 30 * 2,
-                return_off = rfp_off + 2,      // slot for return address
-                reg_save_size = return_off + 2};
+                r0_off = fpu_state_off + FPUStateSizeInWords,
+                rfp_off = r0_off + (RegisterImpl::number_of_registers - 2) * RegisterImpl::max_slots_per_register,
+                return_off = rfp_off + RegisterImpl::max_slots_per_register,      // slot for return address
+                reg_save_size = return_off + RegisterImpl::max_slots_per_register};
 
 };
 
@@ -118,19 +114,20 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int additional_
 #if COMPILER2_OR_JVMCI
   if (save_vectors) {
     // Save upper half of vector registers
-    int vect_words = 32 * 8 / wordSize;
+    int vect_words = FloatRegisterImpl::number_of_registers * FloatRegisterImpl::extra_save_slots_per_register /
+                     VMRegImpl::slots_per_word;
     additional_frame_words += vect_words;
   }
 #else
   assert(!save_vectors, "vectors are generated only by C2 and JVMCI");
 #endif
 
-  int frame_size_in_bytes = align_up(additional_frame_words*wordSize +
-                                     reg_save_size*BytesPerInt, 16);
+  int frame_size_in_bytes = align_up(additional_frame_words * wordSize +
+                                     reg_save_size * BytesPerInt, 16);
   // OopMap frame size is in compiler stack slots (jint's) not bytes or words
   int frame_size_in_slots = frame_size_in_bytes / BytesPerInt;
   // The caller will allocate additional_frame_words
-  int additional_frame_slots = additional_frame_words*wordSize / BytesPerInt;
+  int additional_frame_slots = additional_frame_words * wordSize / BytesPerInt;
   // CodeBlob frame size is in words.
   int frame_size_in_words = frame_size_in_bytes / wordSize;
   *total_frame_words = frame_size_in_words;
@@ -150,10 +147,10 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int additional_
   for (int i = 0; i < RegisterImpl::number_of_registers; i++) {
     Register r = as_Register(i);
     if (r < rheapbase && r != rscratch1 && r != rscratch2) {
-      int sp_offset = 2 * (i + 32); // SP offsets are in 4-byte words,
-                                    // register slots are 8 bytes
-                                    // wide, 32 floating-point
-                                    // registers
+      // SP offsets are in 4-byte words.
+      // Register slots are 8 bytes wide, 32 floating-point registers.
+      int sp_offset = RegisterImpl::max_slots_per_register * i +
+                      FloatRegisterImpl::save_slots_per_register * FloatRegisterImpl::number_of_registers;
       oop_map->set_callee_saved(VMRegImpl::stack2reg(sp_offset + additional_frame_slots),
                                 r->as_VMReg());
     }
@@ -161,7 +158,8 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int additional_
 
   for (int i = 0; i < FloatRegisterImpl::number_of_registers; i++) {
     FloatRegister r = as_FloatRegister(i);
-    int sp_offset = save_vectors ? (4 * i) : (2 * i);
+    int sp_offset = save_vectors ? (FloatRegisterImpl::max_slots_per_register * i) :
+                                   (FloatRegisterImpl::save_slots_per_register * i);
     oop_map->set_callee_saved(VMRegImpl::stack2reg(sp_offset),
                               r->as_VMReg());
   }
@@ -342,7 +340,7 @@ static void patch_callers_callsite(MacroAssembler *masm) {
   __ mov(c_rarg0, rmethod);
   __ mov(c_rarg1, lr);
   __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, SharedRuntime::fixup_callers_callsite)));
-  __ blrt(rscratch1, 2, 0, 0);
+  __ blr(rscratch1);
   __ maybe_isb();
 
   __ pop_CPU_state();
@@ -400,7 +398,7 @@ static void gen_c2i_adapter(MacroAssembler *masm,
     // 3    8 T_BOOL
     // -    0 return address
     //
-    // However to make thing extra confusing. Because we can fit a long/double in
+    // However to make thing extra confusing. Because we can fit a Java long/double in
     // a single slot on a 64 bt vm and it would be silly to break them up, the interpreter
     // leaves one slot empty and only stores to a single slot. In this case the
     // slot that is occupied is the T_VOID slot. See I said it was confusing.
@@ -433,7 +431,7 @@ static void gen_c2i_adapter(MacroAssembler *masm,
           __ str(rscratch1, Address(sp, next_off));
 #ifdef ASSERT
           // Overwrite the unused slot with known junk
-          __ mov(rscratch1, 0xdeadffffdeadaaaaul);
+          __ mov(rscratch1, (uint64_t)0xdeadffffdeadaaaaull);
           __ str(rscratch1, Address(sp, st_off));
 #endif /* ASSERT */
         } else {
@@ -450,10 +448,9 @@ static void gen_c2i_adapter(MacroAssembler *masm,
         // Two VMREgs|OptoRegs can be T_OBJECT, T_ADDRESS, T_DOUBLE, T_LONG
         // T_DOUBLE and T_LONG use two slots in the interpreter
         if ( sig_bt[i] == T_LONG || sig_bt[i] == T_DOUBLE) {
-          // long/double in gpr
+          // jlong/double in gpr
 #ifdef ASSERT
-          // Overwrite the unused slot with known junk
-          __ mov(rscratch1, 0xdeadffffdeadaaabul);
+          __ mov(rscratch1, (uint64_t)0xdeadffffdeadaaabull);
           __ str(rscratch1, Address(sp, st_off));
 #endif /* ASSERT */
           __ str(r, Address(sp, next_off));
@@ -469,7 +466,7 @@ static void gen_c2i_adapter(MacroAssembler *masm,
       } else {
 #ifdef ASSERT
         // Overwrite the unused slot with known junk
-        __ mov(rscratch1, 0xdeadffffdeadaaacul);
+        __ mov(rscratch1, (uint64_t)0xdeadffffdeadaaacull);
         __ str(rscratch1, Address(sp, st_off));
 #endif /* ASSERT */
         __ strd(r_1->as_FloatRegister(), Address(sp, next_off));
@@ -662,71 +659,6 @@ void SharedRuntime::gen_i2c_adapter(MacroAssembler *masm,
   __ br(rscratch1);
 }
 
-#ifdef BUILTIN_SIM
-static void generate_i2c_adapter_name(char *result, int total_args_passed, const BasicType *sig_bt)
-{
-  strcpy(result, "i2c(");
-  int idx = 4;
-  for (int i = 0; i < total_args_passed; i++) {
-    switch(sig_bt[i]) {
-    case T_BOOLEAN:
-      result[idx++] = 'Z';
-      break;
-    case T_CHAR:
-      result[idx++] = 'C';
-      break;
-    case T_FLOAT:
-      result[idx++] = 'F';
-      break;
-    case T_DOUBLE:
-      assert((i < (total_args_passed - 1)) && (sig_bt[i+1] == T_VOID),
-             "double must be followed by void");
-      i++;
-      result[idx++] = 'D';
-      break;
-    case T_BYTE:
-      result[idx++] = 'B';
-      break;
-    case T_SHORT:
-      result[idx++] = 'S';
-      break;
-    case T_INT:
-      result[idx++] = 'I';
-      break;
-    case T_LONG:
-      assert((i < (total_args_passed - 1)) && (sig_bt[i+1] == T_VOID),
-             "long must be followed by void");
-      i++;
-      result[idx++] = 'L';
-      break;
-    case T_OBJECT:
-      result[idx++] = 'O';
-      break;
-    case T_ARRAY:
-      result[idx++] = '[';
-      break;
-    case T_ADDRESS:
-      result[idx++] = 'P';
-      break;
-    case T_NARROWOOP:
-      result[idx++] = 'N';
-      break;
-    case T_METADATA:
-      result[idx++] = 'M';
-      break;
-    case T_NARROWKLASS:
-      result[idx++] = 'K';
-      break;
-    default:
-      result[idx++] = '?';
-      break;
-    }
-  }
-  result[idx++] = ')';
-  result[idx] = '\0';
-}
-#endif
-
 // ---------------------------------------------------------------
 AdapterHandlerEntry* SharedRuntime::generate_i2c2i_adapters(MacroAssembler *masm,
                                                             int total_args_passed,
@@ -735,20 +667,7 @@ AdapterHandlerEntry* SharedRuntime::generate_i2c2i_adapters(MacroAssembler *masm
                                                             const VMRegPair *regs,
                                                             AdapterFingerPrint* fingerprint) {
   address i2c_entry = __ pc();
-#ifdef BUILTIN_SIM
-  char *name = NULL;
-  AArch64Simulator *sim = NULL;
-  size_t len = 65536;
-  if (NotifySimulator) {
-    name = NEW_C_HEAP_ARRAY(char, len, mtInternal);
-  }
 
-  if (name) {
-    generate_i2c_adapter_name(name, total_args_passed, sig_bt);
-    sim = AArch64Simulator::get_current(UseSimulatorCache, DisableBCCheck);
-    sim->notifyCompile(name, i2c_entry);
-  }
-#endif
   gen_i2c_adapter(masm, total_args_passed, comp_args_on_stack, sig_bt, regs);
 
   address c2i_unverified_entry = __ pc();
@@ -789,15 +708,6 @@ AdapterHandlerEntry* SharedRuntime::generate_i2c2i_adapters(MacroAssembler *masm
   }
 
   address c2i_entry = __ pc();
-
-#ifdef BUILTIN_SIM
-  if (name) {
-    name[0] = 'c';
-    name[2] = 'i';
-    sim->notifyCompile(name, c2i_entry);
-    FREE_C_HEAP_ARRAY(char, name, mtInternal);
-  }
-#endif
 
   gen_c2i_adapter(masm, total_args_passed, comp_args_on_stack, sig_bt, regs, skip_fixup);
 
@@ -1151,12 +1061,12 @@ class ComputeMoveOrder: public StackObj {
    public:
     MoveOperation(int src_index, VMRegPair src, int dst_index, VMRegPair dst):
       _src(src)
-    , _src_index(src_index)
     , _dst(dst)
+    , _src_index(src_index)
     , _dst_index(dst_index)
+    , _processed(false)
     , _next(NULL)
-    , _prev(NULL)
-    , _processed(false) { Unimplemented(); }
+    , _prev(NULL) { Unimplemented(); }
 
     VMRegPair src() const              { Unimplemented(); return _src; }
     int src_id() const                 { Unimplemented(); return 0; }
@@ -1192,16 +1102,13 @@ class ComputeMoveOrder: public StackObj {
 };
 
 
-static void rt_call(MacroAssembler* masm, address dest, int gpargs, int fpargs, int type) {
+static void rt_call(MacroAssembler* masm, address dest) {
   CodeBlob *cb = CodeCache::find_blob(dest);
   if (cb) {
     __ far_call(RuntimeAddress(dest));
   } else {
-    assert((unsigned)gpargs < 256, "eek!");
-    assert((unsigned)fpargs < 32, "eek!");
     __ lea(rscratch1, RuntimeAddress(dest));
-    if (UseBuiltinSim)   __ mov(rscratch2, (gpargs << 6) | (fpargs << 2) | type);
-    __ blrt(rscratch1, rscratch2);
+    __ blr(rscratch1);
     __ maybe_isb();
   }
 }
@@ -1321,25 +1228,8 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                                 int compile_id,
                                                 BasicType* in_sig_bt,
                                                 VMRegPair* in_regs,
-                                                BasicType ret_type) {
-#ifdef BUILTIN_SIM
-  if (NotifySimulator) {
-    // Names are up to 65536 chars long.  UTF8-coded strings are up to
-    // 3 bytes per character.  We concatenate three such strings.
-    // Yes, I know this is ridiculous, but it's debug code and glibc
-    // allocates large arrays very efficiently.
-    size_t len = (65536 * 3) * 3;
-    char *name = new char[len];
-
-    strncpy(name, method()->method_holder()->name()->as_utf8(), len);
-    strncat(name, ".", len);
-    strncat(name, method()->name()->as_utf8(), len);
-    strncat(name, method()->signature()->as_utf8(), len);
-    AArch64Simulator::get_current(UseSimulatorCache, DisableBCCheck)->notifyCompile(name, __ pc());
-    delete[] name;
-  }
-#endif
-
+                                                BasicType ret_type,
+                                                address critical_entry) {
   if (method->is_method_handle_intrinsic()) {
     vmIntrinsics::ID iid = method->intrinsic_id();
     intptr_t start = (intptr_t)__ pc();
@@ -1365,7 +1255,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                        (OopMapSet*)NULL);
   }
   bool is_critical_native = true;
-  address native_func = method->critical_native_function();
+  address native_func = critical_entry;
   if (native_func == NULL) {
     native_func = method->native_function();
     is_critical_native = false;
@@ -1596,11 +1486,6 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   // Frame is now completed as far as size and linkage.
   int frame_complete = ((intptr_t)__ pc()) - start;
 
-  // record entry into native wrapper code
-  if (NotifySimulator) {
-    __ notify(Assembler::method_entry);
-  }
-
   // We use r20 as the oop handle for the receiver/klass
   // It is callee save so it survives the call to native
 
@@ -1781,18 +1666,15 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   }
 
   // Change state to native (we save the return address in the thread, since it might not
-  // be pushed on the stack when we do a a stack traversal). It is enough that the pc()
-  // points into the right code segment. It does not have to be the correct return pc.
+  // be pushed on the stack when we do a stack traversal).
   // We use the same pc/oopMap repeatedly when we call out
 
-  intptr_t the_pc = (intptr_t) __ pc();
-  oop_maps->add_gc_map(the_pc - start, map);
-
-  __ set_last_Java_frame(sp, noreg, (address)the_pc, rscratch1);
+  Label native_return;
+  __ set_last_Java_frame(sp, noreg, native_return, rscratch1);
 
   Label dtrace_method_entry, dtrace_method_entry_done;
   {
-    unsigned long offset;
+    uint64_t offset;
     __ adrp(rscratch1, ExternalAddress((address)&DTraceMethodProbes), offset);
     __ ldrb(rscratch1, Address(rscratch1, offset));
     __ cbnzw(rscratch1, dtrace_method_entry);
@@ -1891,33 +1773,12 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   __ lea(rscratch2, Address(rthread, JavaThread::thread_state_offset()));
   __ stlrw(rscratch1, rscratch2);
 
-  {
-    int return_type = 0;
-    switch (ret_type) {
-    case T_VOID: break;
-      return_type = 0; break;
-    case T_CHAR:
-    case T_BYTE:
-    case T_SHORT:
-    case T_INT:
-    case T_BOOLEAN:
-    case T_LONG:
-      return_type = 1; break;
-    case T_ARRAY:
-    case T_OBJECT:
-      return_type = 1; break;
-    case T_FLOAT:
-      return_type = 2; break;
-    case T_DOUBLE:
-      return_type = 3; break;
-    default:
-      ShouldNotReachHere();
-    }
-    rt_call(masm, native_func,
-            int_args + 2, // AArch64 passes up to 8 args in int registers
-            float_args,   // and up to 8 float args
-            return_type);
-  }
+  rt_call(masm, native_func);
+
+  __ bind(native_return);
+
+  intptr_t return_pc = (intptr_t) __ pc();
+  oop_maps->add_gc_map(return_pc - start, map);
 
   // Unpack native results.
   switch (ret_type) {
@@ -2038,7 +1899,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
 
   Label dtrace_method_exit, dtrace_method_exit_done;
   {
-    unsigned long offset;
+    uint64_t offset;
     __ adrp(rscratch1, ExternalAddress((address)&DTraceMethodProbes), offset);
     __ ldrb(rscratch1, Address(rscratch1, offset));
     __ cbnzw(rscratch1, dtrace_method_exit);
@@ -2069,11 +1930,6 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     // Any exception pending?
     __ ldr(rscratch1, Address(rthread, in_bytes(Thread::pending_exception_offset())));
     __ cbnz(rscratch1, exception_pending);
-  }
-
-  // record exit from native wrapper code
-  if (NotifySimulator) {
-    __ notify(Assembler::method_reentry);
   }
 
   // We're done
@@ -2140,7 +1996,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     __ ldr(r19, Address(rthread, in_bytes(Thread::pending_exception_offset())));
     __ str(zr, Address(rthread, in_bytes(Thread::pending_exception_offset())));
 
-    rt_call(masm, CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_unlocking_C), 3, 0, 1);
+    rt_call(masm, CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_unlocking_C));
 
 #ifdef ASSERT
     {
@@ -2167,7 +2023,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
 
   __ bind(reguard);
   save_native_result(masm, ret_type, stack_slots);
-  rt_call(masm, CAST_FROM_FN_PTR(address, SharedRuntime::reguard_yellow_pages), 0, 0, 0);
+  rt_call(masm, CAST_FROM_FN_PTR(address, SharedRuntime::reguard_yellow_pages));
   restore_native_result(masm, ret_type, stack_slots);
   // and continue
   __ b(reguard_done);
@@ -2190,7 +2046,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     } else {
       __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans_and_transition)));
     }
-    __ blrt(rscratch1, 1, 0, 1);
+    __ blr(rscratch1);
     __ maybe_isb();
     // Restore any method result value
     restore_native_result(masm, ret_type, stack_slots);
@@ -2287,14 +2143,6 @@ void SharedRuntime::generate_deopt_blob() {
   OopMap* map = NULL;
   OopMapSet *oop_maps = new OopMapSet();
 
-#ifdef BUILTIN_SIM
-  AArch64Simulator *simulator;
-  if (NotifySimulator) {
-    simulator = AArch64Simulator::get_current(UseSimulatorCache, DisableBCCheck);
-    simulator->notifyCompile(const_cast<char*>("SharedRuntime::deopt_blob"), __ pc());
-  }
-#endif
-
   // -------------
   // This code enters when returning to a de-optimized nmethod.  A return
   // address has been pushed on the the stack, and return values are in
@@ -2383,7 +2231,7 @@ void SharedRuntime::generate_deopt_blob() {
     __ lea(rscratch1,
            RuntimeAddress(CAST_FROM_FN_PTR(address,
                                            Deoptimization::uncommon_trap)));
-    __ blrt(rscratch1, 2, 0, MacroAssembler::ret_type_integral);
+    __ blr(rscratch1);
     __ bind(retaddr);
     oop_maps->add_gc_map( __ pc()-start, map->deep_copy());
 
@@ -2475,7 +2323,7 @@ void SharedRuntime::generate_deopt_blob() {
   __ mov(c_rarg0, rthread);
   __ mov(c_rarg1, rcpool);
   __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, Deoptimization::fetch_unroll_info)));
-  __ blrt(rscratch1, 1, 0, 1);
+  __ blr(rscratch1);
   __ bind(retaddr);
 
   // Need to have an oopmap that tells fetch_unroll_info where to
@@ -2615,7 +2463,7 @@ void SharedRuntime::generate_deopt_blob() {
   __ mov(c_rarg0, rthread);
   __ movw(c_rarg1, rcpool); // second arg: exec_mode
   __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames)));
-  __ blrt(rscratch1, 2, 0, 0);
+  __ blr(rscratch1);
 
   // Set an oopmap for the call site
   // Use the same PC we used for the last java frame
@@ -2648,12 +2496,6 @@ void SharedRuntime::generate_deopt_blob() {
     _deopt_blob->set_implicit_exception_uncommon_trap_offset(implicit_exception_uncommon_trap_offset);
   }
 #endif
-#ifdef BUILTIN_SIM
-  if (NotifySimulator) {
-    unsigned char *base = _deopt_blob->code_begin();
-    simulator->notifyRelocate(start, base - start);
-  }
-#endif
 }
 
 uint SharedRuntime::out_preserve_stack_slots() {
@@ -2668,14 +2510,6 @@ void SharedRuntime::generate_uncommon_trap_blob() {
   // Setup code generation tools
   CodeBuffer buffer("uncommon_trap_blob", 2048, 1024);
   MacroAssembler* masm = new MacroAssembler(&buffer);
-
-#ifdef BUILTIN_SIM
-  AArch64Simulator *simulator;
-  if (NotifySimulator) {
-    simulator = AArch64Simulator::get_current(UseSimulatorCache, DisableBCCheck);
-    simulator->notifyCompile(const_cast<char*>("SharedRuntime:uncommon_trap_blob"), __ pc());
-  }
-#endif
 
   assert(SimpleRuntimeFrame::framesize % 4 == 0, "sp not 16-byte aligned");
 
@@ -2715,7 +2549,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
   __ lea(rscratch1,
          RuntimeAddress(CAST_FROM_FN_PTR(address,
                                          Deoptimization::uncommon_trap)));
-  __ blrt(rscratch1, 2, 0, MacroAssembler::ret_type_integral);
+  __ blr(rscratch1);
   __ bind(retaddr);
 
   // Set an oopmap for the call site
@@ -2838,7 +2672,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
   __ mov(c_rarg0, rthread);
   __ movw(c_rarg1, (unsigned)Deoptimization::Unpack_uncommon_trap);
   __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames)));
-  __ blrt(rscratch1, 2, 0, MacroAssembler::ret_type_integral);
+  __ blr(rscratch1);
 
   // Set an oopmap for the call site
   // Use the same PC we used for the last java frame
@@ -2858,13 +2692,6 @@ void SharedRuntime::generate_uncommon_trap_blob() {
 
   _uncommon_trap_blob =  UncommonTrapBlob::create(&buffer, oop_maps,
                                                  SimpleRuntimeFrame::framesize >> 1);
-
-#ifdef BUILTIN_SIM
-  if (NotifySimulator) {
-    unsigned char *base = _deopt_blob->code_begin();
-    simulator->notifyRelocate(start, base - start);
-  }
-#endif
 }
 #endif // COMPILER2_OR_JVMCI
 
@@ -2914,7 +2741,7 @@ SafepointBlob* SharedRuntime::generate_handler_blob(address call_ptr, int poll_t
   // Do the call
   __ mov(c_rarg0, rthread);
   __ lea(rscratch1, RuntimeAddress(call_ptr));
-  __ blrt(rscratch1, 1, 0, 1);
+  __ blr(rscratch1);
   __ bind(retaddr);
 
   // Set an oopmap for the call site.  This oopmap will map all
@@ -3019,7 +2846,7 @@ RuntimeStub* SharedRuntime::generate_resolve_blob(address destination, const cha
     __ mov(c_rarg0, rthread);
     __ lea(rscratch1, RuntimeAddress(destination));
 
-    __ blrt(rscratch1, 1, 0, 1);
+    __ blr(rscratch1);
     __ bind(retaddr);
   }
 
@@ -3151,7 +2978,7 @@ void OptoRuntime::generate_exception_blob() {
   __ set_last_Java_frame(sp, noreg, the_pc, rscratch1);
   __ mov(c_rarg0, rthread);
   __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, OptoRuntime::handle_exception_C)));
-  __ blrt(rscratch1, 1, 0, MacroAssembler::ret_type_integral);
+  __ blr(rscratch1);
   __ maybe_isb();
 
   // Set an oopmap for the call site.  This oopmap will only be used if we

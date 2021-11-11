@@ -83,6 +83,7 @@ class JfrTraceId : public AllStatic {
   static void assign(const ModuleEntry* module);
   static void assign(const PackageEntry* package);
   static void assign(const ClassLoaderData* cld);
+  static traceid assign_primitive_klass_id();
   static traceid assign_thread_id();
 
   static traceid get(const Klass* klass);
@@ -90,12 +91,16 @@ class JfrTraceId : public AllStatic {
   static traceid get(const Thread* thread);
 
   // tag construct as used, returns pre-tagged traceid
-  static traceid use(const Klass* klass, bool leakp = false);
-  static traceid use(jclass jc, bool leakp = false);
-  static traceid use(const Method* method, bool leakp = false);
-  static traceid use(const ModuleEntry* module, bool leakp = false);
-  static traceid use(const PackageEntry* package, bool leakp = false);
-  static traceid use(const ClassLoaderData* cld, bool leakp = false);
+  static traceid use(const Klass* klass);
+  static traceid use(jclass jc, bool raw = false);
+  static traceid use(const Method* method);
+  static traceid use(const Klass* klass, const Method* method);
+  static traceid use(const ModuleEntry* module);
+  static traceid use(const PackageEntry* package);
+  static traceid use(const ClassLoaderData* cld);
+
+  // leak profiler
+  static void set_leakp(const Method* method);
 
   static void remove(const Klass* klass);
   static void restore(const Klass* klass);

@@ -28,11 +28,11 @@
 #import "CGLGraphicsConfig.h"
 #import "CGLSurfaceData.h"
 #import "ThreadUtilities.h"
+#import "JNIUtilities.h"
 
 #import <stdlib.h>
 #import <string.h>
 #import <ApplicationServices/ApplicationServices.h>
-#import <JavaNativeFoundation/JavaNativeFoundation.h>
 
 #pragma mark -
 #pragma mark "--- Mac OS X specific methods for GL pipeline ---"
@@ -194,7 +194,7 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
      jint displayID, jint pixfmt, jint swapInterval)
 {
   jlong ret = 0L;
-  JNF_COCOA_ENTER(env);
+  JNI_COCOA_ENTER(env);
   NSMutableArray * retArray = [NSMutableArray arrayWithCapacity:3];
   [retArray addObject: [NSNumber numberWithInt: (int)displayID]];
   [retArray addObject: [NSNumber numberWithInt: (int)pixfmt]];
@@ -206,7 +206,7 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
   }
   NSNumber * num = (NSNumber *)[retArray objectAtIndex: 0];
   ret = (jlong)[num longValue];
-  JNF_COCOA_EXIT(env);
+  JNI_COCOA_EXIT(env);
   return ret;
 }
 
@@ -217,7 +217,6 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
     AWT_ASSERT_APPKIT_THREAD;
 
     jint displayID = (jint)[(NSNumber *)[argValue objectAtIndex: 0] intValue];
-    jint pixfmt = (jint)[(NSNumber *)[argValue objectAtIndex: 1] intValue];
     jint swapInterval = (jint)[(NSNumber *)[argValue objectAtIndex: 2] intValue];
     JNIEnv *env = [ThreadUtilities getJNIEnvUncached];
     [argValue removeAllObjects];
@@ -226,11 +225,7 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
 
     NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
 
-    CGOpenGLDisplayMask glMask = (CGOpenGLDisplayMask)pixfmt;
     if (sharedContext == NULL) {
-        if (glMask == 0) {
-            glMask = CGDisplayIDToOpenGLDisplayMask(displayID);
-        }
 
         NSOpenGLPixelFormatAttribute attrs[] = {
             NSOpenGLPFAAllowOfflineRenderers,
@@ -241,16 +236,17 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
             NSOpenGLPFAColorSize, 32,
             NSOpenGLPFAAlphaSize, 8,
             NSOpenGLPFADepthSize, 16,
-            NSOpenGLPFAScreenMask, glMask,
             0
         };
 
         sharedPixelFormat =
             [[NSOpenGLPixelFormat alloc] initWithAttributes:attrs];
         if (sharedPixelFormat == nil) {
-            J2dRlsTraceLn(J2D_TRACE_ERROR, "CGLGraphicsConfig_getCGLConfigInfo: shared NSOpenGLPixelFormat is NULL");
-            [argValue addObject: [NSNumber numberWithLong: 0L]];
-            return;
+            J2dRlsTraceLn(J2D_TRACE_ERROR, 
+                          "CGLGraphicsConfig_getCGLConfigInfo: shared NSOpenGLPixelFormat is NULL");
+                
+           [argValue addObject: [NSNumber numberWithLong: 0L]];
+           return;
         }
 
         sharedContext =

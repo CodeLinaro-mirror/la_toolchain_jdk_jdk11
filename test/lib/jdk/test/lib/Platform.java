@@ -256,10 +256,13 @@ public class Platform {
      * on this platform.
      */
     public static boolean hasSA() {
+        if (isZero()) {
+            return false; // SA is not enabled.
+        }
         if (isAix()) {
             return false; // SA not implemented.
         } else if (isLinux()) {
-            if (isS390x()) {
+            if (isS390x() || isARM()) {
                 return false; // SA not implemented.
             }
         }
@@ -347,6 +350,21 @@ public class Platform {
             return "dylib";
         } else {
             return "so";
+        }
+    }
+
+    /*
+     * Returns name of system variable containing paths to shared native libraries.
+     */
+    public static String sharedLibraryPathVariableName() {
+        if (isWindows()) {
+            return "PATH";
+        } else if (isOSX()) {
+            return "DYLD_LIBRARY_PATH";
+        } else if (isAix()) {
+            return "LIBPATH";
+        } else {
+            return "LD_LIBRARY_PATH";
         }
     }
 

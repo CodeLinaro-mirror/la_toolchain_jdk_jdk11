@@ -24,18 +24,13 @@
 /**
  * @test
  * @bug 8031320
- * @summary Verify UseRTMLocking option processing on CPU without
+ * @summary Verify UseRTMLocking option processing on CPUs without
  *          rtm support.
  * @library /test/lib /
  * @modules java.base/jdk.internal.misc
  *          java.management
- * @requires (!vm.rtm.cpu) & (vm.flavor == "server" & !vm.emulatedClient)
- * @build sun.hotspot.WhiteBox
- * @run driver ClassFileInstaller sun.hotspot.WhiteBox
- *                                sun.hotspot.WhiteBox$WhiteBoxPermission
- * @run main/othervm -Xbootclasspath/a:. -XX:+UnlockDiagnosticVMOptions
- *                   -XX:+WhiteBoxAPI
- *                   compiler.rtm.cli.TestUseRTMLockingOptionOnUnsupportedCPU
+ * @requires !vm.rtm.cpu & vm.rtm.compiler
+ * @run driver compiler.rtm.cli.TestUseRTMLockingOptionOnUnsupportedCPU
  */
 
 package compiler.rtm.cli;

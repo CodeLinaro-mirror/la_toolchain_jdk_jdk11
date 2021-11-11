@@ -538,7 +538,7 @@ static char* get_user_name(uid_t uid) {
 
   char* pwbuf = NEW_C_HEAP_ARRAY(char, bufsize, mtInternal);
 
-  struct passwd* p;
+  struct passwd* p = NULL;
   int result = getpwuid_r(uid, &pwent, pwbuf, (size_t)bufsize, &p);
 
   if (result != 0 || p == NULL || p->pw_name == NULL || *(p->pw_name) == '\0') {
@@ -1111,7 +1111,7 @@ static size_t sharedmem_filesize(int fd, TRAPS) {
 
   if ((statbuf.st_size == 0) ||
      ((size_t)statbuf.st_size % os::vm_page_size() != 0)) {
-    THROW_MSG_0(vmSymbols::java_lang_Exception(),
+    THROW_MSG_0(vmSymbols::java_io_IOException(),
                 "Invalid PerfMemory size");
   }
 

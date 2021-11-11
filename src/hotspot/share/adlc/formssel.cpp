@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -641,22 +641,6 @@ bool InstructForm::needs_anti_dependence_check(FormDict &globals) const {
 }
 
 
-bool InstructForm::is_wide_memory_kill(FormDict &globals) const {
-  if( _matrule == NULL ) return false;
-  if( !_matrule->_opType ) return false;
-
-  if( strcmp(_matrule->_opType,"MemBarRelease") == 0 ) return true;
-  if( strcmp(_matrule->_opType,"MemBarAcquire") == 0 ) return true;
-  if( strcmp(_matrule->_opType,"MemBarReleaseLock") == 0 ) return true;
-  if( strcmp(_matrule->_opType,"MemBarAcquireLock") == 0 ) return true;
-  if( strcmp(_matrule->_opType,"MemBarStoreStore") == 0 ) return true;
-  if( strcmp(_matrule->_opType,"MemBarVolatile") == 0 ) return true;
-  if( strcmp(_matrule->_opType,"StoreFence") == 0 ) return true;
-  if( strcmp(_matrule->_opType,"LoadFence") == 0 ) return true;
-
-  return false;
-}
-
 int InstructForm::memory_operand(FormDict &globals) const {
   // Machine independent loads must be checked for anti-dependences
   // Check if instruction has a USE of a memory operand class, or a def.
@@ -790,6 +774,15 @@ bool InstructForm::captures_bottom_type(FormDict &globals) const {
        !strcmp(_matrule->_rChild->_opType,"CheckCastPP")  ||
        !strcmp(_matrule->_rChild->_opType,"GetAndSetP")   ||
        !strcmp(_matrule->_rChild->_opType,"GetAndSetN")   ||
+#if INCLUDE_ZGC
+       !strcmp(_matrule->_rChild->_opType,"LoadBarrierSlowReg") ||
+       !strcmp(_matrule->_rChild->_opType,"LoadBarrierWeakSlowReg") ||
+#endif
+#if INCLUDE_SHENANDOAHGC
+       !strcmp(_matrule->_rChild->_opType,"ShenandoahCompareAndExchangeP") ||
+       !strcmp(_matrule->_rChild->_opType,"ShenandoahCompareAndExchangeN") ||
+#endif
+       !strcmp(_matrule->_rChild->_opType,"StrInflatedCopy") ||
        !strcmp(_matrule->_rChild->_opType,"CompareAndExchangeP") ||
        !strcmp(_matrule->_rChild->_opType,"CompareAndExchangeN")))  return true;
   else if ( is_ideal_load() == Form::idealP )                return true;
@@ -1173,6 +1166,9 @@ const char *InstructForm::mach_base_class(FormDict &globals)  const {
   else if (is_ideal_nop()) {
     return "MachNopNode";
   }
+  else if( is_ideal_membar()) {
+    return "MachMemBarNode";
+  }
   else if (is_ideal_jump()) {
     return "MachJumpNode";
   }
@@ -1532,6 +1528,7 @@ Predicate *InstructForm::build_predicate() {
   for( DictI i(&names); i.test(); ++i ) {
     uintptr_t cnt = (uintptr_t)i._value;
     if( cnt > 1 ) {             // Need a predicate at all?
+      int path_bitmask = 0;
       assert( cnt == 2, "Unimplemented" );
       // Handle many pairs
       if( first ) first=0;
@@ -1542,10 +1539,10 @@ Predicate *InstructForm::build_predicate() {
       // Add predicate to working buffer
       sprintf(s,"/*%s*/(",(char*)i._key);
       s += strlen(s);
-      mnode->build_instr_pred(s,(char*)i._key,0);
+      mnode->build_instr_pred(s,(char*)i._key, 0, path_bitmask, 0);
       s += strlen(s);
       strcpy(s," == "); s += strlen(s);
-      mnode->build_instr_pred(s,(char*)i._key,1);
+      mnode->build_instr_pred(s,(char*)i._key, 1, path_bitmask, 0);
       s += strlen(s);
       strcpy(s,")"); s += strlen(s);
     }
@@ -3431,21 +3428,35 @@ void MatchNode::count_instr_names( Dict &names ) {
 //------------------------------build_instr_pred-------------------------------
 // Build a path to 'name' in buf.  Actually only build if cnt is zero, so we
 // can skip some leading instances of 'name'.
-int MatchNode::build_instr_pred( char *buf, const char *name, int cnt ) {
+int MatchNode::build_instr_pred( char *buf, const char *name, int cnt, int path_bitmask, int level) {
   if( _lChild ) {
-    if( !cnt ) strcpy( buf, "_kids[0]->" );
-    cnt = _lChild->build_instr_pred( buf+strlen(buf), name, cnt );
-    if( cnt < 0 ) return cnt;   // Found it, all done
+    cnt = _lChild->build_instr_pred(buf, name, cnt, path_bitmask, level+1);
+    if( cnt < 0 ) {
+      return cnt;   // Found it, all done
+    }
   }
   if( _rChild ) {
-    if( !cnt ) strcpy( buf, "_kids[1]->" );
-    cnt = _rChild->build_instr_pred( buf+strlen(buf), name, cnt );
-    if( cnt < 0 ) return cnt;   // Found it, all done
+    path_bitmask |= 1 << level;
+    cnt = _rChild->build_instr_pred( buf, name, cnt, path_bitmask, level+1);
+    if( cnt < 0 ) {
+      return cnt;   // Found it, all done
+    }
   }
   if( !_lChild && !_rChild ) {  // Found a leaf
     // Wrong name?  Give up...
     if( strcmp(name,_name) ) return cnt;
-    if( !cnt ) strcpy(buf,"_leaf");
+    if( !cnt )  {
+      for(int i = 0; i < level; i++) {
+        int kid = path_bitmask &  (1 << i);
+        if (0 == kid) {
+          strcpy( buf, "_kids[0]->" );
+        } else {
+          strcpy( buf, "_kids[1]->" );
+        }
+        buf += 10;
+      }
+      strcpy( buf, "_leaf" );
+    }
     return cnt-1;
   }
   return cnt;
@@ -3511,6 +3522,9 @@ int MatchNode::needs_ideal_memory_edge(FormDict &globals) const {
     "CompareAndSwapB", "CompareAndSwapS", "CompareAndSwapI", "CompareAndSwapL", "CompareAndSwapP", "CompareAndSwapN",
     "WeakCompareAndSwapB", "WeakCompareAndSwapS", "WeakCompareAndSwapI", "WeakCompareAndSwapL", "WeakCompareAndSwapP", "WeakCompareAndSwapN",
     "CompareAndExchangeB", "CompareAndExchangeS", "CompareAndExchangeI", "CompareAndExchangeL", "CompareAndExchangeP", "CompareAndExchangeN",
+#if INCLUDE_SHENANDOAHGC
+    "ShenandoahCompareAndSwapN", "ShenandoahCompareAndSwapP", "ShenandoahWeakCompareAndSwapP", "ShenandoahWeakCompareAndSwapN", "ShenandoahCompareAndExchangeP", "ShenandoahCompareAndExchangeN",
+#endif
     "StoreCM",
     "ClearArray",
     "GetAndSetB", "GetAndSetS", "GetAndAddI", "GetAndSetI", "GetAndSetP",
@@ -3809,9 +3823,10 @@ void MatchNode::count_commutative_op(int& count) {
     "AddVB","AddVS","AddVI","AddVL","AddVF","AddVD",
     "AndI","AndL",
     "AndV",
-    "MaxI","MinI",
+    "MaxI","MinI","MaxF","MinF","MaxD","MinD",
+    "MaxV", "MinV",
     "MulI","MulL","MulF","MulD",
-    "MulVS","MulVI","MulVL","MulVF","MulVD",
+    "MulVB","MulVS","MulVI","MulVL","MulVF","MulVD",
     "OrI","OrL",
     "OrV",
     "XorI","XorL",
@@ -4002,39 +4017,12 @@ bool MatchRule::is_chain_rule(FormDict &globals) const {
 }
 
 int MatchRule::is_ideal_copy() const {
-  if( _rChild ) {
-    const char  *opType = _rChild->_opType;
-#if 1
-    if( strcmp(opType,"CastIP")==0 )
-      return 1;
-#else
-    if( strcmp(opType,"CastII")==0 )
-      return 1;
-    // Do not treat *CastPP this way, because it
-    // may transfer a raw pointer to an oop.
-    // If the register allocator were to coalesce this
-    // into a single LRG, the GC maps would be incorrect.
-    //if( strcmp(opType,"CastPP")==0 )
-    //  return 1;
-    //if( strcmp(opType,"CheckCastPP")==0 )
-    //  return 1;
-    //
-    // Do not treat CastX2P or CastP2X this way, because
-    // raw pointers and int types are treated differently
-    // when saving local & stack info for safepoints in
-    // Output().
-    //if( strcmp(opType,"CastX2P")==0 )
-    //  return 1;
-    //if( strcmp(opType,"CastP2X")==0 )
-    //  return 1;
-#endif
-  }
-  if( is_chain_rule(_AD.globalNames()) &&
-      _lChild && strncmp(_lChild->_opType,"stackSlot",9)==0 )
+  if (is_chain_rule(_AD.globalNames()) &&
+      _lChild && strncmp(_lChild->_opType, "stackSlot", 9) == 0) {
     return 1;
+  }
   return 0;
 }
-
 
 int MatchRule::is_expensive() const {
   if( _rChild ) {
@@ -4069,6 +4057,7 @@ int MatchRule::is_expensive() const {
         strcmp(opType,"FmaD") == 0 ||
         strcmp(opType,"FmaF") == 0 ||
         strcmp(opType,"RoundDouble")==0 ||
+        strcmp(opType,"RoundDoubleMode")==0 ||
         strcmp(opType,"RoundFloat")==0 ||
         strcmp(opType,"ReverseBytesI")==0 ||
         strcmp(opType,"ReverseBytesL")==0 ||
@@ -4119,7 +4108,8 @@ bool MatchRule::is_ideal_membar() const {
     !strcmp(_opType,"StoreFence") ||
     !strcmp(_opType,"MemBarVolatile") ||
     !strcmp(_opType,"MemBarCPUOrder") ||
-    !strcmp(_opType,"MemBarStoreStore");
+    !strcmp(_opType,"MemBarStoreStore") ||
+    !strcmp(_opType,"OnSpinWait");
 }
 
 bool MatchRule::is_ideal_loadPC() const {
@@ -4177,13 +4167,14 @@ bool MatchRule::is_vector() const {
   static const char *vector_list[] = {
     "AddVB","AddVS","AddVI","AddVL","AddVF","AddVD",
     "SubVB","SubVS","SubVI","SubVL","SubVF","SubVD",
-    "MulVS","MulVI","MulVL","MulVF","MulVD",
+    "MulVB","MulVS","MulVI","MulVL","MulVF","MulVD",
     "CMoveVD", "CMoveVF",
     "DivVF","DivVD",
-    "AbsVF","AbsVD",
+    "AbsVB","AbsVS","AbsVI","AbsVL","AbsVF","AbsVD",
     "NegVF","NegVD",
     "SqrtVD","SqrtVF",
     "AndV" ,"XorV" ,"OrV",
+    "MaxV", "MinV",
     "AddReductionVI", "AddReductionVL",
     "AddReductionVF", "AddReductionVD",
     "MulReductionVI", "MulReductionVL",
@@ -4192,8 +4183,9 @@ bool MatchRule::is_vector() const {
     "LShiftVB","LShiftVS","LShiftVI","LShiftVL",
     "RShiftVB","RShiftVS","RShiftVI","RShiftVL",
     "URShiftVB","URShiftVS","URShiftVI","URShiftVL",
+    "MaxReductionV", "MinReductionV",
     "ReplicateB","ReplicateS","ReplicateI","ReplicateL","ReplicateF","ReplicateD",
-    "LoadVector","StoreVector",
+    "RoundDoubleModeV","LoadVector","StoreVector",
     "FmaVD", "FmaVF","PopCountVI",
     // Next are not supported currently.
     "PackB","PackS","PackI","PackL","PackF","PackD","Pack2L","Pack2D",

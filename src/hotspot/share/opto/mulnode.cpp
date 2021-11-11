@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,6 +31,10 @@
 #include "opto/mulnode.hpp"
 #include "opto/phaseX.hpp"
 #include "opto/subnode.hpp"
+#include "utilities/macros.hpp"
+#if INCLUDE_SHENANDOAHGC
+#include "gc/shenandoah/c2/shenandoahBarrierSetC2.hpp"
+#endif
 
 // Portions of code courtesy of Clifford Click
 
@@ -473,6 +477,15 @@ Node *AndINode::Ideal(PhaseGVN *phase, bool can_reshape) {
   const int mask = t2->get_con();
   Node *load = in(1);
   uint lop = load->Opcode();
+
+#if INCLUDE_SHENANDOAHGC
+  if (UseShenandoahGC && ShenandoahBarrierC2Support::is_gc_state_load(load)) {
+    // Do not touch the load+mask, we would match the whole sequence exactly.
+    // Converting the load to LoadUB/LoadUS would mismatch and waste a register
+    // on the barrier fastpath.
+    return NULL;
+  }
+#endif
 
   // Masking bits off of a Character?  Hi bits are already zero.
   if( lop == Op_LoadUS &&
@@ -1165,6 +1178,18 @@ Node *URShiftINode::Ideal(PhaseGVN *phase, bool can_reshape) {
       phase->type(shl->in(2)) == t2 )
     return new AndINode( shl->in(1), phase->intcon(mask) );
 
+  // Check for (x >> n) >>> 31. Replace with (x >>> 31)
+  Node *shr = in(1);
+  if ( in1_op == Op_RShiftI ) {
+    Node *in11 = shr->in(1);
+    Node *in12 = shr->in(2);
+    const TypeInt *t11 = phase->type(in11)->isa_int();
+    const TypeInt *t12 = phase->type(in12)->isa_int();
+    if ( t11 && t2 && t2->is_con(31) && t12 && t12->is_con() ) {
+      return new URShiftINode(in11, phase->intcon(31));
+    }
+  }
+
   return NULL;
 }
 
@@ -1294,6 +1319,17 @@ Node *URShiftLNode::Ideal(PhaseGVN *phase, bool can_reshape) {
       phase->type(shl->in(2)) == t2 )
     return new AndLNode( shl->in(1), phase->longcon(mask) );
 
+  // Check for (x >> n) >>> 63. Replace with (x >>> 63)
+  Node *shr = in(1);
+  if ( shr->Opcode() == Op_RShiftL ) {
+    Node *in11 = shr->in(1);
+    Node *in12 = shr->in(2);
+    const TypeLong *t11 = phase->type(in11)->isa_long();
+    const TypeInt *t12 = phase->type(in12)->isa_int();
+    if ( t11 && t2 && t2->is_con(63) && t12 && t12->is_con() ) {
+      return new URShiftLNode(in11, phase->intcon(63));
+    }
+  }
   return NULL;
 }
 

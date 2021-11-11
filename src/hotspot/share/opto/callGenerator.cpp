@@ -46,9 +46,17 @@ const TypeFunc* CallGenerator::tf() const {
   return TypeFunc::make(method());
 }
 
-bool CallGenerator::is_inlined_method_handle_intrinsic(JVMState* jvms, ciMethod* callee) {
-  ciMethod* symbolic_info = jvms->method()->get_method_at_bci(jvms->bci());
-  return symbolic_info->is_method_handle_intrinsic() && !callee->is_method_handle_intrinsic();
+bool CallGenerator::is_inlined_method_handle_intrinsic(JVMState* jvms, ciMethod* m) {
+  return is_inlined_method_handle_intrinsic(jvms->method(), jvms->bci(), m);
+}
+
+bool CallGenerator::is_inlined_method_handle_intrinsic(ciMethod* caller, int bci, ciMethod* m) {
+  ciMethod* symbolic_info = caller->get_method_at_bci(bci);
+  return is_inlined_method_handle_intrinsic(symbolic_info, m);
+}
+
+bool CallGenerator::is_inlined_method_handle_intrinsic(ciMethod* symbolic_info, ciMethod* m) {
+  return symbolic_info->is_method_handle_intrinsic() && !m->is_method_handle_intrinsic();
 }
 
 //-----------------------------ParseGenerator---------------------------------
@@ -449,7 +457,6 @@ void LateInlineCallGenerator::do_late_inline() {
     result = (result_size == 1) ? kit.pop() : kit.pop_pair();
   }
 
-  C->set_has_loops(C->has_loops() || _inline_cg->method()->has_loops());
   C->env()->notice_inlined_method(_inline_cg->method());
   C->set_inlining_progress(true);
 

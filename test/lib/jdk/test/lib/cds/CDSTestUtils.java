@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,6 +36,13 @@ import jdk.test.lib.process.ProcessTools;
 
 // This class contains common test utilities for testing CDS
 public class CDSTestUtils {
+    public static final String MSG_RANGE_NOT_WITHIN_HEAP =
+        "UseSharedSpaces: Unable to allocate region, range is not within java heap.";
+    public static final String MSG_RANGE_ALREADT_IN_USE =
+        "Unable to allocate region, java heap range is already in use.";
+    public static final String MSG_COMPRESSION_MUST_BE_USED =
+        "Unable to use shared archive: UseCompressedOops and UseCompressedClassPointers must be on for UseSharedSpaces.";
+
     public interface Checker {
         public void check(OutputAnalyzer output) throws Exception;
     }
@@ -75,21 +82,21 @@ public class CDSTestUtils {
      *
      * Instead, the test case should be written as
      *
-     *      CCDSTestUtils.run(args).assertNormalExit("Hi");
+     *      CDSTestUtils.run(args).assertNormalExit("Hi");
      *
      * EXAMPLES/HOWTO
      *
      * 1. For simple substring matching:
      *
-     *      CCDSTestUtils.run(args).assertNormalExit("Hi");
-     *      CCDSTestUtils.run(args).assertNormalExit("a", "b", "x");
-     *      CCDSTestUtils.run(args).assertAbnormalExit("failure 1", "failure2");
+     *      CDSTestUtils.run(args).assertNormalExit("Hi");
+     *      CDSTestUtils.run(args).assertNormalExit("a", "b", "x");
+     *      CDSTestUtils.run(args).assertAbnormalExit("failure 1", "failure2");
      *
      * 2. For more complex output matching: using Lambda expressions
      *
-     *      CCDSTestUtils.run(args)
+     *      CDSTestUtils.run(args)
      *         .assertNormalExit(output -> output.shouldNotContain("this should not be printed");
-     *      CCDSTestUtils.run(args)
+     *      CDSTestUtils.run(args)
      *         .assertAbnormalExit(output -> {
      *             output.shouldNotContain("this should not be printed");
      *             output.shouldHaveExitValue(123);
@@ -97,13 +104,13 @@ public class CDSTestUtils {
      *
      * 3. Chaining several checks:
      *
-     *      CCDSTestUtils.run(args)
+     *      CDSTestUtils.run(args)
      *         .assertNormalExit(output -> output.shouldNotContain("this should not be printed")
      *         .assertNormalExit("should have this", "should have that");
      *
      * 4. [Rare use case] if a test sometimes exit normally, and sometimes abnormally:
      *
-     *      CCDSTestUtils.run(args)
+     *      CDSTestUtils.run(args)
      *         .ifNormalExit("ths string is printed when exiting with 0")
      *         .ifAbNormalExit("ths string is printed when exiting with 1");
      *
@@ -297,7 +304,7 @@ public class CDSTestUtils {
     // exceptions match. Pass null if you wish not to re-throw any exception.
     public static boolean checkCommonExecExceptions(OutputAnalyzer output, Exception e)
         throws Exception {
-        if (output.getStdout().contains("http://bugreport.java.com/bugreport/crash.jsp")) {
+        if (output.getStdout().contains("https://bugreport.java.com/bugreport/crash.jsp")) {
             throw new RuntimeException("Hotspot crashed");
         }
         if (output.getStdout().contains("TEST FAILED")) {
@@ -390,9 +397,11 @@ public class CDSTestUtils {
         cmd.add("-Xshare:" + opts.xShareMode);
         cmd.add("-Dtest.timeout.factor=" + TestTimeoutFactor);
 
-        if (opts.archiveName == null)
-            opts.archiveName = getDefaultArchiveName();
-        cmd.add("-XX:SharedArchiveFile=" + opts.archiveName);
+        if (!opts.useSystemArchive) {
+            if (opts.archiveName == null)
+                opts.archiveName = getDefaultArchiveName();
+            cmd.add("-XX:SharedArchiveFile=" + opts.archiveName);
+        }
 
         if (opts.useVersion)
             cmd.add("-version");
@@ -480,7 +489,7 @@ public class CDSTestUtils {
     // create file containing the specified class list
     public static File makeClassList(String classes[])
         throws Exception {
-        return makeClassList(getTestName() + "-", classes);
+        return makeClassList(testName + "-", classes);
     }
 
     // create file containing the specified class list
@@ -510,18 +519,7 @@ public class CDSTestUtils {
         }
     }
 
-
-    // Optimization for getting a test name.
-    // Test name does not change during execution of the test,
-    // but getTestName() uses stack walking hence it is expensive.
-    // Therefore cache it and reuse it.
-    private static String testName;
-    public static String getTestName() {
-        if (testName == null) {
-            testName = Utils.getTestName();
-        }
-        return testName;
-    }
+    private static String testName = Utils.TEST_NAME.replace('/', '.');
 
     private static final SimpleDateFormat timeStampFormat =
         new SimpleDateFormat("HH'h'mm'm'ss's'SSS");
@@ -530,7 +528,7 @@ public class CDSTestUtils {
 
     // Call this method to start new archive with new unique name
     public static void startNewArchiveName() {
-        defaultArchiveName = getTestName() +
+        defaultArchiveName = testName +
             timeStampFormat.format(new Date()) + ".jsa";
     }
 
@@ -542,7 +540,7 @@ public class CDSTestUtils {
     // ===================== FILE ACCESS convenience methods
     public static File getOutputFile(String name) {
         File dir = new File(System.getProperty("test.classes", "."));
-        return new File(dir, getTestName() + "-" + name);
+        return new File(dir, testName + "-" + name);
     }
 
 

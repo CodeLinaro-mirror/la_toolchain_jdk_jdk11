@@ -39,7 +39,7 @@
 #include "oops/objArrayKlass.hpp"
 #include "oops/objArrayOop.inline.hpp"
 #include "runtime/handles.inline.hpp"
-#include "runtime/fieldDescriptor.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/java.hpp"
 #include "runtime/jniHandles.inline.hpp"
 #include "runtime/synchronizer.hpp"
@@ -168,7 +168,7 @@ static void create_object(JfrJavaArguments* args, JavaValue* result, TRAPS) {
 
   const int array_length = args->array_length();
 
-  if (array_length > 0) {
+  if (array_length >= 0) {
     array_construction(args, result, klass, array_length, CHECK);
   } else {
     object_construction(args, result, klass, THREAD);
@@ -515,6 +515,10 @@ void JfrJavaSupport::throw_out_of_memory_error(const char* message, TRAPS) {
 
 void JfrJavaSupport::throw_class_format_error(const char* message, TRAPS) {
   create_and_throw(vmSymbols::java_lang_ClassFormatError(), message, THREAD);
+}
+
+void JfrJavaSupport::throw_runtime_exception(const char* message, TRAPS) {
+  create_and_throw(vmSymbols::java_lang_RuntimeException(), message, THREAD);
 }
 
 void JfrJavaSupport::abort(jstring errorMsg, Thread* t) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,7 +33,7 @@ import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
+import sun.nio.cs.UTF_8;
 
 /**
  * Utility class for zipfile name and comment decoding and encoding
@@ -67,10 +67,10 @@ class ZipCoder {
     }
 
     // UTF_8.ArrayEn/Decoder is stateless, so make it singleton.
-    private static ZipCoder utf8 = new UTF8(UTF_8);
+    private static ZipCoder utf8 = new UTF8(UTF_8.INSTANCE);
 
     public static ZipCoder get(Charset charset) {
-        if (charset == UTF_8)
+        if (charset == UTF_8.INSTANCE)
             return utf8;
         return new ZipCoder(charset);
     }
@@ -112,11 +112,11 @@ class ZipCoder {
         return utf8.getBytes(s);
     }
 
-    String toStringUTF8(byte[] ba, int len) {
+    static String toStringUTF8(byte[] ba, int len) {
         return utf8.toString(ba, 0, len);
     }
 
-    String toStringUTF8(byte[] ba, int off, int len) {
+    static String toStringUTF8(byte[] ba, int off, int len) {
         return utf8.toString(ba, off, len);
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012 Red Hat, Inc.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -37,6 +37,7 @@
 #include "classfile/systemDictionary.hpp"
 #include "classfile/vmSymbols.hpp"
 #include "gc/shared/gcLocker.inline.hpp"
+#include "gc/shared/stringdedup/stringDedup.hpp"
 #include "interpreter/linkResolver.hpp"
 #include "jfr/jfrEvents.hpp"
 #include "jfr/support/jfrThreadId.hpp"
@@ -66,7 +67,7 @@
 #include "prims/jvmtiThreadState.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/compilationPolicy.hpp"
-#include "runtime/fieldDescriptor.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/java.hpp"
@@ -79,7 +80,7 @@
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/signature.hpp"
 #include "runtime/thread.inline.hpp"
-#include "runtime/vm_operations.hpp"
+#include "runtime/vmOperations.hpp"
 #include "services/memTracker.hpp"
 #include "services/runtimeService.hpp"
 #include "utilities/defaultStream.hpp"
@@ -585,7 +586,7 @@ JNI_QUICK_ENTRY(jboolean, jni_IsAssignableFrom(JNIEnv *env, jclass sub, jclass s
   oop super_mirror = JNIHandles::resolve_non_null(super);
   if (java_lang_Class::is_primitive(sub_mirror) ||
       java_lang_Class::is_primitive(super_mirror)) {
-    jboolean ret = oopDesc::equals(sub_mirror, super_mirror);
+    jboolean ret = (sub_mirror == super_mirror);
 
     HOTSPOT_JNI_ISASSIGNABLEFROM_RETURN(ret);
     return ret;
@@ -823,9 +824,7 @@ JNI_QUICK_ENTRY(jboolean, jni_IsSameObject(JNIEnv *env, jobject r1, jobject r2))
 
   HOTSPOT_JNI_ISSAMEOBJECT_ENTRY(env, r1, r2);
 
-  oop a = JNIHandles::resolve(r1);
-  oop b = JNIHandles::resolve(r2);
-  jboolean ret = oopDesc::equals(a, b) ? JNI_TRUE : JNI_FALSE;
+  jboolean ret = JNIHandles::is_same_object(r1, r2) ? JNI_TRUE : JNI_FALSE;
 
   HOTSPOT_JNI_ISSAMEOBJECT_RETURN(ret);
   return ret;
@@ -918,7 +917,6 @@ class JNI_ArgumentPusher : public SignatureIterator {
 
 
 class JNI_ArgumentPusherVaArg : public JNI_ArgumentPusher {
- protected:
   va_list _ap;
 
   inline void get_bool()   {
@@ -953,6 +951,10 @@ class JNI_ArgumentPusherVaArg : public JNI_ArgumentPusher {
   JNI_ArgumentPusherVaArg(jmethodID method_id, va_list rap)
       : JNI_ArgumentPusher(Method::resolve_jmethod_id(method_id)->signature()) {
     set_ap(rap);
+  }
+
+  ~JNI_ArgumentPusherVaArg() {
+    va_end(_ap);
   }
 
   // Optimized path if we have the bitvector form of signature
@@ -1229,7 +1231,7 @@ JNI_ENTRY(jobject, jni_NewObjectA(JNIEnv *env, jclass clazz, jmethodID methodID,
   HOTSPOT_JNI_NEWOBJECTA_ENTRY(env, clazz, (uintptr_t) methodID);
 
   jobject obj = NULL;
-  DT_RETURN_MARK(NewObjectA, jobject, (const jobject)obj);
+  DT_RETURN_MARK(NewObjectA, jobject, (const jobject&)obj);
 
   instanceOop i = alloc_object(clazz, CHECK_NULL);
   obj = JNIHandles::make_local(env, i);
@@ -3211,30 +3213,62 @@ JNI_ENTRY(void, jni_ReleasePrimitiveArrayCritical(JNIEnv *env, jarray array, voi
 HOTSPOT_JNI_RELEASEPRIMITIVEARRAYCRITICAL_RETURN();
 JNI_END
 
+// If a copy of string value should be returned instead
+static bool should_copy_string_value(oop str) {
+  return java_lang_String::is_latin1(str) ||
+    // To prevent deduplication from replacing the value array while setting up or in
+    // the critical section. That would lead to the release operation
+    // unpinning the wrong object.
+    (Universe::heap()->supports_object_pinning() && StringDedup::is_enabled());
+}
+
+static typeArrayOop lock_gc_or_pin_string_value(JavaThread* thread, oop str) {
+  if (Universe::heap()->supports_object_pinning()) {
+    typeArrayOop s_value = java_lang_String::value(str);
+    return (typeArrayOop) Universe::heap()->pin_object(thread, s_value);
+  } else {
+    Handle h(thread, str);      // Handlize across potential safepoint.
+    GCLocker::lock_critical(thread);
+    return java_lang_String::value(h());
+  }
+}
+
+static void unlock_gc_or_unpin_string_value(JavaThread* thread, oop str) {
+  if (Universe::heap()->supports_object_pinning()) {
+    typeArrayOop s_value = java_lang_String::value(str);
+    Universe::heap()->unpin_object(thread, s_value);
+  } else {
+    GCLocker::unlock_critical(thread);
+  }
+}
 
 JNI_ENTRY(const jchar*, jni_GetStringCritical(JNIEnv *env, jstring string, jboolean *isCopy))
   JNIWrapper("GetStringCritical");
   HOTSPOT_JNI_GETSTRINGCRITICAL_ENTRY(env, string, (uintptr_t *) isCopy);
-  oop s = lock_gc_or_pin_object(thread, string);
-  typeArrayOop s_value = java_lang_String::value(s);
-  bool is_latin1 = java_lang_String::is_latin1(s);
-  if (isCopy != NULL) {
-    *isCopy = is_latin1 ? JNI_TRUE : JNI_FALSE;
-  }
+  oop s = JNIHandles::resolve_non_null(string);
   jchar* ret;
-  if (!is_latin1) {
-    ret = (jchar*) s_value->base(T_CHAR);
-  } else {
-    // Inflate latin1 encoded string to UTF16
+  if (should_copy_string_value(s)) {
+    typeArrayOop s_value = java_lang_String::value(s);
     int s_len = java_lang_String::length(s);
     ret = NEW_C_HEAP_ARRAY_RETURN_NULL(jchar, s_len + 1, mtInternal);  // add one for zero termination
     /* JNI Specification states return NULL on OOM */
     if (ret != NULL) {
-      for (int i = 0; i < s_len; i++) {
-        ret[i] = ((jchar) s_value->byte_at(i)) & 0xff;
+      bool is_latin1 = java_lang_String::is_latin1(s);
+      // Inflate latin1 encoded string to UTF16
+      if (is_latin1) {
+        for (int i = 0; i < s_len; i++) {
+          ret[i] = ((jchar) s_value->byte_at(i)) & 0xff;
+        }
+      } else {
+        memcpy(ret, s_value->char_at_addr(0), s_len * sizeof(jchar));
       }
       ret[s_len] = 0;
     }
+    if (isCopy != NULL) *isCopy = JNI_TRUE;
+  } else {
+    typeArrayOop s_value = lock_gc_or_pin_string_value(thread, s);
+    ret = (jchar*) s_value->base(T_CHAR);
+    if (isCopy != NULL) *isCopy = JNI_FALSE;
   }
  HOTSPOT_JNI_GETSTRINGCRITICAL_RETURN((uint16_t *) ret);
   return ret;
@@ -3246,13 +3280,14 @@ JNI_ENTRY(void, jni_ReleaseStringCritical(JNIEnv *env, jstring str, const jchar 
   HOTSPOT_JNI_RELEASESTRINGCRITICAL_ENTRY(env, str, (uint16_t *) chars);
   // The str and chars arguments are ignored for UTF16 strings
   oop s = JNIHandles::resolve_non_null(str);
-  bool is_latin1 = java_lang_String::is_latin1(s);
-  if (is_latin1) {
-    // For latin1 string, free jchar array allocated by earlier call to GetStringCritical.
+  if (should_copy_string_value(s)) {
+    // For copied string value, free jchar array allocated by earlier call to GetStringCritical.
     // This assumes that ReleaseStringCritical bookends GetStringCritical.
     FREE_C_HEAP_ARRAY(jchar, chars);
+  } else {
+    // For not copied string value, drop the associated gc-locker/pin.
+    unlock_gc_or_unpin_string_value(thread, s);
   }
-  unlock_gc_or_unpin_object(thread, str);
 HOTSPOT_JNI_RELEASESTRINGCRITICAL_RETURN();
 JNI_END
 
@@ -3851,7 +3886,17 @@ static void post_thread_start_event(const JavaThread* jt) {
   EventThreadStart event;
   if (event.should_commit()) {
     event.set_thread(JFR_THREAD_ID(jt));
-    event.commit();
+    event.set_parentThread((traceid)0);
+#if INCLUDE_JFR
+    if (EventThreadStart::is_stacktrace_enabled()) {
+      jt->jfr_thread_local()->set_cached_stack_trace_id((traceid)0);
+      event.commit();
+      jt->jfr_thread_local()->clear_cached_stack_trace();
+    } else
+#endif
+    {
+      event.commit();
+    }
   }
 }
 
@@ -3863,7 +3908,8 @@ extern const struct JNIInvokeInterface_ jni_InvokeInterface;
 
 // Global invocation API vars
 volatile int vm_created = 0;
-// Indicate whether it is safe to recreate VM
+// Indicate whether it is safe to recreate VM. Recreation is only
+// possible after a failed initial creation attempt in some cases.
 volatile int safe_to_recreate_vm = 1;
 struct JavaVM_ main_vm = {&jni_InvokeInterface};
 
@@ -3935,8 +3981,14 @@ static jint JNI_CreateJavaVM_inner(JavaVM **vm, void **penv, void *args) {
   if (Atomic::xchg(1, &vm_created) == 1) {
     return JNI_EEXIST;   // already created, or create attempt in progress
   }
+
+  // If a previous creation attempt failed but can be retried safely,
+  // then safe_to_recreate_vm will have been reset to 1 after being
+  // cleared here. If a previous creation attempt succeeded and we then
+  // destroyed that VM, we will be prevented from trying to recreate
+  // the VM in the same process, as the value will still be 0.
   if (Atomic::xchg(0, &safe_to_recreate_vm) == 0) {
-    return JNI_ERR;  // someone tried and failed and retry not allowed.
+    return JNI_ERR;
   }
 
   assert(vm_created == 1, "vm_created is true during the creation");
@@ -4137,9 +4189,14 @@ static jint attach_current_thread(JavaVM *vm, void **penv, void *_args, bool dae
 
   Thread* t = Thread::current_or_null();
   if (t != NULL) {
-    // If the thread has been attached this operation is a no-op
-    *(JNIEnv**)penv = ((JavaThread*) t)->jni_environment();
-    return JNI_OK;
+    // If executing from an atexit hook we may be in the VMThread.
+    if (t->is_Java_thread()) {
+      // If the thread has been attached this operation is a no-op
+      *(JNIEnv**)penv = ((JavaThread*) t)->jni_environment();
+      return JNI_OK;
+    } else {
+      return JNI_ERR;
+    }
   }
 
   // Create a thread and mark it as attaching so it will be skipped by the
@@ -4238,7 +4295,7 @@ static jint attach_current_thread(JavaVM *vm, void **penv, void *_args, bool dae
 jint JNICALL jni_AttachCurrentThread(JavaVM *vm, void **penv, void *_args) {
   HOTSPOT_JNI_ATTACHCURRENTTHREAD_ENTRY(vm, penv, _args);
   if (vm_created == 0) {
-  HOTSPOT_JNI_ATTACHCURRENTTHREAD_RETURN((uint32_t) JNI_ERR);
+    HOTSPOT_JNI_ATTACHCURRENTTHREAD_RETURN((uint32_t) JNI_ERR);
     return JNI_ERR;
   }
 
@@ -4251,18 +4308,30 @@ jint JNICALL jni_AttachCurrentThread(JavaVM *vm, void **penv, void *_args) {
 
 jint JNICALL jni_DetachCurrentThread(JavaVM *vm)  {
   HOTSPOT_JNI_DETACHCURRENTTHREAD_ENTRY(vm);
+  if (vm_created == 0) {
+    HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN(JNI_ERR);
+    return JNI_ERR;
+  }
 
   JNIWrapper("DetachCurrentThread");
 
+  Thread* current = Thread::current_or_null();
+
   // If the thread has already been detached the operation is a no-op
-  if (Thread::current_or_null() == NULL) {
+  if (current == NULL) {
     HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN(JNI_OK);
     return JNI_OK;
   }
 
+  // If executing from an atexit hook we may be in the VMThread.
+  if (!current->is_Java_thread()) {
+    HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN((uint32_t) JNI_ERR);
+    return JNI_ERR;
+  }
+
   VM_Exit::block_if_vm_exited();
 
-  JavaThread* thread = JavaThread::current();
+  JavaThread* thread = (JavaThread*) current;
   if (thread->has_last_Java_frame()) {
     HOTSPOT_JNI_DETACHCURRENTTHREAD_RETURN((uint32_t) JNI_ERR);
     // Can't detach a thread that's running java, that can't work.

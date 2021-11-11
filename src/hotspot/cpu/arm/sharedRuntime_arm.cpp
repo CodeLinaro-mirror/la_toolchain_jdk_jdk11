@@ -217,14 +217,14 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm,
   __ push(SAVED_BASE_REGS);
   if (HaveVFP) {
     if (VM_Version::has_vfp3_32()) {
-      __ fstmdbd(SP, FloatRegisterSet(D16, 16), writeback);
+      __ fpush(FloatRegisterSet(D16, 16));
     } else {
       if (FloatRegisterImpl::number_of_registers > 32) {
         assert(FloatRegisterImpl::number_of_registers == 64, "nb fp registers should be 64");
         __ sub(SP, SP, 32 * wordSize);
       }
     }
-    __ fstmdbd(SP, FloatRegisterSet(D0, 16), writeback);
+    __ fpush(FloatRegisterSet(D0, 16));
   } else {
     __ sub(SP, SP, fpu_save_size * wordSize);
   }
@@ -285,9 +285,9 @@ void RegisterSaver::restore_live_registers(MacroAssembler* masm, bool restore_lr
   }
 #else
   if (HaveVFP) {
-    __ fldmiad(SP, FloatRegisterSet(D0, 16), writeback);
+    __ fpop(FloatRegisterSet(D0, 16));
     if (VM_Version::has_vfp3_32()) {
-      __ fldmiad(SP, FloatRegisterSet(D16, 16), writeback);
+      __ fpop(FloatRegisterSet(D16, 16));
     } else {
       if (FloatRegisterImpl::number_of_registers > 32) {
         assert(FloatRegisterImpl::number_of_registers == 64, "nb fp registers should be 64");
@@ -382,26 +382,21 @@ static void push_param_registers(MacroAssembler* masm, int fp_regs_in_arguments)
   // R1-R3 arguments need to be saved, but we push 4 registers for 8-byte alignment
   __ push(RegisterSet(R0, R3));
 
-#ifdef __ABI_HARD__
   // preserve arguments
   // Likely not needed as the locking code won't probably modify volatile FP registers,
   // but there is no way to guarantee that
   if (fp_regs_in_arguments) {
     // convert fp_regs_in_arguments to a number of double registers
     int double_regs_num = (fp_regs_in_arguments + 1) >> 1;
-    __ fstmdbd(SP, FloatRegisterSet(D0, double_regs_num), writeback);
+    __ fpush_hardfp(FloatRegisterSet(D0, double_regs_num));
   }
-#endif // __ ABI_HARD__
 }
 
 static void pop_param_registers(MacroAssembler* masm, int fp_regs_in_arguments) {
-#ifdef __ABI_HARD__
   if (fp_regs_in_arguments) {
     int double_regs_num = (fp_regs_in_arguments + 1) >> 1;
-    __ fldmiad(SP, FloatRegisterSet(D0, double_regs_num), writeback);
+    __ fpop_hardfp(FloatRegisterSet(D0, double_regs_num));
   }
-#endif // __ABI_HARD__
-
   __ pop(RegisterSet(R0, R3));
 }
 
@@ -701,6 +696,7 @@ static void patch_callers_callsite(MacroAssembler *masm) {
   // Pushing an even number of registers for stack alignment.
   // Selecting R9, which had to be saved anyway for some platforms.
   __ push(RegisterSet(R0, R3) | R9 | LR);
+  __ fpush_hardfp(FloatRegisterSet(D0, 8));
 #endif // AARCH64
 
   __ mov(R0, Rmethod);
@@ -711,6 +707,7 @@ static void patch_callers_callsite(MacroAssembler *masm) {
   __ raw_pop(LR, ZR);
   pop_param_registers(masm, FPR_PARAMS);
 #else
+  __ fpop_hardfp(FloatRegisterSet(D0, 8));
   __ pop(RegisterSet(R0, R3) | R9 | LR);
 #endif // AARCH64
 
@@ -1111,7 +1108,8 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                                 int compile_id,
                                                 BasicType* in_sig_bt,
                                                 VMRegPair* in_regs,
-                                                BasicType ret_type) {
+                                                BasicType ret_type,
+                                                address critical_entry) {
   if (method->is_method_handle_intrinsic()) {
     vmIntrinsics::ID iid = method->intrinsic_id();
     intptr_t start = (intptr_t)__ pc();
@@ -1624,8 +1622,9 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     // -2- test (hdr - SP) if the low two bits are 0
     __ sub(Rtemp, mark, SP, eq);
     __ movs(Rtemp, AsmOperand(Rtemp, lsr, exact_log2(os::vm_page_size())), eq);
-    // If still 'eq' then recursive locking OK: set displaced header to 0
-    __ str(Rtemp, Address(disp_hdr, BasicLock::displaced_header_offset_in_bytes()), eq);
+    // If still 'eq' then recursive locking OK
+    // set to zero if recursive lock, set to non zero otherwise (see discussion in JDK-8267042)
+    __ str(Rtemp, Address(disp_hdr, BasicLock::displaced_header_offset_in_bytes()));
     __ b(lock_done, eq);
     __ b(slow_lock);
 
@@ -1657,6 +1656,11 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   // Set FPSCR/FPCR to a known state
   if (AlwaysRestoreFPU) {
     __ restore_default_fp_mode();
+  }
+
+  // Ensure a Boolean result is mapped to 0..1
+  if (ret_type == T_BOOLEAN) {
+    __ c2bool(R0);
   }
 
   // Do a safepoint check while thread is in transition state
@@ -2115,9 +2119,9 @@ void SharedRuntime::generate_deopt_blob() {
   __ mov(R0, Rthread);
   __ mov(R1, Rkind);
 
-  pc_offset = __ set_last_Java_frame(SP, FP, false, Rtemp);
+  pc_offset = __ set_last_Java_frame(SP, FP, true, Rtemp);
   assert(((__ pc()) - start) == __ offset(), "warning: start differs from code_begin");
-  __ call(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames));
+  __ call_VM_leaf(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames));
   if (pc_offset == -1) {
     pc_offset = __ offset();
   }
@@ -2332,8 +2336,8 @@ void SharedRuntime::generate_uncommon_trap_blob() {
   // Call unpack_frames with proper arguments
   __ mov(R0, Rthread);
   __ mov(R1, Deoptimization::Unpack_uncommon_trap);
-  __ set_last_Java_frame(SP, FP, false, Rtemp);
-  __ call(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames));
+  __ set_last_Java_frame(SP, FP, true, Rtemp);
+  __ call_VM_leaf(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames));
   //  oop_maps->add_gc_map(__ pc() - start, new OopMap(frame_size_in_words, 0));
   __ reset_last_Java_frame(Rtemp);
 

@@ -978,6 +978,40 @@ class StubGenerator: public StubCodeGenerator {
     return start;
   }
 
+  address generate_vector_mask(const char *stub_name, int64_t mask) {
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", stub_name);
+    address start = __ pc();
+
+    __ emit_data64(mask, relocInfo::none);
+    __ emit_data64(mask, relocInfo::none);
+    __ emit_data64(mask, relocInfo::none);
+    __ emit_data64(mask, relocInfo::none);
+    __ emit_data64(mask, relocInfo::none);
+    __ emit_data64(mask, relocInfo::none);
+    __ emit_data64(mask, relocInfo::none);
+    __ emit_data64(mask, relocInfo::none);
+
+    return start;
+  }
+
+  address generate_vector_byte_perm_mask(const char *stub_name) {
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", stub_name);
+    address start = __ pc();
+
+    __ emit_data64(0x0000000000000001, relocInfo::none);
+    __ emit_data64(0x0000000000000003, relocInfo::none);
+    __ emit_data64(0x0000000000000005, relocInfo::none);
+    __ emit_data64(0x0000000000000007, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000002, relocInfo::none);
+    __ emit_data64(0x0000000000000004, relocInfo::none);
+    __ emit_data64(0x0000000000000006, relocInfo::none);
+
+    return start;
+  }
+
   // Non-destructive plausibility checks for oops
   //
   // Arguments:
@@ -1219,30 +1253,58 @@ class StubGenerator: public StubCodeGenerator {
     if (UseUnalignedLoadStores) {
       Label L_end;
       // Copy 64-bytes per iteration
-      __ BIND(L_loop);
       if (UseAVX > 2) {
+        Label L_loop_avx512, L_loop_avx2, L_32_byte_head, L_above_threshold, L_below_threshold;
+
+        __ BIND(L_copy_bytes);
+        __ cmpptr(qword_count, (-1 * AVX3Threshold / 8));
+        __ jccb(Assembler::less, L_above_threshold);
+        __ jmpb(L_below_threshold);
+
+        __ bind(L_loop_avx512);
         __ evmovdqul(xmm0, Address(end_from, qword_count, Address::times_8, -56), Assembler::AVX_512bit);
         __ evmovdqul(Address(end_to, qword_count, Address::times_8, -56), xmm0, Assembler::AVX_512bit);
-      } else if (UseAVX == 2) {
+        __ bind(L_above_threshold);
+        __ addptr(qword_count, 8);
+        __ jcc(Assembler::lessEqual, L_loop_avx512);
+        __ jmpb(L_32_byte_head);
+
+        __ bind(L_loop_avx2);
         __ vmovdqu(xmm0, Address(end_from, qword_count, Address::times_8, -56));
         __ vmovdqu(Address(end_to, qword_count, Address::times_8, -56), xmm0);
         __ vmovdqu(xmm1, Address(end_from, qword_count, Address::times_8, -24));
         __ vmovdqu(Address(end_to, qword_count, Address::times_8, -24), xmm1);
+        __ bind(L_below_threshold);
+        __ addptr(qword_count, 8);
+        __ jcc(Assembler::lessEqual, L_loop_avx2);
+
+        __ bind(L_32_byte_head);
+        __ subptr(qword_count, 4);  // sub(8) and add(4)
+        __ jccb(Assembler::greater, L_end);
       } else {
-        __ movdqu(xmm0, Address(end_from, qword_count, Address::times_8, -56));
-        __ movdqu(Address(end_to, qword_count, Address::times_8, -56), xmm0);
-        __ movdqu(xmm1, Address(end_from, qword_count, Address::times_8, -40));
-        __ movdqu(Address(end_to, qword_count, Address::times_8, -40), xmm1);
-        __ movdqu(xmm2, Address(end_from, qword_count, Address::times_8, -24));
-        __ movdqu(Address(end_to, qword_count, Address::times_8, -24), xmm2);
-        __ movdqu(xmm3, Address(end_from, qword_count, Address::times_8, - 8));
-        __ movdqu(Address(end_to, qword_count, Address::times_8, - 8), xmm3);
+        __ BIND(L_loop);
+        if (UseAVX == 2) {
+          __ vmovdqu(xmm0, Address(end_from, qword_count, Address::times_8, -56));
+          __ vmovdqu(Address(end_to, qword_count, Address::times_8, -56), xmm0);
+          __ vmovdqu(xmm1, Address(end_from, qword_count, Address::times_8, -24));
+          __ vmovdqu(Address(end_to, qword_count, Address::times_8, -24), xmm1);
+        } else {
+          __ movdqu(xmm0, Address(end_from, qword_count, Address::times_8, -56));
+          __ movdqu(Address(end_to, qword_count, Address::times_8, -56), xmm0);
+          __ movdqu(xmm1, Address(end_from, qword_count, Address::times_8, -40));
+          __ movdqu(Address(end_to, qword_count, Address::times_8, -40), xmm1);
+          __ movdqu(xmm2, Address(end_from, qword_count, Address::times_8, -24));
+          __ movdqu(Address(end_to, qword_count, Address::times_8, -24), xmm2);
+          __ movdqu(xmm3, Address(end_from, qword_count, Address::times_8, - 8));
+          __ movdqu(Address(end_to, qword_count, Address::times_8, - 8), xmm3);
+        }
+
+        __ BIND(L_copy_bytes);
+        __ addptr(qword_count, 8);
+        __ jcc(Assembler::lessEqual, L_loop);
+        __ subptr(qword_count, 4);  // sub(8) and add(4)
+        __ jccb(Assembler::greater, L_end);
       }
-      __ BIND(L_copy_bytes);
-      __ addptr(qword_count, 8);
-      __ jcc(Assembler::lessEqual, L_loop);
-      __ subptr(qword_count, 4);  // sub(8) and add(4)
-      __ jccb(Assembler::greater, L_end);
       // Copy trailing 32 bytes
       if (UseAVX >= 2) {
         __ vmovdqu(xmm0, Address(end_from, qword_count, Address::times_8, -24));
@@ -1299,31 +1361,59 @@ class StubGenerator: public StubCodeGenerator {
     if (UseUnalignedLoadStores) {
       Label L_end;
       // Copy 64-bytes per iteration
-      __ BIND(L_loop);
       if (UseAVX > 2) {
+        Label L_loop_avx512, L_loop_avx2, L_32_byte_head, L_above_threshold, L_below_threshold;
+
+        __ BIND(L_copy_bytes);
+        __ cmpptr(qword_count, (AVX3Threshold / 8));
+        __ jccb(Assembler::greater, L_above_threshold);
+        __ jmpb(L_below_threshold);
+
+        __ BIND(L_loop_avx512);
         __ evmovdqul(xmm0, Address(from, qword_count, Address::times_8, 0), Assembler::AVX_512bit);
         __ evmovdqul(Address(dest, qword_count, Address::times_8, 0), xmm0, Assembler::AVX_512bit);
-      } else if (UseAVX == 2) {
+        __ bind(L_above_threshold);
+        __ subptr(qword_count, 8);
+        __ jcc(Assembler::greaterEqual, L_loop_avx512);
+        __ jmpb(L_32_byte_head);
+
+        __ bind(L_loop_avx2);
         __ vmovdqu(xmm0, Address(from, qword_count, Address::times_8, 32));
         __ vmovdqu(Address(dest, qword_count, Address::times_8, 32), xmm0);
-        __ vmovdqu(xmm1, Address(from, qword_count, Address::times_8,  0));
-        __ vmovdqu(Address(dest, qword_count, Address::times_8,  0), xmm1);
-      } else {
-        __ movdqu(xmm0, Address(from, qword_count, Address::times_8, 48));
-        __ movdqu(Address(dest, qword_count, Address::times_8, 48), xmm0);
-        __ movdqu(xmm1, Address(from, qword_count, Address::times_8, 32));
-        __ movdqu(Address(dest, qword_count, Address::times_8, 32), xmm1);
-        __ movdqu(xmm2, Address(from, qword_count, Address::times_8, 16));
-        __ movdqu(Address(dest, qword_count, Address::times_8, 16), xmm2);
-        __ movdqu(xmm3, Address(from, qword_count, Address::times_8,  0));
-        __ movdqu(Address(dest, qword_count, Address::times_8,  0), xmm3);
-      }
-      __ BIND(L_copy_bytes);
-      __ subptr(qword_count, 8);
-      __ jcc(Assembler::greaterEqual, L_loop);
+        __ vmovdqu(xmm1, Address(from, qword_count, Address::times_8, 0));
+        __ vmovdqu(Address(dest, qword_count, Address::times_8, 0), xmm1);
+        __ bind(L_below_threshold);
+        __ subptr(qword_count, 8);
+        __ jcc(Assembler::greaterEqual, L_loop_avx2);
 
-      __ addptr(qword_count, 4);  // add(8) and sub(4)
-      __ jccb(Assembler::less, L_end);
+        __ bind(L_32_byte_head);
+        __ addptr(qword_count, 4);  // add(8) and sub(4)
+        __ jccb(Assembler::less, L_end);
+      } else {
+        __ BIND(L_loop);
+        if (UseAVX == 2) {
+          __ vmovdqu(xmm0, Address(from, qword_count, Address::times_8, 32));
+          __ vmovdqu(Address(dest, qword_count, Address::times_8, 32), xmm0);
+          __ vmovdqu(xmm1, Address(from, qword_count, Address::times_8,  0));
+          __ vmovdqu(Address(dest, qword_count, Address::times_8,  0), xmm1);
+        } else {
+          __ movdqu(xmm0, Address(from, qword_count, Address::times_8, 48));
+          __ movdqu(Address(dest, qword_count, Address::times_8, 48), xmm0);
+          __ movdqu(xmm1, Address(from, qword_count, Address::times_8, 32));
+          __ movdqu(Address(dest, qword_count, Address::times_8, 32), xmm1);
+          __ movdqu(xmm2, Address(from, qword_count, Address::times_8, 16));
+          __ movdqu(Address(dest, qword_count, Address::times_8, 16), xmm2);
+          __ movdqu(xmm3, Address(from, qword_count, Address::times_8,  0));
+          __ movdqu(Address(dest, qword_count, Address::times_8,  0), xmm3);
+        }
+
+        __ BIND(L_copy_bytes);
+        __ subptr(qword_count, 8);
+        __ jcc(Assembler::greaterEqual, L_loop);
+
+        __ addptr(qword_count, 4);  // add(8) and sub(4)
+        __ jccb(Assembler::less, L_end);
+      }
       // Copy trailing 32 bytes
       if (UseAVX >= 2) {
         __ vmovdqu(xmm0, Address(from, qword_count, Address::times_8, 0));
@@ -2112,7 +2202,7 @@ class StubGenerator: public StubCodeGenerator {
                       // r9 and r10 may be used to save non-volatile registers
     // 'from', 'to' and 'qword_count' are now valid
 
-    DecoratorSet decorators = IN_HEAP | IS_ARRAY | ARRAYCOPY_DISJOINT;
+    DecoratorSet decorators = IN_HEAP | IS_ARRAY;
     if (dest_uninitialized) {
       decorators |= IS_DEST_UNINITIALIZED;
     }
@@ -2295,7 +2385,7 @@ class StubGenerator: public StubCodeGenerator {
     Address from_element_addr(end_from, count, TIMES_OOP, 0);
     Address   to_element_addr(end_to,   count, TIMES_OOP, 0);
 
-    DecoratorSet decorators = IN_HEAP | IS_ARRAY | ARRAYCOPY_CHECKCAST;
+    DecoratorSet decorators = IN_HEAP | IS_ARRAY | ARRAYCOPY_CHECKCAST | ARRAYCOPY_DISJOINT;
     if (dest_uninitialized) {
       decorators |= IS_DEST_UNINITIALIZED;
     }
@@ -3550,6 +3640,36 @@ class StubGenerator: public StubCodeGenerator {
     return start;
 }
 
+  address generate_electronicCodeBook_encryptAESCrypt() {
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "electronicCodeBook_encryptAESCrypt");
+    address start = __ pc();
+    const Register from = c_rarg0;  // source array address
+    const Register to = c_rarg1;  // destination array address
+    const Register key = c_rarg2;  // key array address
+    const Register len = c_rarg3;  // src len (must be multiple of blocksize 16)
+    __ enter(); // required for proper stackwalking of RuntimeStub frame
+    __ aesecb_encrypt(from, to, key, len);
+    __ leave(); // required for proper stackwalking of RuntimeStub frame
+    __ ret(0);
+    return start;
+ }
+
+  address generate_electronicCodeBook_decryptAESCrypt() {
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "electronicCodeBook_decryptAESCrypt");
+    address start = __ pc();
+    const Register from = c_rarg0;  // source array address
+    const Register to = c_rarg1;  // destination array address
+    const Register key = c_rarg2;  // key array address
+    const Register len = c_rarg3;  // src len (must be multiple of blocksize 16)
+    __ enter(); // required for proper stackwalking of RuntimeStub frame
+    __ aesecb_decrypt(from, to, key, len);
+    __ leave(); // required for proper stackwalking of RuntimeStub frame
+    __ ret(0);
+    return start;
+  }
+
   address generate_upper_word_mask() {
     __ align(64);
     StubCodeMark mark(this, "StubRoutines", "upper_word_mask");
@@ -3721,6 +3841,123 @@ class StubGenerator: public StubCodeGenerator {
 
     __ vzeroupper();
     __ leave();
+    __ ret(0);
+    return start;
+  }
+
+  // This mask is used for incrementing counter value(linc0, linc4, etc.)
+  address counter_mask_addr() {
+    __ align(64);
+    StubCodeMark mark(this, "StubRoutines", "counter_mask_addr");
+    address start = __ pc();
+    __ emit_data64(0x08090a0b0c0d0e0f, relocInfo::none);//lbswapmask
+    __ emit_data64(0x0001020304050607, relocInfo::none);
+    __ emit_data64(0x08090a0b0c0d0e0f, relocInfo::none);
+    __ emit_data64(0x0001020304050607, relocInfo::none);
+    __ emit_data64(0x08090a0b0c0d0e0f, relocInfo::none);
+    __ emit_data64(0x0001020304050607, relocInfo::none);
+    __ emit_data64(0x08090a0b0c0d0e0f, relocInfo::none);
+    __ emit_data64(0x0001020304050607, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);//linc0 = counter_mask_addr+64
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000001, relocInfo::none);//counter_mask_addr() + 80
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000002, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000003, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000004, relocInfo::none);//linc4 = counter_mask_addr() + 128
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000004, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000004, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000004, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000008, relocInfo::none);//linc8 = counter_mask_addr() + 192
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000008, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000008, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000008, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000020, relocInfo::none);//linc32 = counter_mask_addr() + 256
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000020, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000020, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000020, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000010, relocInfo::none);//linc16 = counter_mask_addr() + 320
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000010, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000010, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    __ emit_data64(0x0000000000000010, relocInfo::none);
+    __ emit_data64(0x0000000000000000, relocInfo::none);
+    return start;
+  }
+
+ // Vector AES Counter implementation
+  address generate_counterMode_VectorAESCrypt()  {
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "counterMode_AESCrypt");
+    address start = __ pc();
+    const Register from = c_rarg0; // source array address
+    const Register to = c_rarg1; // destination array address
+    const Register key = c_rarg2; // key array address r8
+    const Register counter = c_rarg3; // counter byte array initialized from counter array address
+    // and updated with the incremented counter in the end
+#ifndef _WIN64
+    const Register len_reg = c_rarg4;
+    const Register saved_encCounter_start = c_rarg5;
+    const Register used_addr = r10;
+    const Address  used_mem(rbp, 2 * wordSize);
+    const Register used = r11;
+#else
+    const Address len_mem(rbp, 6 * wordSize); // length is on stack on Win64
+    const Address saved_encCounter_mem(rbp, 7 * wordSize); // saved encrypted counter is on stack on Win64
+    const Address used_mem(rbp, 8 * wordSize); // used length is on stack on Win64
+    const Register len_reg = r10; // pick the first volatile windows register
+    const Register saved_encCounter_start = r11;
+    const Register used_addr = r13;
+    const Register used = r14;
+#endif
+    __ enter();
+   // Save state before entering routine
+    __ push(r12);
+    __ push(r13);
+    __ push(r14);
+    __ push(r15);
+#ifdef _WIN64
+    // on win64, fill len_reg from stack position
+    __ movl(len_reg, len_mem);
+    __ movptr(saved_encCounter_start, saved_encCounter_mem);
+    __ movptr(used_addr, used_mem);
+    __ movl(used, Address(used_addr, 0));
+#else
+    __ push(len_reg); // Save
+    __ movptr(used_addr, used_mem);
+    __ movl(used, Address(used_addr, 0));
+#endif
+    __ push(rbx);
+    __ aesctr_encrypt(from, to, key, counter, len_reg, used, used_addr, saved_encCounter_start);
+    // Restore state before leaving routine
+    __ pop(rbx);
+#ifdef _WIN64
+    __ movl(rax, len_mem); // return length
+#else
+    __ pop(rax); // return length
+#endif
+    __ pop(r15);
+    __ pop(r14);
+    __ pop(r13);
+    __ pop(r12);
+
+    __ leave(); // required for proper stackwalking of RuntimeStub frame
     __ ret(0);
     return start;
   }
@@ -4339,6 +4576,45 @@ address generate_cipherBlockChaining_decryptVectorAESCrypt() {
     return start;
 }
 
+// Polynomial x^128+x^127+x^126+x^121+1
+address ghash_polynomial_addr() {
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "_ghash_poly_addr");
+    address start = __ pc();
+    __ emit_data64(0x0000000000000001, relocInfo::none);
+    __ emit_data64(0xc200000000000000, relocInfo::none);
+    return start;
+}
+
+address ghash_shufflemask_addr() {
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "_ghash_shuffmask_addr");
+    address start = __ pc();
+    __ emit_data64(0x0f0f0f0f0f0f0f0f, relocInfo::none);
+    __ emit_data64(0x0f0f0f0f0f0f0f0f, relocInfo::none);
+    return start;
+}
+
+// Ghash single and multi block operations using AVX instructions
+address generate_avx_ghash_processBlocks() {
+    __ align(CodeEntryAlignment);
+
+    StubCodeMark mark(this, "StubRoutines", "ghash_processBlocks");
+    address start = __ pc();
+
+    // arguments
+    const Register state = c_rarg0;
+    const Register htbl = c_rarg1;
+    const Register data = c_rarg2;
+    const Register blocks = c_rarg3;
+    __ enter();
+   // Save state before entering routine
+    __ avx_ghash(state, htbl, data, blocks);
+    __ leave(); // required for proper stackwalking of RuntimeStub frame
+    __ ret(0);
+    return start;
+}
+
   // byte swap x86 long
   address generate_ghash_long_swap_mask() {
     __ align(CodeEntryAlignment);
@@ -4909,13 +5185,20 @@ address generate_cipherBlockChaining_decryptVectorAESCrypt() {
     const Register buf   = c_rarg1;  // source java byte array address
     const Register len   = c_rarg2;  // length
     const Register table = c_rarg3;  // crc_table address (reuse register)
-    const Register tmp   = r11;
-    assert_different_registers(crc, buf, len, table, tmp, rax);
+    const Register tmp1   = r11;
+    const Register tmp2   = r10;
+    assert_different_registers(crc, buf, len, table, tmp1, tmp2, rax);
 
     BLOCK_COMMENT("Entry:");
     __ enter(); // required for proper stackwalking of RuntimeStub frame
 
-    __ kernel_crc32(crc, buf, len, table, tmp);
+    if (VM_Version::supports_sse4_1() && VM_Version::supports_avx512_vpclmulqdq() &&
+        VM_Version::supports_avx512bw() &&
+        VM_Version::supports_avx512vl()) {
+      __ kernel_crc32_avx512(crc, buf, len, table, tmp1, tmp2);
+    } else {
+      __ kernel_crc32(crc, buf, len, table, tmp1);
+    }
 
     __ movl(rax, crc);
     __ vzeroupper();
@@ -5708,6 +5991,13 @@ address generate_cipherBlockChaining_decryptVectorAESCrypt() {
     StubRoutines::x86::_float_sign_flip  = generate_fp_mask("float_sign_flip",  0x8000000080000000);
     StubRoutines::x86::_double_sign_mask = generate_fp_mask("double_sign_mask", 0x7FFFFFFFFFFFFFFF);
     StubRoutines::x86::_double_sign_flip = generate_fp_mask("double_sign_flip", 0x8000000000000000);
+    StubRoutines::x86::_vector_float_sign_mask = generate_vector_mask("vector_float_sign_mask", 0x7FFFFFFF7FFFFFFF);
+    StubRoutines::x86::_vector_float_sign_flip = generate_vector_mask("vector_float_sign_flip", 0x8000000080000000);
+    StubRoutines::x86::_vector_double_sign_mask = generate_vector_mask("vector_double_sign_mask", 0x7FFFFFFFFFFFFFFF);
+    StubRoutines::x86::_vector_double_sign_flip = generate_vector_mask("vector_double_sign_flip", 0x8000000000000000);
+    StubRoutines::x86::_vector_short_to_byte_mask = generate_vector_mask("vector_short_to_byte_mask", 0x00ff00ff00ff00ff);
+    StubRoutines::x86::_vector_byte_perm_mask = generate_vector_byte_perm_mask("vector_byte_perm_mask");
+    StubRoutines::x86::_vector_long_sign_mask = generate_vector_mask("vector_long_sign_mask", 0x8000000000000000);
 
     // support for verify_oop (must happen after universe_init)
     StubRoutines::_verify_oop_subroutine_entry = generate_verify_oop();
@@ -5723,13 +6013,20 @@ address generate_cipherBlockChaining_decryptVectorAESCrypt() {
       StubRoutines::_cipherBlockChaining_encryptAESCrypt = generate_cipherBlockChaining_encryptAESCrypt();
       if (VM_Version::supports_vaes() &&  VM_Version::supports_avx512vl() && VM_Version::supports_avx512dq() ) {
         StubRoutines::_cipherBlockChaining_decryptAESCrypt = generate_cipherBlockChaining_decryptVectorAESCrypt();
+        StubRoutines::_electronicCodeBook_encryptAESCrypt = generate_electronicCodeBook_encryptAESCrypt();
+        StubRoutines::_electronicCodeBook_decryptAESCrypt = generate_electronicCodeBook_decryptAESCrypt();
       } else {
         StubRoutines::_cipherBlockChaining_decryptAESCrypt = generate_cipherBlockChaining_decryptAESCrypt_Parallel();
       }
     }
-    if (UseAESCTRIntrinsics){
-      StubRoutines::x86::_counter_shuffle_mask_addr = generate_counter_shuffle_mask();
-      StubRoutines::_counterMode_AESCrypt = generate_counterMode_AESCrypt_Parallel();
+    if (UseAESCTRIntrinsics) {
+      if (VM_Version::supports_vaes() && VM_Version::supports_avx512bw() && VM_Version::supports_avx512vl()) {
+        StubRoutines::x86::_counter_mask_addr = counter_mask_addr();
+        StubRoutines::_counterMode_AESCrypt = generate_counterMode_VectorAESCrypt();
+      } else {
+        StubRoutines::x86::_counter_shuffle_mask_addr = generate_counter_shuffle_mask();
+        StubRoutines::_counterMode_AESCrypt = generate_counterMode_AESCrypt_Parallel();
+      }
     }
 
     if (UseSHA1Intrinsics) {
@@ -5760,9 +6057,15 @@ address generate_cipherBlockChaining_decryptVectorAESCrypt() {
 
     // Generate GHASH intrinsics code
     if (UseGHASHIntrinsics) {
-      StubRoutines::x86::_ghash_long_swap_mask_addr = generate_ghash_long_swap_mask();
-      StubRoutines::x86::_ghash_byte_swap_mask_addr = generate_ghash_byte_swap_mask();
-      StubRoutines::_ghash_processBlocks = generate_ghash_processBlocks();
+    StubRoutines::x86::_ghash_long_swap_mask_addr = generate_ghash_long_swap_mask();
+    StubRoutines::x86::_ghash_byte_swap_mask_addr = generate_ghash_byte_swap_mask();
+      if (VM_Version::supports_avx()) {
+        StubRoutines::x86::_ghash_shuffmask_addr = ghash_shufflemask_addr();
+        StubRoutines::x86::_ghash_poly_addr = ghash_polynomial_addr();
+        StubRoutines::_ghash_processBlocks = generate_avx_ghash_processBlocks();
+      } else {
+        StubRoutines::_ghash_processBlocks = generate_ghash_processBlocks();
+      }
     }
 
     if (UseBASE64Intrinsics) {
@@ -5793,7 +6096,6 @@ address generate_cipherBlockChaining_decryptVectorAESCrypt() {
     if (UseMulAddIntrinsic) {
       StubRoutines::_mulAdd = generate_mulAdd();
     }
-#ifndef _WINDOWS
     if (UseMontgomeryMultiplyIntrinsic) {
       StubRoutines::_montgomeryMultiply
         = CAST_FROM_FN_PTR(address, SharedRuntime::montgomery_multiply);
@@ -5802,7 +6104,6 @@ address generate_cipherBlockChaining_decryptVectorAESCrypt() {
       StubRoutines::_montgomerySquare
         = CAST_FROM_FN_PTR(address, SharedRuntime::montgomery_square);
     }
-#endif // WINDOWS
 #endif // COMPILER2
 
     if (UseVectorizedMismatchIntrinsic) {

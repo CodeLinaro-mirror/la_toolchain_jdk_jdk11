@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -1002,6 +1002,9 @@ Node *Matcher::xform( Node *n, int max_stack ) {
             m = n->is_SafePoint() ? match_sfpt(n->as_SafePoint()):match_tree(n);
             if (C->failing())  return NULL;
             if (m == NULL) { Matcher::soft_match_failure(); return NULL; }
+            if (n->is_MemBar()) {
+              m->as_MachMemBar()->set_adr_type(n->adr_type());
+            }
           } else {                  // Nothing the matcher cares about
             if (n->is_Proj() && n->in(0) != NULL && n->in(0)->is_Multi()) {       // Projections?
               // Convert to machine-dependent projection
@@ -1168,6 +1171,7 @@ MachNode *Matcher::match_sfpt( SafePointNode *sfpt ) {
     if( mcall->is_MachCallJava() ) {
       MachCallJavaNode *mcall_java  = mcall->as_MachCallJava();
       const CallJavaNode *call_java =  call->as_CallJava();
+      assert(call_java->validate_symbolic_info(), "inconsistent info");
       method = call_java->method();
       mcall_java->_method = method;
       mcall_java->_bci = call_java->_bci;
@@ -1186,7 +1190,9 @@ MachNode *Matcher::match_sfpt( SafePointNode *sfpt ) {
          call_java->as_CallDynamicJava()->_vtable_index;
     }
     else if( mcall->is_MachCallRuntime() ) {
-      mcall->as_MachCallRuntime()->_name = call->as_CallRuntime()->_name;
+      MachCallRuntimeNode* mach_call_rt = mcall->as_MachCallRuntime();
+      mach_call_rt->_name = call->as_CallRuntime()->_name;
+      mach_call_rt->_leaf_no_fp = call->is_CallLeafNoFP();
     }
     msfpt = mcall;
   }
@@ -1374,7 +1380,8 @@ MachNode *Matcher::match_tree( const Node *n ) {
   s->_kids[1] = NULL;
   s->_leaf = (Node*)n;
   // Label the input tree, allocating labels from top-level arena
-  Label_Root( n, s, n->in(0), mem );
+  Node* root_mem = mem;
+  Label_Root(n, s, n->in(0), root_mem);
   if (C->failing())  return NULL;
 
   // The minimum cost match for the whole tree is found at the root State
@@ -1488,8 +1495,9 @@ static bool match_into_reg( const Node *n, Node *m, Node *control, int i, bool s
 // Store and the Load must have identical Memories (as well as identical
 // pointers).  Since the Matcher does not have anything for Memory (and
 // does not handle DAGs), I have to match the Memory input myself.  If the
-// Tree root is a Store, I require all Loads to have the identical memory.
-Node *Matcher::Label_Root( const Node *n, State *svec, Node *control, const Node *mem){
+// Tree root is a Store or if there are multiple Loads in the tree, I require
+// all Loads to have the identical memory.
+Node* Matcher::Label_Root(const Node* n, State* svec, Node* control, Node*& mem) {
   // Since Label_Root is a recursive function, its possible that we might run
   // out of stack space.  See bugs 6272980 & 6227033 for more info.
   LabelRootDepth++;
@@ -1513,6 +1521,11 @@ Node *Matcher::Label_Root( const Node *n, State *svec, Node *control, const Node
     if( m->is_Load() ) {
       if( input_mem == NULL ) {
         input_mem = m->in(MemNode::Memory);
+        if (mem == (Node*)1) {
+          // Save this memory to bail out if there's another memory access
+          // to a different memory location in the same tree.
+          mem = input_mem;
+        }
       } else if( input_mem != m->in(MemNode::Memory) ) {
         input_mem = NodeSentinel;
       }
@@ -1536,16 +1549,16 @@ Node *Matcher::Label_Root( const Node *n, State *svec, Node *control, const Node
     // the current tree.  If it finds any, that value is matched as a
     // register operand.  If not, then the normal matching is used.
     if( match_into_reg(n, m, control, i, is_shared(m)) ||
-        //
-        // Stop recursion if this is LoadNode and the root of this tree is a
-        // StoreNode and the load & store have different memories.
+        // Stop recursion if this is a LoadNode and there is another memory access
+        // to a different memory location in the same tree (for example, a StoreNode
+        // at the root of this tree or another LoadNode in one of the children).
         ((mem!=(Node*)1) && m->is_Load() && m->in(MemNode::Memory) != mem) ||
         // Can NOT include the match of a subtree when its memory state
         // is used by any of the other subtrees
         (input_mem == NodeSentinel) ) {
       // Print when we exclude matching due to different memory states at input-loads
       if (PrintOpto && (Verbose && WizardMode) && (input_mem == NodeSentinel)
-        && !((mem!=(Node*)1) && m->is_Load() && m->in(MemNode::Memory) != mem)) {
+          && !((mem!=(Node*)1) && m->is_Load() && m->in(MemNode::Memory) != mem)) {
         tty->print_cr("invalid input_mem");
       }
       // Switch to a register-only opcode; this value must be in a register
@@ -1557,7 +1570,7 @@ Node *Matcher::Label_Root( const Node *n, State *svec, Node *control, const Node
       if( control == NULL && m->in(0) != NULL && m->req() > 1 )
         control = m->in(0);         // Pick up control
       // Else match as a normal part of the match tree.
-      control = Label_Root(m,s,control,mem);
+      control = Label_Root(m, s, control, mem);
       if (C->failing()) return NULL;
     }
   }
@@ -2056,6 +2069,12 @@ void Matcher::find_shared( Node *n ) {
         // Node is shared and has no reason to clone.  Flag it as shared.
         // This causes it to match into a register for the sharing.
         set_shared(n);       // Flag as shared and
+        if (n->is_DecodeNarrowPtr()) {
+          // Oop field/array element loads must be shared but since
+          // they are shared through a DecodeN they may appear to have
+          // a single use so force sharing here.
+          set_shared(n->in(1));
+        }
         mstack.pop();        // remove node from stack
         continue;
       }
@@ -2198,13 +2217,6 @@ void Matcher::find_shared( Node *n ) {
           continue; // for(int i = ...)
         }
 
-        if( mop == Op_AddP && m->in(AddPNode::Base)->is_DecodeNarrowPtr()) {
-          // Bases used in addresses must be shared but since
-          // they are shared through a DecodeN they may appear
-          // to have a single use so force sharing here.
-          set_shared(m->in(AddPNode::Base)->in(1));
-        }
-
         // if 'n' and 'm' are part of a graph for BMI instruction, clone this node.
 #ifdef X86
         if (UseBMI1Instructions && is_bmi_pattern(n, m)) {
@@ -2251,6 +2263,14 @@ void Matcher::find_shared( Node *n ) {
       case Op_StorePConditional:
       case Op_StoreIConditional:
       case Op_StoreLConditional:
+#if INCLUDE_SHENANDOAHGC
+      case Op_ShenandoahCompareAndExchangeP:
+      case Op_ShenandoahCompareAndExchangeN:
+      case Op_ShenandoahWeakCompareAndSwapP:
+      case Op_ShenandoahWeakCompareAndSwapN:
+      case Op_ShenandoahCompareAndSwapP:
+      case Op_ShenandoahCompareAndSwapN:
+#endif
       case Op_CompareAndExchangeB:
       case Op_CompareAndExchangeS:
       case Op_CompareAndExchangeI:
@@ -2337,6 +2357,14 @@ void Matcher::find_shared( Node *n ) {
         Node* pair = new BinaryNode(n->in(1), n->in(2));
         n->set_req(2, pair);
         n->set_req(1, n->in(3));
+        n->del_req(3);
+        break;
+      }
+      case Op_CopySignD:
+      case Op_SignumF:
+      case Op_SignumD: {
+        Node* pair = new BinaryNode(n->in(2), n->in(3));
+        n->set_req(2, pair);
         n->del_req(3);
         break;
       }
@@ -2494,6 +2522,14 @@ bool Matcher::post_store_load_barrier(const Node* vmb) {
     // that a monitor exit operation contains a serializing instruction.
 
     if (xop == Op_MemBarVolatile ||
+#if INCLUDE_SHENANDOAHGC
+        xop == Op_ShenandoahCompareAndExchangeP ||
+        xop == Op_ShenandoahCompareAndExchangeN ||
+        xop == Op_ShenandoahWeakCompareAndSwapP ||
+        xop == Op_ShenandoahWeakCompareAndSwapN ||
+        xop == Op_ShenandoahCompareAndSwapN ||
+        xop == Op_ShenandoahCompareAndSwapP ||
+#endif
         xop == Op_CompareAndExchangeB ||
         xop == Op_CompareAndExchangeS ||
         xop == Op_CompareAndExchangeI ||

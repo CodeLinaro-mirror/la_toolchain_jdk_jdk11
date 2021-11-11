@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -644,6 +644,7 @@ public class Krb5LoginModule implements LoginModule {
                         // renew if ticket is old.
                         Credentials newCred = renewCredentials(cred);
                         if (newCred != null) {
+                            newCred.setProxy(cred.getProxy());
                             cred = newCred;
                         }
                     }
@@ -657,9 +658,11 @@ public class Krb5LoginModule implements LoginModule {
                 }
 
                 if (cred != null) {
-                   // get the principal name from the ticket cache
-                   if (principal == null) {
-                        principal = cred.getClient();
+                    // get the principal name from the ticket cache
+                    if (principal == null) {
+                        principal = cred.getProxy() != null
+                                ? cred.getProxy().getClient()
+                                : cred.getClient();
                    }
                 }
                 if (debug) {
@@ -1070,6 +1073,10 @@ public class Krb5LoginModule implements LoginModule {
             // create Kerberos Ticket
             if (isInitiator) {
                 kerbTicket = Krb5Util.credsToTicket(cred);
+                if (cred.getProxy() != null) {
+                    KerberosSecrets.getJavaxSecurityAuthKerberosAccess()
+                            .kerberosTicketSetProxy(kerbTicket,Krb5Util.credsToTicket(cred.getProxy()));
+                }
             }
 
             if (storeKey && encKeys != null) {

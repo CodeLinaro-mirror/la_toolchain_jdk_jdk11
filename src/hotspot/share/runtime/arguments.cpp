@@ -65,12 +65,6 @@
 #include "jfr/jfr.hpp"
 #endif
 
-// Note: This is a special bug reporting site for the JVM
-#ifdef VENDOR_URL_VM_BUG
-# define DEFAULT_VENDOR_URL_BUG VENDOR_URL_VM_BUG
-#else
-# define DEFAULT_VENDOR_URL_BUG "http://bugreport.java.com/bugreport/crash.jsp"
-#endif
 #define DEFAULT_JAVA_LAUNCHER  "generic"
 
 char*  Arguments::_jvm_flags_file               = NULL;
@@ -86,7 +80,7 @@ size_t Arguments::_min_heap_size                = 0;
 Arguments::Mode Arguments::_mode                = _mixed;
 bool   Arguments::_java_compiler                = false;
 bool   Arguments::_xdebug_mode                  = false;
-const char*  Arguments::_java_vendor_url_bug    = DEFAULT_VENDOR_URL_BUG;
+const char*  Arguments::_java_vendor_url_bug    = NULL;
 const char*  Arguments::_sun_java_launcher      = DEFAULT_JAVA_LAUNCHER;
 int    Arguments::_sun_java_launcher_pid        = -1;
 bool   Arguments::_sun_java_launcher_is_altjvm  = false;
@@ -1454,12 +1448,16 @@ bool Arguments::add_property(const char* prop, PropertyWriteable writeable, Prop
         os::free(old_java_command);
       }
     } else if (strcmp(key, "java.vendor.url.bug") == 0) {
+      // If this property is set on the command line then its value will be
+      // displayed in VM error logs as the URL at which to submit such logs.
+      // Normally the URL displayed in error logs is different from the value
+      // of this system property, so a different property should have been
+      // used here, but we leave this as-is in case someone depends upon it.
       const char* old_java_vendor_url_bug = _java_vendor_url_bug;
       // save it in _java_vendor_url_bug, so JVM fatal error handler can access
       // its value without going through the property list or making a Java call.
       _java_vendor_url_bug = os::strdup_check_oom(value, mtArguments);
-      if (old_java_vendor_url_bug != DEFAULT_VENDOR_URL_BUG) {
-        assert(old_java_vendor_url_bug != NULL, "_java_vendor_url_bug is NULL");
+      if (old_java_vendor_url_bug != NULL) {
         os::free((void *)old_java_vendor_url_bug);
       }
     }
@@ -1590,7 +1588,7 @@ static void no_shared_spaces(const char* message) {
   if (RequireSharedSpaces) {
     jio_fprintf(defaultStream::error_stream(),
       "Class data sharing is inconsistent with other specified options.\n");
-    vm_exit_during_initialization("Unable to use shared archive.", message);
+    vm_exit_during_initialization("Unable to use shared archive", message);
   } else {
     FLAG_SET_DEFAULT(UseSharedSpaces, false);
   }
@@ -2188,7 +2186,8 @@ Arguments::ArgsRange Arguments::parse_memory_size(const char* s,
 
 // Parse JavaVMInitArgs structure
 
-jint Arguments::parse_vm_init_args(const JavaVMInitArgs *java_tool_options_args,
+jint Arguments::parse_vm_init_args(const JavaVMInitArgs *vm_options_args,
+                                   const JavaVMInitArgs *java_tool_options_args,
                                    const JavaVMInitArgs *java_options_args,
                                    const JavaVMInitArgs *cmd_line_args) {
   bool patch_mod_javabase = false;
@@ -2206,9 +2205,15 @@ jint Arguments::parse_vm_init_args(const JavaVMInitArgs *java_tool_options_args,
   // Setup flags for mixed which is the default
   set_mode_flags(_mixed);
 
+  // Parse args structure generated from java.base vm options resource
+  jint result = parse_each_vm_init_arg(vm_options_args, &patch_mod_javabase, JVMFlag::JIMAGE_RESOURCE);
+  if (result != JNI_OK) {
+    return result;
+  }
+
   // Parse args structure generated from JAVA_TOOL_OPTIONS environment
   // variable (if present).
-  jint result = parse_each_vm_init_arg(java_tool_options_args, &patch_mod_javabase, JVMFlag::ENVIRON_VAR);
+  result = parse_each_vm_init_arg(java_tool_options_args, &patch_mod_javabase, JVMFlag::ENVIRON_VAR);
   if (result != JNI_OK) {
     return result;
   }
@@ -2495,9 +2500,15 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args, bool* patch_m
           (is_absolute_path = match_option(option, "-agentpath:", &tail))) {
       if(tail != NULL) {
         const char* pos = strchr(tail, '=');
-        size_t len = (pos == NULL) ? strlen(tail) : pos - tail;
-        char* name = strncpy(NEW_C_HEAP_ARRAY(char, len + 1, mtArguments), tail, len);
-        name[len] = '\0';
+        char* name;
+        if (pos == NULL) {
+          name = os::strdup_check_oom(tail, mtArguments);
+        } else {
+          size_t len = pos - tail;
+          name = NEW_C_HEAP_ARRAY(char, len + 1, mtArguments);
+          memcpy(name, tail, len);
+          name[len] = '\0';
+        }
 
         char *options = NULL;
         if(pos != NULL) {
@@ -2724,7 +2735,6 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args, bool* patch_m
         needs_module_property_warning = true;
         continue;
       }
-
       if (!add_property(tail)) {
         return JNI_ENOMEM;
       }
@@ -2923,6 +2933,20 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args, bool* patch_m
       if (FLAG_SET_CMDLINE(bool, DisplayVMOutputToStdout, true) != JVMFlag::SUCCESS) {
         return JNI_EINVAL;
       }
+    } else if (match_option(option, "-XX:+ErrorFileToStderr")) {
+      if (FLAG_SET_CMDLINE(bool, ErrorFileToStdout, false) != JVMFlag::SUCCESS) {
+        return JNI_EINVAL;
+      }
+      if (FLAG_SET_CMDLINE(bool, ErrorFileToStderr, true) != JVMFlag::SUCCESS) {
+        return JNI_EINVAL;
+      }
+    } else if (match_option(option, "-XX:+ErrorFileToStdout")) {
+      if (FLAG_SET_CMDLINE(bool, ErrorFileToStderr, false) != JVMFlag::SUCCESS) {
+        return JNI_EINVAL;
+      }
+      if (FLAG_SET_CMDLINE(bool, ErrorFileToStdout, true) != JVMFlag::SUCCESS) {
+        return JNI_EINVAL;
+      }
     } else if (match_option(option, "-XX:+ExtendedDTraceProbes")) {
 #if defined(DTRACE_ENABLED)
       if (FLAG_SET_CMDLINE(bool, ExtendedDTraceProbes, true) != JVMFlag::SUCCESS) {
@@ -3113,6 +3137,11 @@ jint Arguments::finalize_vm_init_args(bool patch_mod_javabase) {
   if ((CompileThresholdScaling == 0.0) || (!TieredCompilation && CompileThreshold == 0)) {
     set_mode_flags(_int);
   }
+
+#ifdef ZERO
+  // Zero always runs in interpreted mode
+  set_mode_flags(_int);
+#endif
 
   // eventually fix up InitialTenuringThreshold if only MaxTenuringThreshold is set
   if (FLAG_IS_DEFAULT(InitialTenuringThreshold) && (InitialTenuringThreshold > MaxTenuringThreshold)) {
@@ -3734,16 +3763,19 @@ jint Arguments::parse(const JavaVMInitArgs* initial_cmd_args) {
   const char* hotspotrc = ".hotspotrc";
   bool settings_file_specified = false;
   bool needs_hotspotrc_warning = false;
+  ScopedVMInitArgs initial_vm_options_args("");
   ScopedVMInitArgs initial_java_tool_options_args("env_var='JAVA_TOOL_OPTIONS'");
   ScopedVMInitArgs initial_java_options_args("env_var='_JAVA_OPTIONS'");
 
   // Pointers to current working set of containers
   JavaVMInitArgs* cur_cmd_args;
+  JavaVMInitArgs* cur_vm_options_args;
   JavaVMInitArgs* cur_java_options_args;
   JavaVMInitArgs* cur_java_tool_options_args;
 
   // Containers for modified/expanded options
   ScopedVMInitArgs mod_cmd_args("cmd_line_args");
+  ScopedVMInitArgs mod_vm_options_args("vm_options_args");
   ScopedVMInitArgs mod_java_tool_options_args("env_var='JAVA_TOOL_OPTIONS'");
   ScopedVMInitArgs mod_java_options_args("env_var='_JAVA_OPTIONS'");
 
@@ -3757,6 +3789,16 @@ jint Arguments::parse(const JavaVMInitArgs* initial_cmd_args) {
   code = parse_java_options_environment_variable(&initial_java_options_args);
   if (code != JNI_OK) {
     return code;
+  }
+
+  // Parse the options in the /java.base/jdk/internal/vm/options resource, if present
+  char *vmoptions = ClassLoader::lookup_vm_options();
+  if (vmoptions != NULL) {
+    code = parse_options_buffer("vm options resource", vmoptions, strlen(vmoptions), &initial_vm_options_args);
+    FREE_C_HEAP_ARRAY(char, vmoptions);
+    if (code != JNI_OK) {
+      return code;
+    }
   }
 
   code = expand_vm_options_as_needed(initial_java_tool_options_args.get(),
@@ -3776,6 +3818,13 @@ jint Arguments::parse(const JavaVMInitArgs* initial_cmd_args) {
   code = expand_vm_options_as_needed(initial_java_options_args.get(),
                                      &mod_java_options_args,
                                      &cur_java_options_args);
+  if (code != JNI_OK) {
+    return code;
+  }
+
+  code = expand_vm_options_as_needed(initial_vm_options_args.get(),
+                                     &mod_vm_options_args,
+                                     &cur_vm_options_args);
   if (code != JNI_OK) {
     return code;
   }
@@ -3817,7 +3866,8 @@ jint Arguments::parse(const JavaVMInitArgs* initial_cmd_args) {
   }
 
   // Parse JavaVMInitArgs structure passed in, as well as JAVA_TOOL_OPTIONS and _JAVA_OPTIONS
-  jint result = parse_vm_init_args(cur_java_tool_options_args,
+  jint result = parse_vm_init_args(cur_vm_options_args,
+                                   cur_java_tool_options_args,
                                    cur_java_options_args,
                                    cur_cmd_args);
 

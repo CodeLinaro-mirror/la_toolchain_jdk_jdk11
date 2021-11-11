@@ -179,6 +179,9 @@
   nonstatic_field(JavaThread,                  _pending_failed_speculation,                   long)                                  \
   nonstatic_field(JavaThread,                  _pending_transfer_to_interpreter,              bool)                                  \
   nonstatic_field(JavaThread,                  _jvmci_counters,                               jlong*)                                \
+  nonstatic_field(JavaThread,                  _jvmci_reserved0,                              intptr_t*)                             \
+  nonstatic_field(JavaThread,                  _jvmci_reserved1,                              intptr_t*)                             \
+  nonstatic_field(JavaThread,                  _jvmci_reserved_oop0,                          oop)                                   \
   nonstatic_field(JavaThread,                  _reserved_stack_activation,                    address)                               \
                                                                                                                                      \
   static_field(java_lang_Class,                _klass_offset,                                 int)                                   \
@@ -298,6 +301,8 @@
   static_field(StubRoutines,                _aescrypt_decryptBlock,                           address)                               \
   static_field(StubRoutines,                _cipherBlockChaining_encryptAESCrypt,             address)                               \
   static_field(StubRoutines,                _cipherBlockChaining_decryptAESCrypt,             address)                               \
+  static_field(StubRoutines,                _electronicCodeBook_encryptAESCrypt,              address)                               \
+  static_field(StubRoutines,                _electronicCodeBook_decryptAESCrypt,              address)                               \
   static_field(StubRoutines,                _counterMode_AESCrypt,                            address)                               \
   static_field(StubRoutines,                _base64_encodeBlock,                              address)                               \
   static_field(StubRoutines,                _ghash_processBlocks,                             address)                               \
@@ -436,6 +441,7 @@
   declare_constant(CodeInstaller::OSR_ENTRY)                              \
   declare_constant(CodeInstaller::EXCEPTION_HANDLER_ENTRY)                \
   declare_constant(CodeInstaller::DEOPT_HANDLER_ENTRY)                    \
+  declare_constant(CodeInstaller::FRAME_COMPLETE)                         \
   declare_constant(CodeInstaller::INVOKEINTERFACE)                        \
   declare_constant(CodeInstaller::INVOKEVIRTUAL)                          \
   declare_constant(CodeInstaller::INVOKESTATIC)                           \
@@ -527,7 +533,14 @@
                                                                           \
   declare_constant(InstanceKlass::linked)                                 \
   declare_constant(InstanceKlass::fully_initialized)                      \
+                                                                          \
+  /*********************************/                                     \
+  /* InstanceKlass _misc_flags */                                         \
+  /*********************************/                                     \
+                                                                          \
   declare_constant(InstanceKlass::_misc_is_anonymous)                     \
+  declare_constant(InstanceKlass::_misc_has_nonstatic_concrete_methods)   \
+  declare_constant(InstanceKlass::_misc_declares_nonstatic_concrete_methods) \
                                                                           \
   declare_constant(JumpData::taken_off_set)                               \
   declare_constant(JumpData::displacement_off_set)                        \
@@ -621,6 +634,8 @@
   declare_function(JVMCIRuntime::new_multi_array) \
   declare_function(JVMCIRuntime::dynamic_new_array) \
   declare_function(JVMCIRuntime::dynamic_new_instance) \
+  \
+  declare_function(JVMCIRuntime::invoke_static_method_one_arg) \
   \
   declare_function(JVMCIRuntime::thread_is_interrupted) \
   declare_function(JVMCIRuntime::vm_message) \

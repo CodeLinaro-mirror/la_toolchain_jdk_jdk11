@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -229,6 +229,19 @@ JRT_ENTRY_NO_ASYNC(static address, exception_handler_for_pc_helper(JavaThread* t
   }
 #endif
 
+  // debugging support
+  // tracing
+  if (log_is_enabled(Info, exceptions)) {
+    ResourceMark rm;
+    stringStream tempst;
+    tempst.print("JVMCI compiled method <%s>\n"
+                 " at PC" INTPTR_FORMAT " for thread " INTPTR_FORMAT,
+                 cm->method()->print_value_string(), p2i(pc), p2i(thread));
+    Exceptions::log_exception(exception, tempst.as_string());
+  }
+  // for AbortVMOnException flag
+  Exceptions::debug_check_abort(exception);
+
   // Check the stack guard pages and reenable them if necessary and there is
   // enough space on the stack to do so.  Use fast exceptions only if the guard
   // pages are enabled.
@@ -275,19 +288,6 @@ JRT_ENTRY_NO_ASYNC(static address, exception_handler_for_pc_helper(JavaThread* t
 
     // New exception handling mechanism can support inlined methods
     // with exception handlers since the mappings are from PC to PC
-
-    // debugging support
-    // tracing
-    if (log_is_enabled(Info, exceptions)) {
-      ResourceMark rm;
-      stringStream tempst;
-      tempst.print("compiled method <%s>\n"
-                   " at PC" INTPTR_FORMAT " for thread " INTPTR_FORMAT,
-                   cm->method()->print_value_string(), p2i(pc), p2i(thread));
-      Exceptions::log_exception(exception, tempst);
-    }
-    // for AbortVMOnException flag
-    NOT_PRODUCT(Exceptions::debug_check_abort(exception));
 
     // Clear out the exception oop and pc since looking up an
     // exception handler can cause class loading, which might throw an
@@ -353,64 +353,14 @@ address JVMCIRuntime::exception_handler_for_pc(JavaThread* thread) {
   return continuation;
 }
 
-JRT_ENTRY_NO_ASYNC(void, JVMCIRuntime::monitorenter(JavaThread* thread, oopDesc* obj, BasicLock* lock))
-  IF_TRACE_jvmci_3 {
-    char type[O_BUFLEN];
-    obj->klass()->name()->as_C_string(type, O_BUFLEN);
-    markOop mark = obj->mark();
-    TRACE_jvmci_3("%s: entered locking slow case with obj=" INTPTR_FORMAT ", type=%s, mark=" INTPTR_FORMAT ", lock=" INTPTR_FORMAT, thread->name(), p2i(obj), type, p2i(mark), p2i(lock));
-    tty->flush();
-  }
-#ifdef ASSERT
-  if (PrintBiasedLockingStatistics) {
-    Atomic::inc(BiasedLocking::slow_path_entry_count_addr());
-  }
-#endif
-  Handle h_obj(thread, obj);
-  if (UseBiasedLocking) {
-    // Retry fast entry if bias is revoked to avoid unnecessary inflation
-    ObjectSynchronizer::fast_enter(h_obj, lock, true, CHECK);
-  } else {
-    if (JVMCIUseFastLocking) {
-      // When using fast locking, the compiled code has already tried the fast case
-      ObjectSynchronizer::slow_enter(h_obj, lock, THREAD);
-    } else {
-      ObjectSynchronizer::fast_enter(h_obj, lock, false, THREAD);
-    }
-  }
-  TRACE_jvmci_3("%s: exiting locking slow with obj=" INTPTR_FORMAT, thread->name(), p2i(obj));
+JRT_BLOCK_ENTRY(void, JVMCIRuntime::monitorenter(JavaThread* thread, oopDesc* obj, BasicLock* lock))
+  SharedRuntime::monitor_enter_helper(obj, lock, thread, JVMCIUseFastLocking);
 JRT_END
 
 JRT_LEAF(void, JVMCIRuntime::monitorexit(JavaThread* thread, oopDesc* obj, BasicLock* lock))
-  assert(thread == JavaThread::current(), "threads must correspond");
   assert(thread->last_Java_sp(), "last_Java_sp must be set");
-  // monitorexit is non-blocking (leaf routine) => no exceptions can be thrown
-  EXCEPTION_MARK;
-
-#ifdef DEBUG
-  if (!oopDesc::is_oop(obj)) {
-    ResetNoHandleMark rhm;
-    nmethod* method = thread->last_frame().cb()->as_nmethod_or_null();
-    if (method != NULL) {
-      tty->print_cr("ERROR in monitorexit in method %s wrong obj " INTPTR_FORMAT, method->name(), p2i(obj));
-    }
-    thread->print_stack_on(tty);
-    assert(false, "invalid lock object pointer dected");
-  }
-#endif
-
-  if (JVMCIUseFastLocking) {
-    // When using fast locking, the compiled code has already tried the fast case
-    ObjectSynchronizer::slow_exit(obj, lock, THREAD);
-  } else {
-    ObjectSynchronizer::fast_exit(obj, lock, THREAD);
-  }
-  IF_TRACE_jvmci_3 {
-    char type[O_BUFLEN];
-    obj->klass()->name()->as_C_string(type, O_BUFLEN);
-    TRACE_jvmci_3("%s: exited locking slow case with obj=" INTPTR_FORMAT ", type=%s, mark=" INTPTR_FORMAT ", lock=" INTPTR_FORMAT, thread->name(), p2i(obj), type, p2i(obj->mark()), p2i(lock));
-    tty->flush();
-  }
+  assert(oopDesc::is_oop(obj), "invalid lock object pointer dected");
+  SharedRuntime::monitor_exit_helper(obj, lock, thread, JVMCIUseFastLocking);
 JRT_END
 
 // Object.notify() fast path, caller does slow path
@@ -457,6 +407,114 @@ JRT_ENTRY(void, JVMCIRuntime::throw_class_cast_exception(JavaThread* thread, con
   const char* message = SharedRuntime::generate_class_cast_message(caster_klass, target_klass);
   TempNewSymbol symbol = SymbolTable::new_symbol(exception, CHECK);
   SharedRuntime::throw_and_post_jvmti_exception(thread, symbol, message);
+JRT_END
+
+class ArgumentPusher : public SignatureIterator {
+ protected:
+  JavaCallArguments*  _jca;
+  jlong _argument;
+  bool _pushed;
+
+  jlong next_arg() {
+    guarantee(!_pushed, "one argument");
+    _pushed = true;
+    return _argument;
+  }
+
+  float next_float() {
+    guarantee(!_pushed, "one argument");
+    _pushed = true;
+    jvalue v;
+    v.i = (jint) _argument;
+    return v.f;
+  }
+
+  double next_double() {
+    guarantee(!_pushed, "one argument");
+    _pushed = true;
+    jvalue v;
+    v.j = _argument;
+    return v.d;
+  }
+
+  Handle next_object() {
+    guarantee(!_pushed, "one argument");
+    _pushed = true;
+    return Handle(Thread::current(), (oop) (address) _argument);
+  }
+
+ public:
+  ArgumentPusher(Symbol* signature, JavaCallArguments*  jca, jlong argument) : SignatureIterator(signature) {
+    this->_return_type = T_ILLEGAL;
+    _jca = jca;
+    _argument = argument;
+    _pushed = false;
+    iterate();
+  }
+
+  inline void do_object() { _jca->push_oop(next_object()); }
+
+  inline void do_bool()   { if (!is_return_type()) _jca->push_int((jboolean) next_arg()); }
+  inline void do_char()   { if (!is_return_type()) _jca->push_int((jchar) next_arg()); }
+  inline void do_short()  { if (!is_return_type()) _jca->push_int((jint)  next_arg()); }
+  inline void do_byte()   { if (!is_return_type()) _jca->push_int((jbyte) next_arg()); }
+  inline void do_int()    { if (!is_return_type()) _jca->push_int((jint)  next_arg()); }
+
+  inline void do_long()   { if (!is_return_type()) _jca->push_long((jlong) next_arg()); }
+  inline void do_float()  { if (!is_return_type()) _jca->push_float(next_float()); }
+  inline void do_double() { if (!is_return_type()) _jca->push_double(next_double()); }
+
+  inline void do_object(int begin, int end) { if (!is_return_type()) do_object(); }
+  inline void do_array(int begin, int end)  { if (!is_return_type()) do_object(); }
+
+  inline void do_void() { }
+};
+
+
+JRT_ENTRY(jlong, JVMCIRuntime::invoke_static_method_one_arg(JavaThread* thread, Method* method, jlong argument))
+  ResourceMark rm;
+  HandleMark hm;
+
+  methodHandle mh(thread, method);
+  if (mh->size_of_parameters() > 1 && !mh->is_static()) {
+    THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(), "Invoked method must be static and take at most one argument");
+  }
+
+  Symbol* signature = mh->signature();
+  JavaCallArguments jca(mh->size_of_parameters());
+  ArgumentPusher jap(signature, &jca, argument);
+  BasicType return_type = jap.get_ret_type();
+  JavaValue result(return_type);
+  JavaCalls::call(&result, mh, &jca, CHECK_0);
+
+  if (return_type == T_VOID) {
+    return 0;
+  } else if (return_type == T_OBJECT || return_type == T_ARRAY) {
+    thread->set_vm_result((oop) result.get_jobject());
+    return 0;
+  } else {
+    jvalue *value = (jvalue *) result.get_value_addr();
+    // Narrow the value down if required (Important on big endian machines)
+    switch (return_type) {
+      case T_BOOLEAN:
+        return (jboolean) value->i;
+      case T_BYTE:
+        return (jbyte) value->i;
+      case T_CHAR:
+        return (jchar) value->i;
+      case T_SHORT:
+        return (jshort) value->i;
+      case T_INT:
+      case T_FLOAT:
+        return value->i;
+      case T_LONG:
+      case T_DOUBLE:
+        return value->j;
+      default:
+        fatal("Unexpected type %s", type2name(return_type));
+        return 0;
+    }
+  }
 JRT_END
 
 JRT_LEAF(void, JVMCIRuntime::log_object(JavaThread* thread, oopDesc* obj, bool as_string, bool newline))
@@ -715,7 +773,7 @@ void JVMCIRuntime::initialize_well_known_classes(TRAPS) {
   if (JVMCIRuntime::_well_known_classes_initialized == false) {
     guarantee(can_initialize_JVMCI(), "VM is not yet sufficiently booted to initialize JVMCI");
     SystemDictionary::WKID scan = SystemDictionary::FIRST_JVMCI_WKID;
-    SystemDictionary::initialize_wk_klasses_through(SystemDictionary::LAST_JVMCI_WKID, scan, CHECK);
+    SystemDictionary::resolve_wk_klasses_through(SystemDictionary::LAST_JVMCI_WKID, scan, CHECK);
     JVMCIJavaClasses::compute_offsets(CHECK);
     JVMCIRuntime::_well_known_classes_initialized = true;
   }

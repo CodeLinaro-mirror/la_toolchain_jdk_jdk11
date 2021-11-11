@@ -38,8 +38,6 @@ class Linux {
   static bool libjsig_is_loaded;        // libjsig that interposes sigaction(),
                                         // __sigaction(), signal() is loaded
   static struct sigaction *(*get_signal_action)(int);
-  static struct sigaction *get_preinstalled_handler(int);
-  static void save_preinstalled_handler(int, struct sigaction&);
 
   static void check_signal_handler(int sig);
 
@@ -109,14 +107,15 @@ class Linux {
   static bool release_memory_special_shm(char* base, size_t bytes);
   static bool release_memory_special_huge_tlbfs(char* base, size_t bytes);
 
-  static void print_full_memory_info(outputStream* st);
+  static void print_process_memory_info(outputStream* st);
+  static void print_system_memory_info(outputStream* st);
   static void print_container_info(outputStream* st);
-  static void print_virtualization_info(outputStream* st);
   static void print_steal_info(outputStream* st);
   static void print_distro_info(outputStream* st);
   static void print_libversion_info(outputStream* st);
   static void print_proc_sys_info(outputStream* st);
   static void print_ld_preload_file(outputStream* st);
+  static void print_uptime_info(outputStream* st);
 
  public:
   struct CPUPerfTicks {

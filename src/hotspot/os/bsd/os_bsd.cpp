@@ -33,6 +33,7 @@
 #include "compiler/disassembler.hpp"
 #include "interpreter/interpreter.hpp"
 #include "logging/log.hpp"
+#include "logging/logStream.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/filemap.hpp"
 #include "oops/oop.inline.hpp"
@@ -181,6 +182,22 @@ julong os::Bsd::available_memory() {
   }
 #endif
   return available;
+}
+
+// for more info see :
+// https://man.openbsd.org/sysctl.2
+void os::Bsd::print_uptime_info(outputStream* st) {
+  struct timeval boottime;
+  size_t len = sizeof(boottime);
+  int mib[2];
+  mib[0] = CTL_KERN;
+  mib[1] = KERN_BOOTTIME;
+
+  if (sysctl(mib, 2, &boottime, &len, NULL, 0) >= 0) {
+    time_t bootsec = boottime.tv_sec;
+    time_t currsec = time(NULL);
+    os::print_dhm(st, "OS uptime:", (long) difftime(currsec, bootsec));
+  }
 }
 
 julong os::physical_memory() {
@@ -750,6 +767,11 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
     } else {
       log_warning(os, thread)("Failed to start thread - pthread_create failed (%s) for attributes: %s.",
         os::errno_name(ret), os::Posix::describe_pthread_attr(buf, sizeof(buf), &attr));
+      // Log some OS information which might explain why creating the thread failed.
+      log_info(os, thread)("Number of threads approx. running in the VM: %d", Threads::number_of_threads());
+      LogStream st(Log(os, thread)::info());
+      os::Posix::print_rlimit_info(&st);
+      os::print_memory_info(&st);
     }
 
     pthread_attr_destroy(&attr);
@@ -1074,9 +1096,16 @@ void os::abort(bool dump_core, void* siginfo, const void* context) {
 }
 
 // Die immediately, no exit hook, no abort hook, no cleanup.
+// Dump a core file, if possible, for debugging.
 void os::die() {
-  // _exit() on BsdThreads only kills current thread
-  ::abort();
+  if (TestUnresponsiveErrorHandler && !CreateCoredumpOnCrash) {
+    // For TimeoutInErrorHandlingTest.java, we just kill the VM
+    // and don't take the time to generate a core file.
+    os::signal_raise(SIGKILL);
+  } else {
+    // _exit() on BsdThreads only kills current thread
+    ::abort();
+  }
 }
 
 // This method is a copy of JDK's sysGetLastErrorString
@@ -1273,15 +1302,27 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
 #ifdef STATIC_BUILD
   return os::get_default_process_handle();
 #else
+  log_info(os)("attempting shared library load of %s", filename);
+
   void * result= ::dlopen(filename, RTLD_LAZY);
   if (result != NULL) {
+    Events::log(NULL, "Loaded shared library %s", filename);
     // Successful loading
+    log_info(os)("shared library load of %s was successful", filename);
     return result;
   }
 
-  // Read system error message into ebuf
-  ::strncpy(ebuf, ::dlerror(), ebuflen-1);
-  ebuf[ebuflen-1]='\0';
+  const char* error_report = ::dlerror();
+  if (error_report == NULL) {
+    error_report = "dlerror returned no error description";
+  }
+  if (ebuf != NULL && ebuflen > 0) {
+    // Read system error message into ebuf
+    ::strncpy(ebuf, error_report, ebuflen-1);
+    ebuf[ebuflen-1]='\0';
+  }
+  Events::log(NULL, "Loading shared library %s failed, %s", filename, error_report);
+  log_info(os)("shared library load of %s failed, %s", filename, error_report);
 
   return NULL;
 #endif // STATIC_BUILD
@@ -1291,18 +1332,29 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
 #ifdef STATIC_BUILD
   return os::get_default_process_handle();
 #else
+  log_info(os)("attempting shared library load of %s", filename);
   void * result= ::dlopen(filename, RTLD_LAZY);
   if (result != NULL) {
+    Events::log(NULL, "Loaded shared library %s", filename);
     // Successful loading
+    log_info(os)("shared library load of %s was successful", filename);
     return result;
   }
 
   Elf32_Ehdr elf_head;
 
-  // Read system error message into ebuf
-  // It may or may not be overwritten below
-  ::strncpy(ebuf, ::dlerror(), ebuflen-1);
-  ebuf[ebuflen-1]='\0';
+  const char* const error_report = ::dlerror();
+  if (error_report == NULL) {
+    error_report = "dlerror returned no error description";
+  }
+  if (ebuf != NULL && ebuflen > 0) {
+    // Read system error message into ebuf
+    ::strncpy(ebuf, error_report, ebuflen-1);
+    ebuf[ebuflen-1]='\0';
+  }
+  Events::log(NULL, "Loading shared library %s failed, %s", filename, error_report);
+  log_info(os)("shared library load of %s failed, %s", filename, error_report);
+
   int diag_msg_max_length=ebuflen-strlen(ebuf);
   char* diag_msg_buf=ebuf+strlen(ebuf);
 
@@ -1578,9 +1630,13 @@ void os::print_os_info(outputStream* st) {
 
   os::Posix::print_uname_info(st);
 
+  os::Bsd::print_uptime_info(st);
+
   os::Posix::print_rlimit_info(st);
 
   os::Posix::print_load_average(st);
+
+  VM_Version::print_platform_virtualization_info(st);
 }
 
 void os::pd_print_cpu_info(outputStream* st, char* buf, size_t buflen) {
@@ -1615,6 +1671,8 @@ void os::get_summary_cpu_info(char* buf, size_t buflen) {
 }
 
 void os::print_memory_info(outputStream* st) {
+  xsw_usage swap_usage;
+  size_t size = sizeof(swap_usage);
 
   st->print("Memory:");
   st->print(" %dk page", os::vm_page_size()>>10);
@@ -1623,6 +1681,16 @@ void os::print_memory_info(outputStream* st) {
             os::physical_memory() >> 10);
   st->print("(" UINT64_FORMAT "k free)",
             os::available_memory() >> 10);
+
+  if((sysctlbyname("vm.swapusage", &swap_usage, &size, NULL, 0) == 0) || (errno == ENOMEM)) {
+    if (size >= offset_of(xsw_usage, xsu_used)) {
+      st->print(", swap " UINT64_FORMAT "k",
+                ((julong) swap_usage.xsu_total) >> 10);
+      st->print("(" UINT64_FORMAT "k free)",
+                ((julong) swap_usage.xsu_avail) >> 10);
+    }
+  }
+
   st->cr();
 }
 
@@ -1661,6 +1729,7 @@ void os::jvm_path(char *buf, jint buflen) {
   }
 
   char dli_fname[MAXPATHLEN];
+  dli_fname[0] = '\0';
   bool ret = dll_address_to_library_name(
                                          CAST_FROM_FN_PTR(address, os::jvm_path),
                                          dli_fname, sizeof(dli_fname), NULL);
@@ -1938,6 +2007,7 @@ bool os::pd_commit_memory(char* addr, size_t size, bool exec) {
   int prot = exec ? PROT_READ|PROT_WRITE|PROT_EXEC : PROT_READ|PROT_WRITE;
 #ifdef __OpenBSD__
   // XXX: Work-around mmap/MAP_FIXED bug temporarily on OpenBSD
+  Events::log(NULL, "Protecting memory [" INTPTR_FORMAT "," INTPTR_FORMAT "] with protection modes %x", p2i(addr), p2i(addr+size), prot);
   if (::mprotect(addr, size, prot) == 0) {
     return true;
   }
@@ -2022,6 +2092,7 @@ char *os::scan_pages(char *start, char* end, page_info* page_expected, page_info
 bool os::pd_uncommit_memory(char* addr, size_t size) {
 #ifdef __OpenBSD__
   // XXX: Work-around mmap/MAP_FIXED bug temporarily on OpenBSD
+  Events::log(NULL, "Protecting memory [" INTPTR_FORMAT "," INTPTR_FORMAT "] with PROT_NONE", p2i(addr), p2i(addr+size));
   return ::mprotect(addr, size, PROT_NONE) == 0;
 #else
   uintptr_t res = (uintptr_t) ::mmap(addr, size, PROT_NONE,
@@ -2090,6 +2161,7 @@ static bool bsd_mprotect(char* addr, size_t size, int prot) {
   assert(addr == bottom, "sanity check");
 
   size = align_up(pointer_delta(addr, bottom, 1) + size, os::Bsd::page_size());
+  Events::log(NULL, "Protecting memory [" INTPTR_FORMAT "," INTPTR_FORMAT "] with protection modes %x", p2i(bottom), p2i(bottom+size), prot);
   return ::mprotect(bottom, size, prot) == 0;
 }
 
@@ -2317,22 +2389,6 @@ size_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {
   RESTARTABLE_RETURN_INT(::pread(fd, buf, nBytes, offset));
 }
 
-void os::naked_short_sleep(jlong ms) {
-  struct timespec req;
-
-  assert(ms < 1000, "Un-interruptable sleep, short time use only");
-  req.tv_sec = 0;
-  if (ms > 0) {
-    req.tv_nsec = (ms % 1000) * 1000000;
-  } else {
-    req.tv_nsec = 1;
-  }
-
-  nanosleep(&req, NULL);
-
-  return;
-}
-
 // Sleep forever; naked call to OS-specific sleep; use with CAUTION
 void os::infinite_sleep() {
   while (true) {    // sleep forever ...
@@ -2413,7 +2469,7 @@ int os::java_to_os_priority[CriticalPriority + 1] = {
 static int prio_init() {
   if (ThreadPriorityPolicy == 1) {
     if (geteuid() != 0) {
-      if (!FLAG_IS_DEFAULT(ThreadPriorityPolicy)) {
+      if (!FLAG_IS_DEFAULT(ThreadPriorityPolicy) && !FLAG_IS_JIMAGE_RESOURCE(ThreadPriorityPolicy)) {
         warning("-XX:ThreadPriorityPolicy=1 may require system level permission, " \
                 "e.g., being the root user. If the necessary permission is not " \
                 "possessed, changes to priority will be silently ignored.");
@@ -2777,11 +2833,6 @@ static void signalHandler(int sig, siginfo_t* info, void* uc) {
 bool os::Bsd::signal_handlers_are_installed = false;
 
 // For signal-chaining
-struct sigaction sigact[NSIG];
-uint32_t sigs = 0;
-#if (32 < NSIG-1)
-#error "Not all signals can be encoded in sigs. Adapt its type!"
-#endif
 bool os::Bsd::libjsig_is_loaded = false;
 typedef struct sigaction *(*get_signal_t)(int);
 get_signal_t os::Bsd::get_signal_action = NULL;
@@ -2795,7 +2846,7 @@ struct sigaction* os::Bsd::get_chained_signal_action(int sig) {
   }
   if (actp == NULL) {
     // Retrieve the preinstalled signal handler from jvm
-    actp = get_preinstalled_handler(sig);
+    actp = os::Posix::get_preinstalled_handler(sig);
   }
 
   return actp;
@@ -2858,19 +2909,6 @@ bool os::Bsd::chained_handler(int sig, siginfo_t* siginfo, void* context) {
   return chained;
 }
 
-struct sigaction* os::Bsd::get_preinstalled_handler(int sig) {
-  if ((((uint32_t)1 << (sig-1)) & sigs) != 0) {
-    return &sigact[sig];
-  }
-  return NULL;
-}
-
-void os::Bsd::save_preinstalled_handler(int sig, struct sigaction& oldAct) {
-  assert(sig > 0 && sig < NSIG, "vm signal out of expected range");
-  sigact[sig] = oldAct;
-  sigs |= (uint32_t)1 << (sig-1);
-}
-
 // for diagnostic
 int sigflags[NSIG];
 
@@ -2902,7 +2940,7 @@ void os::Bsd::set_signal_handler(int sig, bool set_installed) {
       return;
     } else if (UseSignalChaining) {
       // save the old handler in jvm
-      save_preinstalled_handler(sig, oldAct);
+      os::Posix::save_preinstalled_handler(sig, oldAct);
       // libjsig also interposes the sigaction() call below and saves the
       // old sigaction on it own.
     } else {
@@ -3259,16 +3297,6 @@ void os::init(void) {
   Bsd::clock_init();
   initial_time_count = javaTimeNanos();
 
-#ifdef __APPLE__
-  // XXXDARWIN
-  // Work around the unaligned VM callbacks in hotspot's
-  // sharedRuntime. The callbacks don't use SSE2 instructions, and work on
-  // Linux, Solaris, and FreeBSD. On Mac OS X, dyld (rightly so) enforces
-  // alignment when doing symbol lookup. To work around this, we force early
-  // binding of all symbols now, thus binding when alignment is known-good.
-  _dyld_bind_fully_image_containing_address((const void *) &os::init);
-#endif
-
   os::Posix::init();
 }
 
@@ -3600,9 +3628,7 @@ int os::open(const char *path, int oflag, int mode) {
 // create binary file, rewriting existing file if required
 int os::create_binary_file(const char* path, bool rewrite_existing) {
   int oflags = O_WRONLY | O_CREAT;
-  if (!rewrite_existing) {
-    oflags |= O_EXCL;
-  }
+  oflags |= rewrite_existing ? O_TRUNC : O_EXCL;
   return ::open(path, oflags, S_IREAD | S_IWRITE);
 }
 
@@ -3786,7 +3812,7 @@ int os::loadavg(double loadavg[], int nelem) {
 void os::pause() {
   char filename[MAX_PATH];
   if (PauseAtStartupFile && PauseAtStartupFile[0]) {
-    jio_snprintf(filename, MAX_PATH, PauseAtStartupFile);
+    jio_snprintf(filename, MAX_PATH, "%s", PauseAtStartupFile);
   } else {
     jio_snprintf(filename, MAX_PATH, "./vm.paused.%d", current_process_id());
   }
@@ -3878,11 +3904,30 @@ int os::fork_and_exec(char* cmd, bool use_vfork_if_available) {
   }
 }
 
-// Get the default path to the core file
+// Get the kern.corefile setting, or otherwise the default path to the core file
 // Returns the length of the string
 int os::get_core_path(char* buffer, size_t bufferSize) {
-  int n = jio_snprintf(buffer, bufferSize, "/cores/core.%d", current_process_id());
+  int n = 0;
+#ifdef __APPLE__
+  char coreinfo[MAX_PATH];
+  size_t sz = sizeof(coreinfo);
+  int ret = sysctlbyname("kern.corefile", coreinfo, &sz, NULL, 0);
+  if (ret == 0) {
+    char *pid_pos = strstr(coreinfo, "%P");
+    // skip over the "%P" to preserve any optional custom user pattern
+    const char* tail = (pid_pos != NULL) ? (pid_pos + 2) : "";
 
+    if (pid_pos != NULL) {
+      *pid_pos = '\0';
+      n = jio_snprintf(buffer, bufferSize, "%s%d%s", coreinfo, os::current_process_id(), tail);
+    } else {
+      n = jio_snprintf(buffer, bufferSize, "%s", coreinfo);
+    }
+  } else
+#endif
+  {
+    n = jio_snprintf(buffer, bufferSize, "/cores/core.%d", os::current_process_id());
+  }
   // Truncate if theoretical string was longer than bufferSize
   n = MIN2(n, (int)bufferSize);
 

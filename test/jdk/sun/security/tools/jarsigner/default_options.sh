@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -44,14 +44,14 @@ JARSIGNER="$TESTJAVA/bin/jarsigner ${TESTTOOLVMOPTS}"
 rm $KS 2> /dev/null
 
 $KEYTOOL -genkeypair -dname CN=A -alias a -keyalg rsa || exit 1
-$KEYTOOL -genkeypair -dname CN=CA -alias ca -keyalg rsa || exit 2
+$KEYTOOL -genkeypair -dname CN=CA -alias ca -keyalg rsa -ext bc:c || exit 2
 $KEYTOOL -alias a -certreq |
     $KEYTOOL -alias ca -gencert |
     $KEYTOOL -alias a -import || exit 3
 
 cat <<EOF > js.conf
 jarsigner.all = -keystore \${user.dir}/$KS -storepass:env PASS -debug -strict
-jarsigner.sign = -digestalg SHA1
+jarsigner.sign = -digestalg SHA-512
 jarsigner.verify = -verbose:summary
 
 EOF
@@ -62,7 +62,7 @@ $JARSIGNER -conf js.conf a.jar a || exit 21
 $JARSIGNER -conf js.conf -verify a.jar > jarsigner.out || exit 22
 grep "and 1 more" jarsigner.out || exit 23
 $JAR xvf a.jar META-INF/MANIFEST.MF
-grep "SHA1-Digest" META-INF/MANIFEST.MF || exit 24
+grep "SHA-512-Digest" META-INF/MANIFEST.MF || exit 24
 
 echo Done
 exit 0

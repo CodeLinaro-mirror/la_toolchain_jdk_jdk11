@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 1997, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, 2018, Red Hat Inc. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -230,7 +230,11 @@ void NativeCall::insert(address code_pos, address entry) { Unimplemented(); }
 //-------------------------------------------------------------------
 
 void NativeMovConstReg::verify() {
-  // make sure code pattern is actually mov reg64, imm64 instructions
+  if (! (nativeInstruction_at(instruction_address())->is_movz() ||
+        is_adrp_at(instruction_address()) ||
+        is_ldr_literal_at(instruction_address())) ) {
+    fatal("should be MOVZ or ADRP or LDR (literal)");
+  }
 }
 
 
@@ -281,8 +285,6 @@ void NativeMovConstReg::print() {
 
 //-------------------------------------------------------------------
 
-address NativeMovRegMem::instruction_address() const      { return addr_at(instruction_offset); }
-
 int NativeMovRegMem::offset() const  {
   address pc = instruction_address();
   unsigned insn = *(unsigned*)pc;
@@ -299,7 +301,7 @@ void NativeMovRegMem::set_offset(int x) {
   unsigned insn = *(unsigned*)pc;
   if (maybe_cpool_ref(pc)) {
     address addr = MacroAssembler::target_addr_for_insn(pc);
-    *(long*)addr = x;
+    *(int64_t*)addr = x;
   } else {
     MacroAssembler::pd_patch_instruction(pc, (address)intptr_t(x));
     ICache::invalidate_range(instruction_address(), instruction_size);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -92,18 +92,22 @@ char *getMacOSXLocale(int cat) {
 
             if (hyphenPos == NULL || // languageString contains ISO639 only, e.g., "en"
                 languageString + langStrLen - hyphenPos == 5) { // ISO639-ScriptCode, e.g., "en-Latn"
-                CFStringGetCString(CFLocaleGetIdentifier(CFLocaleCopyCurrent()),
-                               localeString, LOCALEIDLENGTH, CFStringGetSystemEncoding());
-                char *underscorePos = strrchr(localeString, '_');
-                char *region = NULL;
+                CFLocaleRef cflocale = CFLocaleCopyCurrent();
+                if (cflocale != NULL) {
+                    CFStringGetCString(CFLocaleGetIdentifier(cflocale),
+                                   localeString, LOCALEIDLENGTH, CFStringGetSystemEncoding());
+                    char *underscorePos = strrchr(localeString, '_');
+                    char *region = NULL;
 
-                if (underscorePos != NULL) {
-                    region = underscorePos + 1;
-                }
+                    if (underscorePos != NULL) {
+                        region = underscorePos + 1;
+                    }
 
-                if (region != NULL) {
-                    strcat(languageString, "-");
-                    strcat(languageString, region);
+                    if (region != NULL) {
+                        strcat(languageString, "-");
+                        strcat(languageString, region);
+                    }
+                    CFRelease(cflocale);
                 }
             }
 
@@ -113,12 +117,19 @@ char *getMacOSXLocale(int cat) {
 
     default:
         {
-            if (!CFStringGetCString(CFLocaleGetIdentifier(CFLocaleCopyCurrent()),
-                                    localeString, LOCALEIDLENGTH, CFStringGetSystemEncoding())) {
+            CFLocaleRef cflocale = CFLocaleCopyCurrent();
+            if (cflocale != NULL) {
+                if (!CFStringGetCString(CFLocaleGetIdentifier(cflocale),
+                                        localeString, LOCALEIDLENGTH, CFStringGetSystemEncoding())) {
+                    CFRelease(cflocale);
+                    return NULL;
+                }
+
+                retVal = localeString;
+                CFRelease(cflocale);
+            } else {
                 return NULL;
             }
-
-            retVal = localeString;
         }
         break;
     }
@@ -243,34 +254,53 @@ void setOSNameAndVersion(java_props_t *sprops) {
     // Hardcode os_name, and fill in os_version
     sprops->os_name = strdup("Mac OS X");
 
+    NSString *nsVerStr = NULL;
     char* osVersionCStr = NULL;
     // Mac OS 10.9 includes the [NSProcessInfo operatingSystemVersion] function,
-    // but it's not in the 10.9 SDK.  So, call it via objc_msgSend_stret.
+    // but it's not in the 10.9 SDK.  So, call it via NSInvocation.
     if ([[NSProcessInfo processInfo] respondsToSelector:@selector(operatingSystemVersion)]) {
-        OSVerStruct (*procInfoFn)(id rec, SEL sel) = (OSVerStruct(*)(id, SEL))objc_msgSend_stret;
-        OSVerStruct osVer = procInfoFn([NSProcessInfo processInfo],
-                                       @selector(operatingSystemVersion));
-        NSString *nsVerStr;
-        if (osVer.patchVersion == 0) { // Omit trailing ".0"
-            nsVerStr = [NSString stringWithFormat:@"%ld.%ld",
-                    (long)osVer.majorVersion, (long)osVer.minorVersion];
+        OSVerStruct osVer;
+        NSMethodSignature *sig = [[NSProcessInfo processInfo] methodSignatureForSelector:
+                @selector(operatingSystemVersion)];
+        NSInvocation *invoke = [NSInvocation invocationWithMethodSignature:sig];
+        invoke.selector = @selector(operatingSystemVersion);
+        [invoke invokeWithTarget:[NSProcessInfo processInfo]];
+        [invoke getReturnValue:&osVer];
+
+        // Copy out the char* if running on version other than 10.16 Mac OS (10.16 == 11.x)
+        // or explicitly requesting version compatibility
+        if (!((long)osVer.majorVersion == 10 && (long)osVer.minorVersion >= 16) ||
+                (getenv("SYSTEM_VERSION_COMPAT") != NULL)) {
+            if (osVer.patchVersion == 0) { // Omit trailing ".0"
+                nsVerStr = [NSString stringWithFormat:@"%ld.%ld",
+                        (long)osVer.majorVersion, (long)osVer.minorVersion];
+            } else {
+                nsVerStr = [NSString stringWithFormat:@"%ld.%ld.%ld",
+                        (long)osVer.majorVersion, (long)osVer.minorVersion, (long)osVer.patchVersion];
+            }
         } else {
-            nsVerStr = [NSString stringWithFormat:@"%ld.%ld.%ld",
-                    (long)osVer.majorVersion, (long)osVer.minorVersion, (long)osVer.patchVersion];
+            // Version 10.16, without explicit env setting of SYSTEM_VERSION_COMPAT
+            // AKA 11+ Read the *real* ProductVersion from the hidden link to avoid SYSTEM_VERSION_COMPAT
+            // If not found, fallback below to the SystemVersion.plist
+            NSDictionary *version = [NSDictionary dictionaryWithContentsOfFile :
+                             @"/System/Library/CoreServices/.SystemVersionPlatform.plist"];
+            if (version != NULL) {
+                nsVerStr = [version objectForKey : @"ProductVersion"];
+            }
         }
-        // Copy out the char*
-        osVersionCStr = strdup([nsVerStr UTF8String]);
     }
     // Fallback if running on pre-10.9 Mac OS
-    if (osVersionCStr == NULL) {
+    if (nsVerStr == NULL) {
         NSDictionary *version = [NSDictionary dictionaryWithContentsOfFile :
                                  @"/System/Library/CoreServices/SystemVersion.plist"];
         if (version != NULL) {
-            NSString *nsVerStr = [version objectForKey : @"ProductVersion"];
-            if (nsVerStr != NULL) {
-                osVersionCStr = strdup([nsVerStr UTF8String]);
-            }
+            nsVerStr = [version objectForKey : @"ProductVersion"];
         }
+    }
+
+    if (nsVerStr != NULL) {
+        // Copy out the char*
+        osVersionCStr = strdup([nsVerStr UTF8String]);
     }
     if (osVersionCStr == NULL) {
         osVersionCStr = strdup("Unknown");

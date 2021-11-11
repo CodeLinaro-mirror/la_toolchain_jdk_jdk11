@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -78,6 +78,7 @@ import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import sun.nio.ch.FileChannelImpl;
+import sun.nio.cs.UTF_8;
 import sun.nio.fs.AbstractFileSystemProvider;
 
 /**
@@ -2867,7 +2868,7 @@ public final class Files {
      * @since 1.8
      */
     public static BufferedReader newBufferedReader(Path path) throws IOException {
-        return newBufferedReader(path, StandardCharsets.UTF_8);
+        return newBufferedReader(path, UTF_8.INSTANCE);
     }
 
     /**
@@ -2959,7 +2960,7 @@ public final class Files {
     public static BufferedWriter newBufferedWriter(Path path, OpenOption... options)
         throws IOException
     {
-        return newBufferedWriter(path, StandardCharsets.UTF_8, options);
+        return newBufferedWriter(path, UTF_8.INSTANCE, options);
     }
 
     /**
@@ -3239,7 +3240,7 @@ public final class Files {
      * @since 11
      */
     public static String readString(Path path) throws IOException {
-        return readString(path, StandardCharsets.UTF_8);
+        return readString(path, UTF_8.INSTANCE);
     }
 
     /**
@@ -3281,6 +3282,8 @@ public final class Files {
         Objects.requireNonNull(cs);
 
         byte[] ba = readAllBytes(path);
+        if (path.getClass().getModule() != Object.class.getModule())
+            ba = ba.clone();
         return JLA.newStringNoRepl(ba, cs);
     }
 
@@ -3364,7 +3367,7 @@ public final class Files {
      * @since 1.8
      */
     public static List<String> readAllLines(Path path) throws IOException {
-        return readAllLines(path, StandardCharsets.UTF_8);
+        return readAllLines(path, UTF_8.INSTANCE);
     }
 
     /**
@@ -3484,8 +3487,8 @@ public final class Files {
         // ensure lines is not null before opening file
         Objects.requireNonNull(lines);
         CharsetEncoder encoder = cs.newEncoder();
-        OutputStream out = newOutputStream(path, options);
-        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(out, encoder))) {
+        try (OutputStream out = newOutputStream(path, options);
+             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(out, encoder))) {
             for (CharSequence line: lines) {
                 writer.append(line);
                 writer.newLine();
@@ -3535,7 +3538,7 @@ public final class Files {
                              OpenOption... options)
         throws IOException
     {
-        return write(path, lines, StandardCharsets.UTF_8, options);
+        return write(path, lines, UTF_8.INSTANCE, options);
     }
 
     /**
@@ -3575,7 +3578,7 @@ public final class Files {
     public static Path writeString(Path path, CharSequence csq, OpenOption... options)
             throws IOException
     {
-        return writeString(path, csq, StandardCharsets.UTF_8, options);
+        return writeString(path, csq, UTF_8.INSTANCE, options);
     }
 
     /**
@@ -3633,6 +3636,8 @@ public final class Files {
         Objects.requireNonNull(cs);
 
         byte[] bytes = JLA.getBytesNoRepl(String.valueOf(csq), cs);
+        if (path.getClass().getModule() != Object.class.getModule())
+            bytes = bytes.clone();
         write(path, bytes, options);
 
         return path;
@@ -4122,6 +4127,6 @@ public final class Files {
      * @since 1.8
      */
     public static Stream<String> lines(Path path) throws IOException {
-        return lines(path, StandardCharsets.UTF_8);
+        return lines(path, UTF_8.INSTANCE);
     }
 }

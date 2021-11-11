@@ -185,6 +185,7 @@ final class SignatureAlgorithmsExtension {
             if (chc.localSupportedSignAlgs == null) {
                 chc.localSupportedSignAlgs =
                     SignatureScheme.getSupportedAlgorithms(
+                            chc.sslConfig,
                             chc.algorithmConstraints, chc.activeProtocols);
             }
 
@@ -277,6 +278,7 @@ final class SignatureAlgorithmsExtension {
             // update the context
             List<SignatureScheme> sss =
                     SignatureScheme.getSupportedAlgorithms(
+                            shc.sslConfig,
                             shc.algorithmConstraints, shc.negotiatedProtocol,
                             spec.signatureSchemes);
             shc.peerRequestedSignatureSchemes = sss;
@@ -408,18 +410,17 @@ final class SignatureAlgorithmsExtension {
             }
 
             // Produce the extension.
-            if (shc.localSupportedSignAlgs == null) {
-                shc.localSupportedSignAlgs =
+            List<SignatureScheme> sigAlgs =
                     SignatureScheme.getSupportedAlgorithms(
-                            shc.algorithmConstraints, shc.activeProtocols);
-            }
+                            shc.sslConfig,
+                            shc.algorithmConstraints,
+                            List.of(shc.negotiatedProtocol));
 
-            int vectorLen = SignatureScheme.sizeInRecord() *
-                    shc.localSupportedSignAlgs.size();
+            int vectorLen = SignatureScheme.sizeInRecord() * sigAlgs.size();
             byte[] extData = new byte[vectorLen + 2];
             ByteBuffer m = ByteBuffer.wrap(extData);
             Record.putInt16(m, vectorLen);
-            for (SignatureScheme ss : shc.localSupportedSignAlgs) {
+            for (SignatureScheme ss : sigAlgs) {
                 Record.putInt16(m, ss.id);
             }
 
@@ -512,6 +513,7 @@ final class SignatureAlgorithmsExtension {
             // update the context
             List<SignatureScheme> sss =
                     SignatureScheme.getSupportedAlgorithms(
+                            chc.sslConfig,
                             chc.algorithmConstraints, chc.negotiatedProtocol,
                             spec.signatureSchemes);
             chc.peerRequestedSignatureSchemes = sss;

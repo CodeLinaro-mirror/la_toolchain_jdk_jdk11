@@ -3263,10 +3263,6 @@ void ArchDesc::defineClasses(FILE *fp) {
 
     // Analyze machine instructions that either USE or DEF memory.
     int memory_operand = instr->memory_operand(_globalNames);
-    // Some guys kill all of memory
-    if ( instr->is_wide_memory_kill(_globalNames) ) {
-      memory_operand = InstructForm::MANY_MEMORY_OPERANDS;
-    }
 
     if ( memory_operand != InstructForm::NO_MEMORY_OPERAND ) {
       if( memory_operand == InstructForm::MANY_MEMORY_OPERANDS ) {
@@ -3940,6 +3936,10 @@ void ArchDesc::buildMachNode(FILE *fp_cpp, InstructForm *inst, const char *inden
   if( inst->is_ideal_if() ) {
     fprintf(fp_cpp, "%s node->_prob = _leaf->as_If()->_prob;\n", indent);
     fprintf(fp_cpp, "%s node->_fcnt = _leaf->as_If()->_fcnt;\n", indent);
+  }
+  if (inst->is_ideal_halt()) {
+    fprintf(fp_cpp, "%s node->_halt_reason = _leaf->as_Halt()->_halt_reason;\n", indent);
+    fprintf(fp_cpp, "%s node->_reachable   = _leaf->as_Halt()->_reachable;\n", indent);
   }
   if (inst->is_ideal_jump()) {
     fprintf(fp_cpp, "%s node->_probs = _leaf->as_Jump()->_probs;\n", indent);

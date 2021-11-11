@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,12 +35,13 @@
 #include "oops/symbol.hpp"
 #include "prims/jniCheck.hpp"
 #include "prims/jvm_misc.hpp"
-#include "runtime/fieldDescriptor.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/jfieldIDWorkaround.hpp"
 #include "runtime/jniHandles.inline.hpp"
 #include "runtime/thread.inline.hpp"
+#include "utilities/formatBuffer.hpp"
 
 // Complain every extra number of unplanned local refs
 #define CHECK_JNI_LOCAL_REF_CAP_WARN_THRESHOLD 32
@@ -393,19 +394,16 @@ static void* check_wrapped_array(JavaThread* thr, const char* fn_name,
   GuardedMemory guarded(carray);
   void* orig_result = guarded.get_tag();
   if (!guarded.verify_guards()) {
-    tty->print_cr("ReleasePrimitiveArrayCritical: release array failed bounds "
-        "check, incorrect pointer returned ? array: " PTR_FORMAT " carray: "
-        PTR_FORMAT, p2i(obj), p2i(carray));
-    guarded.print_on(tty);
-    NativeReportJNIFatalError(thr, "ReleasePrimitiveArrayCritical: "
-        "failed bounds check");
+    tty->print_cr("%s: release array failed bounds check, incorrect pointer returned ? array: "
+                  PTR_FORMAT " carray: " PTR_FORMAT, fn_name, p2i(obj), p2i(carray));
+    DEBUG_ONLY(guarded.print_on(tty);) // This may crash.
+    NativeReportJNIFatalError(thr, err_msg("%s: failed bounds check", fn_name));
   }
   if (orig_result == NULL) {
-    tty->print_cr("ReleasePrimitiveArrayCritical: unrecognized elements. array: "
-        PTR_FORMAT " carray: " PTR_FORMAT, p2i(obj), p2i(carray));
-    guarded.print_on(tty);
-    NativeReportJNIFatalError(thr, "ReleasePrimitiveArrayCritical: "
-        "unrecognized elements");
+    tty->print_cr("%s: unrecognized elements. array: " PTR_FORMAT " carray: " PTR_FORMAT,
+                  fn_name, p2i(obj), p2i(carray));
+    DEBUG_ONLY(guarded.print_on(tty);) // This may crash.
+    NativeReportJNIFatalError(thr, err_msg("%s: unrecognized elements", fn_name));
   }
   if (rsz != NULL) {
     *rsz = guarded.get_user_size();
@@ -414,7 +412,7 @@ static void* check_wrapped_array(JavaThread* thr, const char* fn_name,
 }
 
 static void* check_wrapped_array_release(JavaThread* thr, const char* fn_name,
-    void* obj, void* carray, jint mode) {
+                                         void* obj, void* carray, jint mode, jboolean is_critical) {
   size_t sz;
   void* orig_result = check_wrapped_array(thr, fn_name, obj, carray, &sz);
   switch (mode) {
@@ -424,13 +422,18 @@ static void* check_wrapped_array_release(JavaThread* thr, const char* fn_name,
     break;
   case JNI_COMMIT:
     memcpy(orig_result, carray, sz);
+    if (is_critical) {
+      // For ReleasePrimitiveArrayCritical we must free the internal buffer
+      // allocated through GuardedMemory.
+      GuardedMemory::free_copy(carray);
+    }
     break;
   case JNI_ABORT:
     GuardedMemory::free_copy(carray);
     break;
   default:
     tty->print_cr("%s: Unrecognized mode %i releasing array "
-        PTR_FORMAT " elements " PTR_FORMAT, fn_name, mode, p2i(obj), p2i(carray));
+                  PTR_FORMAT " elements " PTR_FORMAT, fn_name, mode, p2i(obj), p2i(carray));
     NativeReportJNIFatalError(thr, "Unrecognized array release mode");
   }
   return orig_result;
@@ -1708,7 +1711,7 @@ JNI_ENTRY_CHECKED(void,  \
       typeArrayOop a = typeArrayOop(JNIHandles::resolve_non_null(array)); \
     ) \
     ElementType* orig_result = (ElementType *) check_wrapped_array_release( \
-        thr, "checked_jni_Release"#Result"ArrayElements", array, elems, mode); \
+        thr, "checked_jni_Release"#Result"ArrayElements", array, elems, mode, JNI_FALSE); \
     UNCHECKED()->Release##Result##ArrayElements(env, array, orig_result, mode); \
     functionExit(thr); \
 JNI_END
@@ -1877,7 +1880,8 @@ JNI_ENTRY_CHECKED(void,
       check_is_primitive_array(thr, array);
     )
     // Check the element array...
-    void* orig_result = check_wrapped_array_release(thr, "ReleasePrimitiveArrayCritical", array, carray, mode);
+    void* orig_result = check_wrapped_array_release(thr, "ReleasePrimitiveArrayCritical",
+                                                    array, carray, mode, JNI_TRUE);
     UNCHECKED()->ReleasePrimitiveArrayCritical(env, array, orig_result, mode);
     functionExit(thr);
 JNI_END
@@ -1928,6 +1932,12 @@ JNI_ENTRY_CHECKED(void,
   checked_jni_DeleteWeakGlobalRef(JNIEnv *env,
                                   jweak ref))
     functionEnterExceptionAllowed(thr);
+    IN_VM(
+      if (ref && !JNIHandles::is_weak_global_handle(ref)) {
+        ReportJNIFatalError(thr,
+             "Invalid weak global JNI handle passed to DeleteWeakGlobalRef");
+      }
+    )
     UNCHECKED()->DeleteWeakGlobalRef(env, ref);
     functionExit(thr);
 JNI_END
@@ -1995,9 +2005,6 @@ JNI_ENTRY_CHECKED(jobject,
   checked_jni_GetModule(JNIEnv *env,
                         jclass clazz))
     functionEnter(thr);
-    IN_VM(
-      jniCheck::validate_class(thr, clazz, false);
-    )
     jobject result = UNCHECKED()->GetModule(env,clazz);
     functionExit(thr);
     return result;

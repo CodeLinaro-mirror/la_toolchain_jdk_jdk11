@@ -31,17 +31,24 @@
 
 #define OSCONTAINER_ERROR (-2)
 
+// 20ms timeout between re-reads of memory limit and _active_processor_count.
+#define OSCONTAINER_CACHE_TIMEOUT (NANOSECS_PER_SEC/50)
+
 class OSContainer: AllStatic {
 
  private:
   static bool   _is_initialized;
   static bool   _is_containerized;
+  static int    _active_processor_count;
+
+  static jlong read_memory_limit_in_bytes();
 
  public:
   static void init();
   static inline bool is_containerized();
   static const char * container_type();
 
+  static jlong uses_mem_hierarchy();
   static jlong memory_limit_in_bytes();
   static jlong memory_and_swap_limit_in_bytes();
   static jlong memory_soft_limit_in_bytes();

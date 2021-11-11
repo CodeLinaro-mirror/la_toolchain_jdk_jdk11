@@ -45,6 +45,7 @@
 #include "runtime/vmThread.hpp"
 #include "utilities/ticks.hpp"
 
+class AbstractLockNode;
 class AddPNode;
 class Block;
 class Bundle;
@@ -63,6 +64,7 @@ class MachOper;
 class MachSafePointNode;
 class Node;
 class Node_Array;
+class Node_List;
 class Node_Notes;
 class NodeCloneInfo;
 class OptoReg;
@@ -89,6 +91,18 @@ class nmethod;
 class WarmCallInfo;
 class Node_Stack;
 struct Final_Reshape_Counts;
+
+enum LoopOptsMode {
+  LoopOptsDefault,
+  LoopOptsNone,
+  LoopOptsSkipSplitIf,
+  LoopOptsVerify,
+  LoopOptsLastRound
+#if INCLUDE_SHENANDOAHGC
+  ,LoopOptsShenandoahExpand,
+   LoopOptsShenandoahPostExpand
+#endif
+};
 
 typedef unsigned int node_idx_t;
 class NodeCloneInfo {
@@ -311,7 +325,7 @@ class Compile : public Phase {
     void set_table_base_offset(int x)  { assert(_table_base_offset == -1 || x == _table_base_offset, "can't change"); _table_base_offset = x; }
     int      table_base_offset() const { assert(_table_base_offset != -1, "not set yet");                      return _table_base_offset; }
 
-    void emit(CodeBuffer& cb);
+    bool emit(CodeBuffer& cb) const;
 
     // Returns the offset of the last entry (the top) of the constant table.
     int  top_offset() const { assert(_constants.top().offset() != -1, "not bound yet"); return _constants.top().offset(); }
@@ -352,6 +366,7 @@ class Compile : public Phase {
   const bool            _subsume_loads;         // Load can be matched as part of a larger op.
   const bool            _do_escape_analysis;    // Do escape analysis.
   const bool            _eliminate_boxing;      // Do boxing elimination.
+  const bool            _do_locks_coarsening;   // Do locks coarsening
   ciMethod*             _method;                // The method being compiled.
   int                   _entry_bci;             // entry bci for osr methods.
   const TypeFunc*       _tf;                    // My kind of signature
@@ -419,6 +434,7 @@ class Compile : public Phase {
   GrowableArray<Node*>* _expensive_nodes;       // List of nodes that are expensive to compute and that we'd better not let the GVN freely common
   GrowableArray<Node*>* _range_check_casts;     // List of CastII nodes with a range check dependency
   GrowableArray<Node*>* _opaque4_nodes;         // List of Opaque4 nodes that have a default value
+  GrowableArray<Node_List*> _coarsened_locks;   // List of coarsened Lock and Unlock nodes
   ConnectionGraph*      _congraph;
 #ifndef PRODUCT
   IdealGraphPrinter*    _printer;
@@ -492,22 +508,23 @@ class Compile : public Phase {
   // Inlining may not happen in parse order which would make
   // PrintInlining output confusing. Keep track of PrintInlining
   // pieces in order.
-  class PrintInliningBuffer : public ResourceObj {
+  class PrintInliningBuffer : public CHeapObj<mtCompiler> {
    private:
     CallGenerator* _cg;
-    stringStream* _ss;
+    stringStream   _ss;
+    static const size_t default_stream_buffer_size = 128;
 
    public:
     PrintInliningBuffer()
-      : _cg(NULL) { _ss = new stringStream(); }
+      : _cg(NULL), _ss(default_stream_buffer_size) {}
 
-    stringStream* ss() const { return _ss; }
-    CallGenerator* cg() const { return _cg; }
+    stringStream* ss()             { return &_ss; }
+    CallGenerator* cg()            { return _cg; }
     void set_cg(CallGenerator* cg) { _cg = cg; }
   };
 
   stringStream* _print_inlining_stream;
-  GrowableArray<PrintInliningBuffer>* _print_inlining_list;
+  GrowableArray<PrintInliningBuffer*>* _print_inlining_list;
   int _print_inlining_idx;
   char* _print_inlining_output;
 
@@ -522,13 +539,15 @@ class Compile : public Phase {
 
   void* _replay_inline_data; // Pointer to data loaded from file
 
+  void print_inlining_stream_free();
   void print_inlining_init();
   void print_inlining_reinit();
   void print_inlining_commit();
   void print_inlining_push();
-  PrintInliningBuffer& print_inlining_current();
+  PrintInliningBuffer* print_inlining_current();
 
   void log_late_inline_failure(CallGenerator* cg, const char* msg);
+  DEBUG_ONLY(bool _exception_backedge;)
 
  public:
 
@@ -622,6 +641,8 @@ class Compile : public Phase {
   bool              aggressive_unboxing() const { return _eliminate_boxing && AggressiveUnboxing; }
   bool              save_argument_registers() const { return _save_argument_registers; }
 
+  /** Do locks coarsening. */
+  bool              do_locks_coarsening() const { return _do_locks_coarsening; }
 
   // Other fixed compilation parameters.
   ciMethod*         method() const              { return _method; }
@@ -771,6 +792,7 @@ class Compile : public Phase {
   int           macro_count()             const { return _macro_nodes->length(); }
   int           predicate_count()         const { return _predicate_opaqs->length();}
   int           expensive_count()         const { return _expensive_nodes->length(); }
+  int           coarsened_count()         const { return _coarsened_locks.length(); }
   Node*         macro_node(int idx)       const { return _macro_nodes->at(idx); }
   Node*         predicate_opaque1_node(int idx) const { return _predicate_opaqs->at(idx);}
   Node*         expensive_node(int idx)   const { return _expensive_nodes->at(idx); }
@@ -789,6 +811,10 @@ class Compile : public Phase {
     // remove from _predicate_opaqs list also if it is there
     if (predicate_count() > 0 && _predicate_opaqs->contains(n)){
       _predicate_opaqs->remove(n);
+    }
+    // Remove from coarsened locks list if present
+    if (coarsened_count() > 0) {
+      remove_coarsened_lock(n);
     }
   }
   void add_expensive_node(Node * n);
@@ -814,6 +840,9 @@ class Compile : public Phase {
   int   range_check_cast_count()       const { return _range_check_casts->length(); }
   // Remove all range check dependent CastIINodes.
   void  remove_range_check_casts(PhaseIterGVN &igvn);
+  void add_coarsened_locks(GrowableArray<AbstractLockNode*>& locks);
+  void remove_coarsened_lock(Node* n);
+  bool coarsened_locks_consistent();
 
   void add_opaque4_node(Node* n);
   void remove_opaque4_node(Node* n) {
@@ -1014,6 +1043,11 @@ class Compile : public Phase {
                       ciMethodData* logmd = NULL);
   // Report if there were too many recompiles at a method and bci.
   bool too_many_recompiles(ciMethod* method, int bci, Deoptimization::DeoptReason reason);
+  // Report if there were too many traps or recompiles at a method and bci.
+  bool too_many_traps_or_recompiles(ciMethod* method, int bci, Deoptimization::DeoptReason reason) {
+    return too_many_traps(method, bci, reason) ||
+           too_many_recompiles(method, bci, reason);
+  }
   // Return a bitset with the reasons where deoptimization is allowed,
   // i.e., where there were not too many uncommon traps.
   int _allowed_reasons;
@@ -1060,6 +1094,8 @@ class Compile : public Phase {
 
   void remove_useless_late_inlines(GrowableArray<CallGenerator*>* inlines, Unique_Node_List &useful);
 
+  void remove_useless_coarsened_locks(Unique_Node_List& useful);
+
   void process_print_inlining();
   void dump_print_inlining();
 
@@ -1079,6 +1115,8 @@ class Compile : public Phase {
   void inline_incrementally(PhaseIterGVN& igvn);
   void inline_string_calls(bool parse_time);
   void inline_boxing_calls(PhaseIterGVN& igvn);
+  bool optimize_loops(int& loop_opts_cnt, PhaseIterGVN& igvn, LoopOptsMode mode);
+  void remove_root_to_sfpts_edges(PhaseIterGVN& igvn);
 
   // Matching, CFG layout, allocation, code generation
   PhaseCFG*         cfg()                       { return _cfg; }
@@ -1164,7 +1202,8 @@ class Compile : public Phase {
   // continuation.
   Compile(ciEnv* ci_env, C2Compiler* compiler, ciMethod* target,
           int entry_bci, bool subsume_loads, bool do_escape_analysis,
-          bool eliminate_boxing, DirectiveSet* directive);
+          bool eliminate_boxing, bool do_locks_coarsening,
+          DirectiveSet* directive);
 
   // Second major entry point.  From the TypeFunc signature, generate code
   // to pass arguments from the Java calling convention to the C calling
@@ -1345,7 +1384,7 @@ class Compile : public Phase {
                               Node* ctrl = NULL);
 
   // Convert integer value to a narrowed long type dependent on ctrl (for example, a range check)
-  static Node* constrained_convI2L(PhaseGVN* phase, Node* value, const TypeInt* itype, Node* ctrl);
+  static Node* constrained_convI2L(PhaseGVN* phase, Node* value, const TypeInt* itype, Node* ctrl, bool carry_dependency = false);
 
   // Auxiliary method for randomized fuzzing/stressing
   static bool randomized_select(int count);
@@ -1355,6 +1394,13 @@ class Compile : public Phase {
   void          set_clone_map(Dict* d);
 
   bool is_compiling_clinit_for(ciKlass* k);
+#ifdef ASSERT
+  bool _type_verify_symmetry;
+  void set_exception_backedge() { _exception_backedge = true; }
+  bool has_exception_backedge() const { return _exception_backedge; }
+#endif
+
+  static Node* narrow_value(BasicType bt, Node* value, const Type* type, PhaseGVN* phase, bool transform_res);
 };
 
 #endif // SHARE_VM_OPTO_COMPILE_HPP

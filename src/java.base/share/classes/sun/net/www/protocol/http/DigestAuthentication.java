@@ -26,19 +26,21 @@
 package sun.net.www.protocol.http;
 
 import java.io.*;
-import java.net.URL;
-import java.net.ProtocolException;
 import java.net.PasswordAuthentication;
-import java.util.Arrays;
-import java.util.Random;
-
-import sun.net.www.HeaderParser;
-import sun.net.NetProperties;
+import java.net.ProtocolException;
+import java.net.URL;
+import java.security.AccessController;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivilegedAction;
-import java.security.AccessController;
+import java.util.Arrays;
 import java.util.Objects;
+import java.util.Random;
+
+import sun.net.NetProperties;
+import sun.net.www.HeaderParser;
+import sun.nio.cs.ISO_8859_1;
+
 import static sun.net.www.protocol.http.HttpURLConnection.HTTP_CONNECT;
 
 /**
@@ -279,7 +281,7 @@ class DigestAuthentication extends AuthenticationInfo {
         if (s == null || !s.equals("true"))
             return false;
         String newNonce = p.findValue ("nonce");
-        if (newNonce == null || "".equals(newNonce)) {
+        if (newNonce == null || newNonce.isEmpty()) {
             return false;
         }
         params.setNonce (newNonce);
@@ -323,7 +325,7 @@ class DigestAuthentication extends AuthenticationInfo {
                         + authMethod.substring(1).toLowerCase();
         }
         String algorithm = p.findValue("algorithm");
-        if (algorithm == null || "".equals(algorithm)) {
+        if (algorithm == null || algorithm.isEmpty()) {
             algorithm = "MD5";  // The default, accoriding to rfc2069
         }
         params.setAlgorithm (algorithm);
@@ -451,7 +453,7 @@ class DigestAuthentication extends AuthenticationInfo {
             }
             /* Check if there is a nextnonce field */
             String nextnonce = p.findValue ("nextnonce");
-            if (nextnonce != null && ! "".equals(nextnonce)) {
+            if (nextnonce != null && !nextnonce.isEmpty()) {
                 params.setNonce (nextnonce);
             }
 
@@ -520,11 +522,7 @@ class DigestAuthentication extends AuthenticationInfo {
     };
 
     private String encode(String src, char[] passwd, MessageDigest md) {
-        try {
-            md.update(src.getBytes("ISO-8859-1"));
-        } catch (java.io.UnsupportedEncodingException uee) {
-            assert false;
-        }
+        md.update(src.getBytes(ISO_8859_1.INSTANCE));
         if (passwd != null) {
             byte[] passwdBytes = new byte[passwd.length];
             for (int i=0; i<passwd.length; i++)

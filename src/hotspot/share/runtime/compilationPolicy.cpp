@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,14 +37,21 @@
 #include "runtime/frame.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/rframe.hpp"
-#include "runtime/simpleThresholdPolicy.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/thread.hpp"
+#include "runtime/tieredThresholdPolicy.hpp"
 #include "runtime/timer.hpp"
 #include "runtime/vframe.hpp"
-#include "runtime/vm_operations.hpp"
+#include "runtime/vmOperations.hpp"
 #include "utilities/events.hpp"
 #include "utilities/globalDefinitions.hpp"
+
+#ifdef COMPILER1
+#include "c1/c1_Compiler.hpp"
+#endif
+#ifdef COMPILER2
+#include "opto/c2compiler.hpp"
+#endif
 
 CompilationPolicy* CompilationPolicy::_policy;
 elapsedTimer       CompilationPolicy::_accumulated_time;
@@ -68,7 +75,7 @@ void compilationPolicy_init() {
     break;
   case 2:
 #ifdef TIERED
-    CompilationPolicy::set_policy(new SimpleThresholdPolicy());
+    CompilationPolicy::set_policy(new TieredThresholdPolicy());
 #else
     Unimplemented();
 #endif
@@ -181,6 +188,14 @@ bool CompilationPolicy::is_compilation_enabled() {
 }
 
 CompileTask* CompilationPolicy::select_task_helper(CompileQueue* compile_queue) {
+  // Remove unloaded methods from the queue
+  for (CompileTask* task = compile_queue->first(); task != NULL; ) {
+    CompileTask* next = task->next();
+    if (task->is_unloaded()) {
+      compile_queue->remove_and_mark_stale(task);
+    }
+    task = next;
+  }
 #if INCLUDE_JVMCI
   if (UseJVMCICompiler && !BackgroundCompilation) {
     /*
@@ -199,6 +214,50 @@ CompileTask* CompilationPolicy::select_task_helper(CompileQueue* compile_queue) 
 #endif
   return compile_queue->first();
 }
+
+
+//
+// CounterDecay for SimpleCompPolicy
+//
+// Iterates through invocation counters and decrements them. This
+// is done at each safepoint.
+//
+class CounterDecay : public AllStatic {
+  static jlong _last_timestamp;
+  static void do_method(Method* m) {
+    MethodCounters* mcs = m->method_counters();
+    if (mcs != NULL) {
+      mcs->invocation_counter()->decay();
+    }
+  }
+public:
+  static void decay();
+  static bool is_decay_needed() {
+    return ((os::javaTimeNanos() - _last_timestamp) / (NANOUNITS / MILLIUNITS)) > CounterDecayMinIntervalLength;
+  }
+  static void update_last_timestamp() { _last_timestamp = os::javaTimeNanos(); }
+};
+
+jlong CounterDecay::_last_timestamp = 0;
+
+void CounterDecay::decay() {
+  update_last_timestamp();
+
+  // This operation is going to be performed only at the end of a safepoint
+  // and hence GC's will not be going on, all Java mutators are suspended
+  // at this point and hence SystemDictionary_lock is also not needed.
+  assert(SafepointSynchronize::is_at_safepoint(), "can only be executed at a safepoint");
+  size_t nclasses = ClassLoaderDataGraph::num_instance_classes();
+  size_t classes_per_tick = nclasses * (CounterDecayMinIntervalLength * 1e-3 /
+                                        CounterHalfLifeTime);
+  for (size_t i = 0; i < classes_per_tick; i++) {
+    InstanceKlass* k = ClassLoaderDataGraph::try_get_next_class();
+    if (k != NULL) {
+      k->methods_do(do_method);
+    }
+  }
+}
+
 
 #ifndef PRODUCT
 void CompilationPolicy::print_time() {
@@ -222,10 +281,24 @@ void NonTieredCompPolicy::initialize() {
     // max(log2(8)-1,1) = 2 compiler threads on an 8-way machine.
     // May help big-app startup time.
     _compiler_count = MAX2(log2_int(os::active_processor_count())-1,1);
+    // Make sure there is enough space in the code cache to hold all the compiler buffers
+    size_t buffer_size = 1;
+#ifdef COMPILER1
+    buffer_size = is_client_compilation_mode_vm() ? Compiler::code_buffer_size() : buffer_size;
+#endif
+#ifdef COMPILER2
+    buffer_size = is_server_compilation_mode_vm() ? C2Compiler::initial_code_buffer_size() : buffer_size;
+#endif
+    int max_count = (ReservedCodeCacheSize - (CodeCacheMinimumUseSpace DEBUG_ONLY(* 3))) / (int)buffer_size;
+    if (_compiler_count > max_count) {
+      // Lower the compiler count such that all buffers fit into the code cache
+      _compiler_count = MAX2(max_count, 1);
+    }
     FLAG_SET_ERGO(intx, CICompilerCount, _compiler_count);
   } else {
     _compiler_count = CICompilerCount;
   }
+  CounterDecay::update_last_timestamp();
 }
 
 // Note: this policy is used ONLY if TieredCompilation is off.
@@ -273,47 +346,6 @@ void NonTieredCompPolicy::reset_counter_for_back_branch_event(const methodHandle
   i->set(i->state(), CompileThreshold);
   // Don't reset counter too low - it is used to check if OSR method is ready.
   b->set(b->state(), CompileThreshold / 2);
-}
-
-//
-// CounterDecay
-//
-// Iterates through invocation counters and decrements them. This
-// is done at each safepoint.
-//
-class CounterDecay : public AllStatic {
-  static jlong _last_timestamp;
-  static void do_method(Method* m) {
-    MethodCounters* mcs = m->method_counters();
-    if (mcs != NULL) {
-      mcs->invocation_counter()->decay();
-    }
-  }
-public:
-  static void decay();
-  static bool is_decay_needed() {
-    return (os::javaTimeMillis() - _last_timestamp) > CounterDecayMinIntervalLength;
-  }
-};
-
-jlong CounterDecay::_last_timestamp = 0;
-
-void CounterDecay::decay() {
-  _last_timestamp = os::javaTimeMillis();
-
-  // This operation is going to be performed only at the end of a safepoint
-  // and hence GC's will not be going on, all Java mutators are suspended
-  // at this point and hence SystemDictionary_lock is also not needed.
-  assert(SafepointSynchronize::is_at_safepoint(), "can only be executed at a safepoint");
-  size_t nclasses = ClassLoaderDataGraph::num_instance_classes();
-  size_t classes_per_tick = nclasses * (CounterDecayMinIntervalLength * 1e-3 /
-                                        CounterHalfLifeTime);
-  for (size_t i = 0; i < classes_per_tick; i++) {
-    InstanceKlass* k = ClassLoaderDataGraph::try_get_next_class();
-    if (k != NULL) {
-      k->methods_do(do_method);
-    }
-  }
 }
 
 // Called at the end of the safepoint

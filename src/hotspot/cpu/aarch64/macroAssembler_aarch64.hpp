@@ -26,7 +26,7 @@
 #ifndef CPU_AARCH64_VM_MACROASSEMBLER_AARCH64_HPP
 #define CPU_AARCH64_VM_MACROASSEMBLER_AARCH64_HPP
 
-#include "asm/assembler.hpp"
+#include "asm/assembler.inline.hpp"
 
 // MacroAssembler extends Assembler by frequently used macros.
 //
@@ -132,6 +132,20 @@ class MacroAssembler: public Assembler {
     a.lea(this, r);
   }
 
+  /* Sometimes we get misaligned loads and stores, usually from Unsafe
+     accesses, and these can exceed the offset range. */
+  Address legitimize_address(const Address &a, int size, Register scratch) {
+    if (a.getMode() == Address::base_plus_offset) {
+      if (! Address::offset_ok_for_immed(a.offset(), exact_log2(size))) {
+        block_comment("legitimize_address {");
+        lea(scratch, a);
+        block_comment("} legitimize_address");
+        return Address(scratch);
+      }
+    }
+    return a;
+  }
+
   void addmw(Address a, Register incr, Register scratch) {
     ldrw(scratch, a);
     addw(scratch, scratch, incr);
@@ -169,12 +183,9 @@ class MacroAssembler: public Assembler {
 
   virtual void _call_Unimplemented(address call_site) {
     mov(rscratch2, call_site);
-    haltsim();
   }
 
 #define call_Unimplemented() _call_Unimplemented((address)__PRETTY_FUNCTION__)
-
-  virtual void notify(int type);
 
   // aliases defined in AARCH64 spec
 
@@ -437,8 +448,8 @@ class MacroAssembler: public Assembler {
   // first two private routines for loading 32 bit or 64 bit constants
 private:
 
-  void mov_immediate64(Register dst, u_int64_t imm64);
-  void mov_immediate32(Register dst, u_int32_t imm32);
+  void mov_immediate64(Register dst, uint64_t imm64);
+  void mov_immediate32(Register dst, uint32_t imm32);
 
   int push(unsigned int bitset, Register stack);
   int pop(unsigned int bitset, Register stack);
@@ -461,27 +472,27 @@ public:
 
   inline void mov(Register dst, address addr)
   {
-    mov_immediate64(dst, (u_int64_t)addr);
+    mov_immediate64(dst, (uint64_t)addr);
   }
 
-  inline void mov(Register dst, u_int64_t imm64)
+  inline void mov(Register dst, uint64_t imm64)
   {
     mov_immediate64(dst, imm64);
   }
 
-  inline void movw(Register dst, u_int32_t imm32)
+  inline void movw(Register dst, uint32_t imm32)
   {
     mov_immediate32(dst, imm32);
   }
 
-  inline void mov(Register dst, long l)
+  inline void mov(Register dst, int64_t l)
   {
-    mov(dst, (u_int64_t)l);
+    mov(dst, (uint64_t)l);
   }
 
   inline void mov(Register dst, int i)
   {
-    mov(dst, (long)i);
+    mov(dst, (int64_t)i);
   }
 
   void mov(Register dst, RegisterOrConstant src) {
@@ -493,7 +504,7 @@ public:
 
   void movptr(Register r, uintptr_t imm64);
 
-  void mov(FloatRegister Vd, SIMD_Arrangement T, u_int32_t imm32);
+  void mov(FloatRegister Vd, SIMD_Arrangement T, uint32_t imm32);
 
   void mov(FloatRegister Vd, SIMD_Arrangement T, FloatRegister Vn) {
     orr(Vd, T, Vn, Vn);
@@ -605,6 +616,7 @@ public:
   static int patch_narrow_klass(address insn_addr, narrowKlass n);
 
   address emit_trampoline_stub(int insts_call_instruction_offset, address target);
+  void emit_static_call_stub();
 
   // The following 4 methods return the offset of the appropriate move instruction
 
@@ -997,6 +1009,8 @@ public:
 
   void atomic_xchg(Register prev, Register newv, Register addr);
   void atomic_xchgw(Register prev, Register newv, Register addr);
+  void atomic_xchgl(Register prev, Register newv, Register addr);
+  void atomic_xchglw(Register prev, Register newv, Register addr);
   void atomic_xchgal(Register prev, Register newv, Register addr);
   void atomic_xchgalw(Register prev, Register newv, Register addr);
 
@@ -1017,6 +1031,16 @@ public:
                Register result);
 private:
   void compare_eq(Register rn, Register rm, enum operand_size size);
+
+#ifdef ASSERT
+  // Macro short-hand support to clean-up after a failed call to trampoline
+  // call generation (see trampoline_call() below), when a set of Labels must
+  // be reset (before returning).
+#define reset_labels1(L1) L1.reset()
+#define reset_labels2(L1, L2) L1.reset(); L2.reset()
+#define reset_labels3(L1, L2, L3) L1.reset(); reset_labels2(L2, L3)
+#define reset_labels5(L1, L2, L3, L4, L5) reset_labels2(L1, L2); reset_labels3(L3, L4, L5)
+#endif
 
 public:
   // Calls
@@ -1136,7 +1160,7 @@ public:
   void sub(Register Rd, Register Rn, RegisterOrConstant decrement);
   void subw(Register Rd, Register Rn, RegisterOrConstant decrement);
 
-  void adrp(Register reg1, const Address &dest, unsigned long &byte_offset);
+  void adrp(Register reg1, const Address &dest, uint64_t &byte_offset);
 
   void tableswitch(Register index, jint lowbound, jint highbound,
                    Label &jumptable, Label &jumptable_end, int stride = 1) {
@@ -1153,7 +1177,7 @@ public:
   // actually be used: you must use the Address that is returned.  It
   // is up to you to ensure that the shift provided matches the size
   // of your data.
-  Address form_address(Register Rd, Register base, long byte_offset, int shift);
+  Address form_address(Register Rd, Register base, int64_t byte_offset, int shift);
 
   // Return true iff an address is within the 48-bit AArch64 address
   // space.
@@ -1173,34 +1197,12 @@ public:
   //
 
   public:
-  // enum used for aarch64--x86 linkage to define return type of x86 function
-  enum ret_type { ret_type_void, ret_type_integral, ret_type_float, ret_type_double};
-
-#ifdef BUILTIN_SIM
-  void c_stub_prolog(int gp_arg_count, int fp_arg_count, int ret_type, address *prolog_ptr = NULL);
-#else
-  void c_stub_prolog(int gp_arg_count, int fp_arg_count, int ret_type) { }
-#endif
-
-  // special version of call_VM_leaf_base needed for aarch64 simulator
-  // where we need to specify both the gp and fp arg counts and the
-  // return type so that the linkage routine from aarch64 to x86 and
-  // back knows which aarch64 registers to copy to x86 registers and
-  // which x86 result register to copy back to an aarch64 register
-
-  void call_VM_leaf_base1(
-    address  entry_point,             // the entry point
-    int      number_of_gp_arguments,  // the number of gp reg arguments to pass
-    int      number_of_fp_arguments,  // the number of fp reg arguments to pass
-    ret_type type,                    // the return type for the call
-    Label*   retaddr = NULL
-  );
 
   void ldr_constant(Register dest, const Address &const_addr) {
     if (NearCpool) {
       ldr(dest, const_addr);
     } else {
-      unsigned long offset;
+      uint64_t offset;
       adrp(dest, InternalAddress(const_addr.target()), offset);
       ldr(dest, Address(dest, offset));
     }
@@ -1221,24 +1223,24 @@ public:
                       Register tmp1, Register tmp2, FloatRegister vtmp1,
                       FloatRegister vtmp2, FloatRegister vtmp3, int ae);
 
-  void has_negatives(Register ary1, Register len, Register result);
+  address has_negatives(Register ary1, Register len, Register result);
 
-  void arrays_equals(Register a1, Register a2, Register result, Register cnt1,
-                     Register tmp1, Register tmp2, Register tmp3, int elem_size);
+  address arrays_equals(Register a1, Register a2, Register result, Register cnt1,
+                        Register tmp1, Register tmp2, Register tmp3, int elem_size);
 
   void string_equals(Register a1, Register a2, Register result, Register cnt1,
                      int elem_size);
 
   void fill_words(Register base, Register cnt, Register value);
-  void zero_words(Register base, u_int64_t cnt);
-  void zero_words(Register ptr, Register cnt);
+  void zero_words(Register base, uint64_t cnt);
+  address zero_words(Register ptr, Register cnt);
   void zero_dcache_blocks(Register base, Register cnt);
 
   static const int zero_words_block_size;
 
-  void byte_array_inflate(Register src, Register dst, Register len,
-                          FloatRegister vtmp1, FloatRegister vtmp2,
-                          FloatRegister vtmp3, Register tmp4);
+  address byte_array_inflate(Register src, Register dst, Register len,
+                             FloatRegister vtmp1, FloatRegister vtmp2,
+                             FloatRegister vtmp3, Register tmp4);
 
   void char_array_compress(Register src, Register dst, Register len,
                            FloatRegister tmp1Reg, FloatRegister tmp2Reg,
@@ -1312,7 +1314,7 @@ private:
   // Uses rscratch2 if the address is not directly reachable
   Address spill_address(int size, int offset, Register tmp=rscratch2);
 
-  bool merge_alignment_check(Register base, size_t size, long cur_offset, long prev_offset) const;
+  bool merge_alignment_check(Register base, size_t size, int64_t cur_offset, int64_t prev_offset) const;
 
   // Check whether two loads/stores can be merged into ldp/stp.
   bool ldst_can_merge(Register rx, const Address &adr, size_t cur_size_in_bytes, bool is_store) const;

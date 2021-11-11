@@ -40,6 +40,10 @@ import javax.crypto.Mac;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.SSLPeerUnverifiedException;
+
+import jdk.internal.event.EventHelper;
+import jdk.internal.event.TLSHandshakeEvent;
 import sun.security.internal.spec.TlsPrfParameterSpec;
 import sun.security.ssl.CipherSuite.HashAlg;
 import static sun.security.ssl.CipherSuite.HashAlg.H_NONE;
@@ -98,7 +102,7 @@ final class Finished {
             }
 
             if (m.remaining() != verifyDataLen) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw context.conContext.fatal(Alert.DECODE_ERROR,
                     "Inappropriate finished message: need " + verifyDataLen +
                     " but remaining " + m.remaining() + " bytes verify_data");
             }
@@ -116,7 +120,7 @@ final class Finished {
                         "Failed to generate verify_data", ioe);
             }
             if (!MessageDigest.isEqual(myVerifyData, verifyData)) {
-                throw context.conContext.fatal(Alert.ILLEGAL_PARAMETER,
+                throw context.conContext.fatal(Alert.DECRYPT_ERROR,
                         "The Finished message cannot be verified.");
             }
         }
@@ -547,6 +551,7 @@ final class Finished {
 
                 // handshake context cleanup.
                 chc.handshakeFinished = true;
+                recordEvent(chc.conContext.conSession);
 
                 // May need to retransmit the last flight for DTLS.
                 if (!chc.sslContext.isDTLS()) {
@@ -575,6 +580,16 @@ final class Finished {
 
         private void onConsumeFinished(ServerHandshakeContext shc,
                 ByteBuffer message) throws IOException {
+            // Make sure that any expected CertificateVerify message
+            // has been received and processed.
+            if (!shc.isResumption) {
+                if (shc.handshakeConsumers.containsKey(
+                        SSLHandshake.CERTIFICATE_VERIFY.id)) {
+                    throw shc.conContext.fatal(Alert.UNEXPECTED_MESSAGE,
+                            "Unexpected Finished handshake message");
+                }
+            }
+
             FinishedMessage fm = new FinishedMessage(shc, message);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine(
@@ -596,6 +611,7 @@ final class Finished {
 
                 // handshake context cleanup.
                 shc.handshakeFinished = true;
+                recordEvent(shc.conContext.conSession);
 
                 // May need to retransmit the last flight for DTLS.
                 if (!shc.sslContext.isDTLS()) {
@@ -734,6 +750,8 @@ final class Finished {
             // handshake context cleanup.
             chc.handshakeFinished = true;
             chc.conContext.finishHandshake();
+            recordEvent(chc.conContext.conSession);
+
 
             // The handshake message has been delivered.
             return null;
@@ -863,6 +881,18 @@ final class Finished {
 
         private void onConsumeFinished(ClientHandshakeContext chc,
                 ByteBuffer message) throws IOException {
+            // Make sure that any expected CertificateVerify message
+            // has been received and processed.
+            if (!chc.isResumption) {
+                if (chc.handshakeConsumers.containsKey(
+                        SSLHandshake.CERTIFICATE.id) ||
+                    chc.handshakeConsumers.containsKey(
+                        SSLHandshake.CERTIFICATE_VERIFY.id)) {
+                    throw chc.conContext.fatal(Alert.UNEXPECTED_MESSAGE,
+                            "Unexpected Finished handshake message");
+                }
+            }
+
             FinishedMessage fm = new FinishedMessage(chc, message);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine(
@@ -985,6 +1015,18 @@ final class Finished {
 
         private void onConsumeFinished(ServerHandshakeContext shc,
                 ByteBuffer message) throws IOException {
+            // Make sure that any expected CertificateVerify message
+            // has been received and processed.
+            if (!shc.isResumption) {
+                if (shc.handshakeConsumers.containsKey(
+                        SSLHandshake.CERTIFICATE.id) ||
+                    shc.handshakeConsumers.containsKey(
+                        SSLHandshake.CERTIFICATE_VERIFY.id)) {
+                    throw shc.conContext.fatal(Alert.UNEXPECTED_MESSAGE,
+                            "Unexpected Finished handshake message");
+                }
+            }
+
             FinishedMessage fm = new FinishedMessage(shc, message);
             if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
                 SSLLogger.fine(
@@ -1081,6 +1123,7 @@ final class Finished {
             if (!shc.sslContext.isDTLS()) {
                 shc.conContext.finishHandshake();
             }
+            recordEvent(shc.conContext.conSession);
 
             //
             // produce
@@ -1090,6 +1133,37 @@ final class Finished {
             }
             NewSessionTicket.kickstartProducer.produce(shc);
 
+        }
+    }
+
+    private static void recordEvent(SSLSessionImpl session) {
+        TLSHandshakeEvent event = new TLSHandshakeEvent();
+        if (event.shouldCommit() || EventHelper.isLoggingSecurity()) {
+            int peerCertificateId = 0;
+            try {
+                // use hash code for Id
+                peerCertificateId = session
+                        .getCertificateChain()[0]
+                        .hashCode();
+            } catch (SSLPeerUnverifiedException e) {
+                 // not verified msg
+            }
+            if (event.shouldCommit()) {
+                event.peerHost = session.getPeerHost();
+                event.peerPort = session.getPeerPort();
+                event.cipherSuite = session.getCipherSuite();
+                event.protocolVersion = session.getProtocol();
+                event.certificateId = peerCertificateId;
+                event.commit();
+            }
+            if (EventHelper.isLoggingSecurity()) {
+                EventHelper.logTLSHandshakeEvent(null,
+                                session.getPeerHost(),
+                                session.getPeerPort(),
+                                session.getCipherSuite(),
+                                session.getProtocol(),
+                                peerCertificateId);
+            }
         }
     }
 }

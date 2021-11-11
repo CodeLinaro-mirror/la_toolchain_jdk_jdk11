@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -1451,9 +1451,6 @@ void GraphBuilder::call_register_finalizer() {
   }
 
   if (needs_check) {
-    // Not a trivial method because C2 can do better with inlined check.
-    compilation()->set_would_profile(true);
-
     // Perform the registration of finalizable objects.
     ValueStack* state_before = copy_state_for_exception();
     load_local(objectType, 0);
@@ -1727,6 +1724,23 @@ void GraphBuilder::access_field(Bytecodes::Code code) {
         Value replacement = !needs_patching ? _memory->load(load) : load;
         if (replacement != load) {
           assert(replacement->is_linked() || !replacement->can_be_linked(), "should already by linked");
+          // Writing an (integer) value to a boolean, byte, char or short field includes an implicit narrowing
+          // conversion. Emit an explicit conversion here to get the correct field value after the write.
+          BasicType bt = field->type()->basic_type();
+          switch (bt) {
+          case T_BOOLEAN:
+          case T_BYTE:
+            replacement = append(new Convert(Bytecodes::_i2b, replacement, as_ValueType(bt)));
+            break;
+          case T_CHAR:
+            replacement = append(new Convert(Bytecodes::_i2c, replacement, as_ValueType(bt)));
+            break;
+          case T_SHORT:
+            replacement = append(new Convert(Bytecodes::_i2s, replacement, as_ValueType(bt)));
+            break;
+          default:
+            break;
+          }
           push(type, replacement);
         } else {
           push(type, append(load));
@@ -2600,7 +2614,7 @@ void PhiSimplifier::block_do(BlockBegin* b) {
 
 #ifdef ASSERT
   for_each_phi_fun(b, phi,
-                   assert(phi->operand_count() != 1 || phi->subst() != phi, "missed trivial simplification");
+                   assert(phi->operand_count() != 1 || phi->subst() != phi || phi->is_illegal(), "missed trivial simplification");
   );
 
   ValueStack* state = b->state()->caller_state();
@@ -3051,9 +3065,11 @@ BlockBegin* GraphBuilder::setup_start_block(int osr_bci, BlockBegin* std_entry, 
   // necesary if std_entry is also a backward branch target because
   // then phi functions may be necessary in the header block.  It's
   // also necessary when profiling so that there's a single block that
-  // can increment the interpreter_invocation_count.
+  // can increment the the counters.
+  // In addition, with range check elimination, we may need a valid block
+  // that dominates all the rest to insert range predicates.
   BlockBegin* new_header_block;
-  if (std_entry->number_of_preds() > 0 || count_invocations() || count_backedges()) {
+  if (std_entry->number_of_preds() > 0 || count_invocations() || count_backedges() || RangeCheckElimination) {
     new_header_block = header_block(std_entry, BlockBegin::std_entry_flag, state);
   } else {
     new_header_block = std_entry;
@@ -3453,7 +3469,6 @@ const char* GraphBuilder::check_can_parse(ciMethod* callee) const {
   // Certain methods cannot be parsed at all:
   if ( callee->is_native())            return "native method";
   if ( callee->is_abstract())          return "abstract method";
-  if (!callee->can_be_compiled())      return "not compilable (disabled)";
   if (!callee->can_be_parsed())        return "cannot be parsed";
   return NULL;
 }
@@ -3569,9 +3584,6 @@ void GraphBuilder::build_graph_for_intrinsic(ciMethod* callee, bool ignore_retur
 }
 
 bool GraphBuilder::try_inline_intrinsics(ciMethod* callee, bool ignore_return) {
-  // Not a trivial method because C2 may do intrinsics better.
-  compilation()->set_would_profile(true);
-
   // For calling is_intrinsic_available we need to transition to
   // the '_thread_in_vm' state because is_intrinsic_available()
   // accesses critical VM-internal data.
@@ -3806,7 +3818,7 @@ bool GraphBuilder::try_inline_full(ciMethod* callee, bool holder_known, bool ign
       INLINE_BAILOUT("total inlining greater than DesiredMethodLimit");
     }
     // printing
-    print_inlining(callee);
+    print_inlining(callee, "inline", /*success*/ true);
   }
 
   // NOTE: Bailouts from this point on, which occur at the
@@ -4030,7 +4042,7 @@ bool GraphBuilder::try_method_handle_inline(ciMethod* callee, bool ignore_return
           if (ciMethod::is_consistent_info(callee, target)) {
             Bytecodes::Code bc = target->is_static() ? Bytecodes::_invokestatic : Bytecodes::_invokevirtual;
             ignore_return = ignore_return || (callee->return_type()->is_void() && !target->return_type()->is_void());
-            if (try_inline(target, /*holder_known*/ true, ignore_return, bc)) {
+            if (try_inline(target, /*holder_known*/ !callee->is_static(), ignore_return, bc)) {
               return true;
             }
           } else {
@@ -4096,7 +4108,7 @@ bool GraphBuilder::try_method_handle_inline(ciMethod* callee, bool ignore_return
           // We don't do CHA here so only inline static and statically bindable methods.
           if (target->is_static() || target->can_be_statically_bound()) {
             Bytecodes::Code bc = target->is_static() ? Bytecodes::_invokestatic : Bytecodes::_invokevirtual;
-            if (try_inline(target, /*holder_known*/ true, ignore_return, bc)) {
+            if (try_inline(target, /*holder_known*/ !callee->is_static(), ignore_return, bc)) {
               return true;
             }
           } else {
@@ -4328,16 +4340,11 @@ static void post_inlining_event(EventCompilerInlining* event,
 void GraphBuilder::print_inlining(ciMethod* callee, const char* msg, bool success) {
   CompileLog* log = compilation()->log();
   if (log != NULL) {
+    assert(msg != NULL, "inlining msg should not be null!");
     if (success) {
-      if (msg != NULL)
-        log->inline_success(msg);
-      else
-        log->inline_success("receiver is statically known");
+      log->inline_success(msg);
     } else {
-      if (msg != NULL)
-        log->inline_fail(msg);
-      else
-        log->inline_fail("reason unknown");
+      log->inline_fail(msg);
     }
   }
   EventCompilerInlining event;

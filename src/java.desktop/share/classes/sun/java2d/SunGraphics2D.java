@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -770,6 +770,11 @@ public final class SunGraphics2D
                         aahint == SunHints.INTVAL_TEXT_ANTIALIAS_LCD_HRGB;
                 }
             }
+        }
+        if (FontUtilities.isMacOSX14 &&
+            (aahint == SunHints.INTVAL_TEXT_ANTIALIAS_OFF))
+        {
+             aahint =  SunHints.INTVAL_TEXT_ANTIALIAS_ON;
         }
         info.aaHint = aahint;
         info.fontStrike = info.font2D.getStrike(font, devAt, textAt,
@@ -3021,7 +3026,8 @@ public final class SunGraphics2D
         if (data == null) {
             throw new NullPointerException("char data is null");
         }
-        if (offset < 0 || length < 0 || offset + length > data.length) {
+        if (offset < 0 || length < 0 || offset + length < length ||
+            offset + length > data.length) {
             throw new ArrayIndexOutOfBoundsException("bad offset/length");
         }
         if (font.hasLayoutAttributes()) {
@@ -3053,7 +3059,8 @@ public final class SunGraphics2D
         if (data == null) {
             throw new NullPointerException("byte data is null");
         }
-        if (offset < 0 || length < 0 || offset + length > data.length) {
+        if (offset < 0 || length < 0 || offset + length < length ||
+            offset + length > data.length) {
             throw new ArrayIndexOutOfBoundsException("bad offset/length");
         }
         /* Byte data is interpreted as 8-bit ASCII. Re-use drawChars loops */
@@ -3141,6 +3148,13 @@ public final class SunGraphics2D
                 int rvWidth = resolutionVariant.getWidth(rvObserver);
                 int rvHeight = resolutionVariant.getHeight(rvObserver);
 
+                if (rvWidth < 0 || rvHeight < 0) {
+                    // The resolution variant is not loaded yet, try to use default resolution
+                    resolutionVariant = mrImage.getResolutionVariant(width, height);
+                    rvWidth = resolutionVariant.getWidth(rvObserver);
+                    rvHeight = resolutionVariant.getHeight(rvObserver);
+                }
+
                 if (0 < width && 0 < height && 0 < rvWidth && 0 < rvHeight) {
 
                     double widthScale = ((double) rvWidth) / width;
@@ -3174,6 +3188,8 @@ public final class SunGraphics2D
                     return scaleImage(img, dx1, dy1, dx2, dy2,
                                       sx1, sy1, sx2, sy2,
                                       bgcolor, observer);
+                } else {
+                    return false; // Image variant is not initialized yet
                 }
             }
         }

@@ -156,6 +156,9 @@ JVM_MaxMemory(void);
 JNIEXPORT jint JNICALL
 JVM_ActiveProcessorCount(void);
 
+JNIEXPORT jboolean JNICALL
+JVM_IsUseContainerSupport(void);
+
 JNIEXPORT void * JNICALL
 JVM_LoadLibrary(const char *name);
 
@@ -171,6 +174,8 @@ JVM_IsSupportedJNIVersion(jint version);
 JNIEXPORT jobjectArray JNICALL
 JVM_GetVmArguments(JNIEnv *env);
 
+JNIEXPORT void JNICALL
+JVM_InitializeFromArchive(JNIEnv* env, jclass cls);
 
 /*
  * java.lang.Throwable

@@ -50,6 +50,13 @@ CompiledMethod::CompiledMethod(Method* method, const char* name, CompilerType ty
 }
 
 void CompiledMethod::init_defaults() {
+  { // avoid uninitialized fields, even for short time periods
+    _is_far_code                = false;
+    _scopes_data_begin          = NULL;
+    _deopt_handler_begin        = NULL;
+    _deopt_mh_handler_begin     = NULL;
+    _exception_cache            = NULL;
+  }
   _has_unsafe_access          = 0;
   _has_method_handle_invokes  = 0;
   _lazy_critical_native       = 0;
@@ -322,15 +329,16 @@ void CompiledMethod::clear_inline_caches() {
   }
 }
 
-// Clear ICStubs of all compiled ICs
-void CompiledMethod::clear_ic_stubs() {
+// Clear IC callsites, releasing ICStubs of all compiled ICs
+// as well as any associated CompiledICHolders.
+void CompiledMethod::clear_ic_callsites() {
   assert_locked_or_safepoint(CompiledIC_lock);
   ResourceMark rm;
   RelocIterator iter(this);
   while(iter.next()) {
     if (iter.type() == relocInfo::virtual_call_type) {
       CompiledIC* ic = CompiledIC_at(&iter);
-      ic->clear_ic_stub();
+      ic->set_to_clean(false);
     }
   }
 }
@@ -620,17 +628,3 @@ void CompiledMethod::do_unloading_parallel_postponed() {
   }
 }
 
-// Iterating over all nmethods, e.g. with the help of CodeCache::nmethods_do(fun) was found
-// to not be inherently safe. There is a chance that fields are seen which are not properly
-// initialized. This happens despite the fact that nmethods_do() asserts the CodeCache_lock
-// to be held.
-// To bundle knowledge about necessary checks in one place, this function was introduced.
-// It is not claimed that these checks are sufficient, but they were found to be necessary.
-bool CompiledMethod::nmethod_access_is_safe(nmethod* nm) {
-  Method* method = (nm == NULL) ? NULL : nm->method();  // nm->method() may be uninitialized, i.e. != NULL, but invalid
-  return (nm != NULL) && (method != NULL) && (method->signature() != NULL) &&
-         !nm->is_zombie() && !nm->is_not_installed() &&
-         os::is_readable_pointer(method) &&
-         os::is_readable_pointer(method->constants()) &&
-         os::is_readable_pointer(method->signature());
-}

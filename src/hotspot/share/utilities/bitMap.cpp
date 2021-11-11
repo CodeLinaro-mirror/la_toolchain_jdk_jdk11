@@ -133,8 +133,8 @@ void BitMap::reinitialize(const Allocator& allocator, idx_t new_size_in_bits) {
   initialize(allocator, new_size_in_bits);
 }
 
-ResourceBitMap::ResourceBitMap(idx_t size_in_bits)
-    : BitMap(allocate(ResourceBitMapAllocator(), size_in_bits), size_in_bits) {
+ResourceBitMap::ResourceBitMap(idx_t size_in_bits, bool clear)
+    : BitMap(allocate(ResourceBitMapAllocator(), size_in_bits, clear), size_in_bits) {
 }
 
 void ResourceBitMap::resize(idx_t new_size_in_bits) {
@@ -682,6 +682,11 @@ BitMap::idx_t BitMap::count_one_bits() const {
 void BitMap::print_on_error(outputStream* st, const char* prefix) const {
   st->print_cr("%s[" PTR_FORMAT ", " PTR_FORMAT ")",
       prefix, p2i(map()), p2i((char*)map() + (size() >> LogBitsPerByte)));
+}
+
+void BitMap::write_to(bm_word_t* buffer, size_t buffer_size_in_bytes) const {
+  assert(buffer_size_in_bytes == size_in_bytes(), "must be");
+  memcpy(buffer, _map, size_in_bytes());
 }
 
 #ifndef PRODUCT

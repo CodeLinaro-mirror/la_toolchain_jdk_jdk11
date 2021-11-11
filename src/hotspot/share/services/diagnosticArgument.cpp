@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -153,7 +153,13 @@ template <> void DCmdArgument<bool>::parse_value(const char* str,
       ResourceMark rm;
 
       char* buf = NEW_RESOURCE_ARRAY(char, len + 1);
+
+PRAGMA_DIAG_PUSH
+PRAGMA_STRINGOP_TRUNCATION_IGNORED
+      // This code can incorrectly cause a "stringop-truncation" warning with gcc
       strncpy(buf, str, len);
+PRAGMA_DIAG_POP
+
       buf[len] = '\0';
       Exceptions::fthrow(THREAD_AND_LOCATION, vmSymbols::java_lang_IllegalArgumentException(),
         "Boolean parsing error in command argument '%s'. Could not parse: %s.\n", _name, buf);
@@ -179,9 +185,9 @@ template <> void DCmdArgument<char*>::parse_value(const char* str,
   if (str == NULL) {
     _value = NULL;
   } else {
-    _value = NEW_C_HEAP_ARRAY(char, len+1, mtInternal);
-    strncpy(_value, str, len);
-    _value[len] = 0;
+    _value = NEW_C_HEAP_ARRAY(char, len + 1, mtInternal);
+    int n = os::snprintf(_value, len + 1, "%.*s", (int)len, str);
+    assert((size_t)n <= len, "Unexpected number of characters in string");
   }
 }
 

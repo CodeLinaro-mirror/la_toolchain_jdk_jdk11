@@ -37,6 +37,7 @@ import jdk.test.lib.classloader.GeneratingClassLoader;
 import jdk.test.lib.hprof.HprofParser;
 import jdk.test.lib.process.ProcessTools;
 import jdk.test.lib.process.OutputAnalyzer;
+import jtreg.SkippedException;
 
 import java.io.File;
 
@@ -96,15 +97,14 @@ public class TestJmapCore {
             : ProcessTools.executeProcess("sh", "-c", "ulimit -c unlimited && "
                     + ProcessTools.getCommandLine(pb));
         File core;
-        String pattern = Platform.isWindows() ? "mdmp" : "core";
-        File[] cores = new File(".").listFiles((dir, name) -> name.contains(pattern));
+        String pattern = Platform.isWindows() ? ".*\\.mdmp" : "core(\\.\\d+)?";
+        File[] cores = new File(".").listFiles((dir, name) -> name.matches(pattern));
         if (cores.length == 0) {
             // /cores/core.$pid might be generated on macosx by default
             String pid = output.firstMatch("^(\\d+)" + pidSeparator, 1);
             core = new File("cores/core." + pid);
             if (!core.exists()) {
-                System.out.println("Has not been able to find coredump. Test skipped.");
-                return;
+                throw new SkippedException("Has not been able to find coredump");
             }
         } else {
             Asserts.assertTrue(cores.length == 1,

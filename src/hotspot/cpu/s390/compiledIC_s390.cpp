@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2016, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2016 SAP SE. All rights reserved.
+ * Copyright (c) 2016, 2019, SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -75,6 +75,7 @@ address CompiledStaticCall::emit_to_interp_stub(CodeBuffer &cbuf, address mark/*
   return stub;
 #else
   ShouldNotReachHere();
+  return NULL;
 #endif
 }
 
@@ -119,7 +120,7 @@ void CompiledDirectStaticCall::set_to_interpreted(const methodHandle& callee, ad
 #endif
 
   // Update stub.
-  method_holder->set_data((intptr_t)callee());
+  method_holder->set_data((intptr_t)callee(), relocInfo::metadata_type);
   jump->set_jump_destination(entry);
 
   // Update jump to call.
@@ -134,7 +135,7 @@ void CompiledDirectStaticCall::set_stub_to_clean(static_stub_Relocation* static_
   // Creation also verifies the object.
   NativeMovConstReg* method_holder = nativeMovConstReg_at(stub + NativeCall::get_IC_pos_in_java_to_interp_stub());
   NativeJump*        jump          = nativeJump_at(method_holder->next_instruction_address());
-  method_holder->set_data(0);
+  method_holder->set_data(0, relocInfo::metadata_type);
   jump->set_jump_destination((address)-1);
 }
 

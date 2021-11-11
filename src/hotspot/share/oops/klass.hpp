@@ -258,9 +258,11 @@ protected:
 
   // java mirror
   oop java_mirror() const;
+  oop java_mirror_no_keepalive() const;
   void set_java_mirror(Handle m);
 
   oop archived_java_mirror_raw() NOT_CDS_JAVA_HEAP_RETURN_(NULL); // no GC barrier
+  narrowOop archived_java_mirror_raw_narrow() NOT_CDS_JAVA_HEAP_RETURN_(0); // no GC barrier
   void set_archived_java_mirror_raw(oop m) NOT_CDS_JAVA_HEAP_RETURN; // no GC barrier
 
   // Temporary mirror switch used by RedefineClasses

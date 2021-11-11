@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -213,6 +213,29 @@ int JfrOSInterface::cpu_loads_process(double* jvm_user_load, double* jvm_kernel_
 
 int JfrOSInterface::os_version(char** os_version) {
   return instance()._impl->os_version(os_version);
+}
+
+const char* JfrOSInterface::virtualization_name() {
+  VirtualizationType vrt = VM_Version::get_detected_virtualization();
+  if (vrt == XenHVM) {
+    return "Xen hardware-assisted virtualization";
+  } else if (vrt == KVM) {
+    return "KVM virtualization";
+  } else if (vrt == VMWare) {
+    return "VMWare virtualization";
+  } else if (vrt == HyperV) {
+    return "Hyper-V virtualization";
+  } else if (vrt == HyperVRole) {
+    return "Hyper-V role";
+  } else if (vrt == PowerVM) {
+    return "PowerVM virtualization";
+  } else if (vrt == PowerKVM) {
+    return "Power KVM virtualization";
+  } else if (vrt == PowerFullPartitionMode) {
+    return "Power full partition";
+  }
+
+  return "No virtualization detected";
 }
 
 int JfrOSInterface::generate_initial_environment_variable_events() {

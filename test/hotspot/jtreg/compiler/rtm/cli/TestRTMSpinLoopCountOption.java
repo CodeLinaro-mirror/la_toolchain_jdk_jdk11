@@ -28,8 +28,8 @@
  * @library /test/lib /
  * @modules java.base/jdk.internal.misc
  *          java.management
- *
- * @run main/othervm compiler.rtm.cli.TestRTMSpinLoopCountOption
+ * @requires vm.rtm.compiler
+ * @run driver compiler.rtm.cli.TestRTMSpinLoopCountOption
  */
 
 package compiler.rtm.cli;

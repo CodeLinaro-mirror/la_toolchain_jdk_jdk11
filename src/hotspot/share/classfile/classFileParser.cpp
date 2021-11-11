@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -60,6 +60,7 @@
 #include "runtime/arguments.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/javaCalls.hpp"
+#include "runtime/os.hpp"
 #include "runtime/perfData.hpp"
 #include "runtime/reflection.hpp"
 #include "runtime/safepointVerifiers.hpp"
@@ -307,7 +308,7 @@ void ClassFileParser::parse_constant_pool_entries(const ClassFileStream* const s
           const char* const str = java_lang_String::as_utf8_string(patch());
           // (could use java_lang_String::as_symbol instead, but might as well batch them)
           utf8_buffer = (const u1*) str;
-          utf8_length = (int) strlen(str);
+          utf8_length = (u2) strlen(str);
         }
 
         unsigned int hash;
@@ -1076,7 +1077,7 @@ public:
   u2 _contended_group;
 
   AnnotationCollector(Location location)
-    : _location(location), _annotations_present(0)
+    : _location(location), _annotations_present(0), _contended_group(0)
   {
     assert((int)_annotation_LIMIT <= (int)sizeof(_annotations_present) * BitsPerByte, "");
   }
@@ -3120,8 +3121,83 @@ void ClassFileParser::parse_classfile_source_debug_extension_attribute(const Cla
                                            JVM_ACC_STATIC                   \
                                          )
 
+// Find index of the InnerClasses entry for the specified inner_class_info_index.
+// Return -1 if none is found.
+static int inner_classes_find_index(const Array<u2>* inner_classes, int inner, const ConstantPool* cp, int length) {
+  Symbol* cp_klass_name =  cp->klass_name_at(inner);
+  for (int idx = 0; idx < length; idx += InstanceKlass::inner_class_next_offset) {
+    int idx_inner = inner_classes->at(idx + InstanceKlass::inner_class_inner_class_info_offset);
+    if (cp->klass_name_at(idx_inner) == cp_klass_name) {
+      return idx;
+    }
+  }
+  return -1;
+}
+
+// Return the outer_class_info_index for the InnerClasses entry containing the
+// specified inner_class_info_index.  Return -1 if no InnerClasses entry is found.
+static int inner_classes_jump_to_outer(const Array<u2>* inner_classes, int inner, const ConstantPool* cp, int length) {
+  if (inner == 0) return -1;
+  int idx = inner_classes_find_index(inner_classes, inner, cp, length);
+  if (idx == -1) return -1;
+  int result = inner_classes->at(idx + InstanceKlass::inner_class_outer_class_info_offset);
+  return result;
+}
+
+// Return true if circularity is found, false if no circularity is found.
+// Use Floyd's cycle finding algorithm.
+static bool inner_classes_check_loop_through_outer(const Array<u2>* inner_classes, int idx, const ConstantPool* cp, int length) {
+  int slow = inner_classes->at(idx + InstanceKlass::inner_class_inner_class_info_offset);
+  int fast = inner_classes->at(idx + InstanceKlass::inner_class_outer_class_info_offset);
+  while (fast != -1 && fast != 0) {
+    if (slow != 0 && (cp->klass_name_at(slow) == cp->klass_name_at(fast))) {
+      return true;  // found a circularity
+    }
+    fast = inner_classes_jump_to_outer(inner_classes, fast, cp, length);
+    if (fast == -1) return false;
+    fast = inner_classes_jump_to_outer(inner_classes, fast, cp, length);
+    if (fast == -1) return false;
+    slow = inner_classes_jump_to_outer(inner_classes, slow, cp, length);
+    assert(slow != -1, "sanity check");
+  }
+  return false;
+}
+
+// Loop through each InnerClasses entry checking for circularities and duplications
+// with other entries.  If duplicate entries are found then throw CFE.  Otherwise,
+// return true if a circularity or entries with duplicate inner_class_info_indexes
+// are found.
+bool ClassFileParser::check_inner_classes_circularity(const ConstantPool* cp, int length, TRAPS) {
+  // Loop through each InnerClasses entry.
+  for (int idx = 0; idx < length; idx += InstanceKlass::inner_class_next_offset) {
+    // Return true if there are circular entries.
+    if (inner_classes_check_loop_through_outer(_inner_classes, idx, cp, length)) {
+      return true;
+    }
+    // Check if there are duplicate entries or entries with the same inner_class_info_index.
+    for (int y = idx + InstanceKlass::inner_class_next_offset; y < length;
+         y += InstanceKlass::inner_class_next_offset) {
+
+      // To maintain compatibility, throw an exception if duplicate inner classes
+      // entries are found.
+      guarantee_property((_inner_classes->at(idx) != _inner_classes->at(y) ||
+                          _inner_classes->at(idx+1) != _inner_classes->at(y+1) ||
+                          _inner_classes->at(idx+2) != _inner_classes->at(y+2) ||
+                          _inner_classes->at(idx+3) != _inner_classes->at(y+3)),
+                         "Duplicate entry in InnerClasses attribute in class file %s",
+                         CHECK_(true));
+      // Return true if there are two entries with the same inner_class_info_index.
+      if (_inner_classes->at(y) == _inner_classes->at(idx)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Return number of classes in the inner classes attribute table
 u2 ClassFileParser::parse_classfile_inner_classes_attribute(const ClassFileStream* const cfs,
+                                                            const ConstantPool* cp,
                                                             const u1* const inner_classes_attribute_start,
                                                             bool parsed_enclosingmethod_attribute,
                                                             u2 enclosing_method_class_index,
@@ -3145,7 +3221,7 @@ u2 ClassFileParser::parse_classfile_inner_classes_attribute(const ClassFileStrea
   //    enclosing_method_class_index,
   //    enclosing_method_method_index]
   const int size = length * 4 + (parsed_enclosingmethod_attribute ? 2 : 0);
-  Array<u2>* const inner_classes = MetadataFactory::new_array<u2>(_loader_data, size, CHECK_0);
+  Array<u2>* inner_classes = MetadataFactory::new_array<u2>(_loader_data, size, CHECK_0);
   _inner_classes = inner_classes;
 
   int index = 0;
@@ -3164,6 +3240,13 @@ u2 ClassFileParser::parse_classfile_inner_classes_attribute(const ClassFileStrea
         valid_klass_reference_at(outer_class_info_index),
       "outer_class_info_index %u has bad constant type in class file %s",
       outer_class_info_index, CHECK_0);
+
+    if (outer_class_info_index != 0) {
+      const Symbol* const outer_class_name = cp->klass_name_at(outer_class_info_index);
+      char* bytes = (char*)outer_class_name->bytes();
+      guarantee_property(bytes[0] != JVM_SIGNATURE_ARRAY,
+                         "Outer class is an array class in class file %s", CHECK_0);
+    }
     // Inner class name
     const u2 inner_name_index = cfs->get_u2_fast();
     check_property(
@@ -3196,25 +3279,28 @@ u2 ClassFileParser::parse_classfile_inner_classes_attribute(const ClassFileStrea
   }
 
   // 4347400: make sure there's no duplicate entry in the classes array
+  // Also, check for circular entries.
+  bool has_circularity = false;
   if (_need_verify && _major_version >= JAVA_1_5_VERSION) {
-    for(int i = 0; i < length * 4; i += 4) {
-      for(int j = i + 4; j < length * 4; j += 4) {
-        guarantee_property((inner_classes->at(i)   != inner_classes->at(j) ||
-                            inner_classes->at(i+1) != inner_classes->at(j+1) ||
-                            inner_classes->at(i+2) != inner_classes->at(j+2) ||
-                            inner_classes->at(i+3) != inner_classes->at(j+3)),
-                            "Duplicate entry in InnerClasses in class file %s",
-                            CHECK_0);
+    has_circularity = check_inner_classes_circularity(cp, length * 4, CHECK_0);
+    if (has_circularity) {
+      // If circularity check failed then ignore InnerClasses attribute.
+      MetadataFactory::free_array<u2>(_loader_data, _inner_classes);
+      index = 0;
+      if (parsed_enclosingmethod_attribute) {
+        inner_classes = MetadataFactory::new_array<u2>(_loader_data, 2, CHECK_0);
+        _inner_classes = inner_classes;
+      } else {
+        _inner_classes = Universe::the_empty_short_array();
       }
     }
   }
-
   // Set EnclosingMethod class and method indexes.
   if (parsed_enclosingmethod_attribute) {
     inner_classes->at_put(index++, enclosing_method_class_index);
     inner_classes->at_put(index++, enclosing_method_method_index);
   }
-  assert(index == size, "wrong size");
+  assert(index == size || has_circularity, "wrong size");
 
   // Restore buffer's current position.
   cfs->set_current(current_mark);
@@ -3597,6 +3683,7 @@ void ClassFileParser::parse_classfile_attributes(const ClassFileStream* const cf
   if (parsed_innerclasses_attribute || parsed_enclosingmethod_attribute) {
     const u2 num_of_classes = parse_classfile_inner_classes_attribute(
                             cfs,
+                            cp,
                             inner_classes_attribute_start,
                             parsed_innerclasses_attribute,
                             enclosing_method_class_index,
@@ -4987,6 +5074,7 @@ void ClassFileParser::verify_legal_utf8(const unsigned char* buffer,
 bool ClassFileParser::verify_unqualified_name(const char* name,
                                               unsigned int length,
                                               int type) {
+  if (length == 0) return false;  // Must have at least one char.
   for (const char* p = name; p != name + length;) {
     jchar ch = *p;
     if (ch < 128) {
@@ -5151,7 +5239,7 @@ const char* ClassFileParser::skip_over_field_signature(const char* signature,
 
           bool legal = verify_unqualified_name(sig, newlen, LegalClass);
           if (!legal) {
-            classfile_parse_error("Class name contains illegal character "
+            classfile_parse_error("Class name is empty or contains illegal character "
                                   "in descriptor in class file %s",
                                   CHECK_0);
             return NULL;
@@ -5739,21 +5827,16 @@ void ClassFileParser::prepend_host_package_name(const InstanceKlass* host_klass,
     ClassLoader::package_from_name(host_klass->name()->as_C_string(), NULL);
 
   if (host_pkg_name != NULL) {
-    size_t host_pkg_len = strlen(host_pkg_name);
+    int host_pkg_len = (int)strlen(host_pkg_name);
     int class_name_len = _class_name->utf8_length();
-    char* new_anon_name =
-      NEW_RESOURCE_ARRAY(char, host_pkg_len + 1 + class_name_len);
-    // Copy host package name and trailing /.
-    strncpy(new_anon_name, host_pkg_name, host_pkg_len);
-    new_anon_name[host_pkg_len] = '/';
-    // Append anonymous class name. The anonymous class name can contain odd
-    // characters.  So, do a strncpy instead of using sprintf("%s...").
-    strncpy(new_anon_name + host_pkg_len + 1, (char *)_class_name->base(), class_name_len);
+    int symbol_len = host_pkg_len + 1 + class_name_len;
+    char* new_anon_name = NEW_RESOURCE_ARRAY(char, symbol_len + 1);
+    int n = os::snprintf(new_anon_name, symbol_len + 1, "%s/%.*s",
+                         host_pkg_name, class_name_len, _class_name->base());
+    assert(n == symbol_len, "Unexpected number of characters in string");
 
     // Create a symbol and update the anonymous class name.
-    _class_name = SymbolTable::new_symbol(new_anon_name,
-                                          (int)host_pkg_len + 1 + class_name_len,
-                                          CHECK);
+    _class_name = SymbolTable::new_symbol(new_anon_name, symbol_len, CHECK);
   }
 }
 

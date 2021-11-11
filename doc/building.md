@@ -3,11 +3,11 @@
 ## TL;DR (Instructions for the Impatient)
 
 If you are eager to try out building the JDK, these simple steps works most of
-the time. They assume that you have installed Mercurial (and Cygwin if running
+the time. They assume that you have installed Git (and Cygwin if running
 on Windows) and cloned the top-level JDK repository that you want to build.
 
  1. [Get the complete source code](#getting-the-source-code): \
-    `hg clone http://hg.openjdk.java.net/jdk/jdk`
+    `git clone https://git.openjdk.java.net/jdk/`
 
  2. [Run configure](#running-configure): \
     `bash configure`
@@ -47,14 +47,14 @@ JDK.
 
 Make sure you are getting the correct version. As of JDK 10, the source is no
 longer split into separate repositories so you only need to clone one single
-repository. At the [OpenJDK Mercurial server](http://hg.openjdk.java.net/) you
-can see a list of all available forests. If you want to build an older version,
+repository. At the [OpenJDK Git site](https://git.openjdk.java.net/) you
+can see a list of all available repositories. If you want to build an older version,
 e.g. JDK 8, it is recommended that you get the `jdk8u` forest, which contains
 incremental updates, instead of the `jdk8` forest, which was frozen at JDK 8 GA.
 
-If you are new to Mercurial, a good place to start is the [Mercurial Beginner's
-Guide](http://www.mercurial-scm.org/guide). The rest of this document assumes a
-working knowledge of Mercurial.
+If you are new to Git, a good place to start is the book [Pro
+Git](https://git-scm.com/book/en/v2). The rest of this document
+assumes a working knowledge of Git.
 
 ### Special Considerations
 
@@ -89,9 +89,21 @@ on where and how to check out the source code.
         directory. This is especially important if your user name contains
         spaces and/or mixed upper and lower case letters.
 
-      * Clone the JDK repository using the Cygwin command line `hg` client
-        as instructed in this document. That is, do *not* use another Mercurial
-        client such as TortoiseHg.
+      * You need to install a git client. You have two choices, Cygwin git or
+        Git for Windows. Unfortunately there are pros and cons with each choice.
+
+        * The Cygwin `git` client has no line ending issues and understands
+          Cygwin paths (which are used throughout the JDK build system).
+          However, it does not currently work well with the Skara CLI tooling.
+          Please see the [Skara wiki on Git clients](
+          https://wiki.openjdk.java.net/display/SKARA/Skara#Skara-Git) for
+          up-to-date information about the Skara git client support.
+
+        * The [Git for Windows](https://gitforwindows.org) client has issues
+          with line endings, and do not understand Cygwin paths. It does work
+          well with the Skara CLI tooling, however. To alleviate the line ending
+          problems, make sure you set `core.autocrlf` to `false` (this is asked
+          during installation).
 
     Failure to follow this procedure might result in hard-to-debug build
     problems.
@@ -171,7 +183,7 @@ supported due to a too old bash; msys2 and the new Windows Subsystem for Linux
 require effort to implement.)
 
 Internally in the build system, all paths are represented as Unix-style paths,
-e.g. `/cygdrive/c/hg/jdk9/Makefile` rather than `C:\hg\jdk9\Makefile`. This
+e.g. `/cygdrive/c/git/jdk/Makefile` rather than `C:\git\jdk\Makefile`. This
 rule also applies to input to the build system, e.g. in arguments to
 `configure`. So, use `--with-msvcr-dll=/cygdrive/c/msvcr100.dll` rather than
 `--with-msvcr-dll=c:\msvcr100.dll`. For details on this conversion, see the section
@@ -293,7 +305,7 @@ issues.
  Linux              gcc 7.3.0
  macOS              Apple Xcode 9.4 (using clang 9.1.0)
  Solaris            Oracle Solaris Studio 12.4 (with compiler version 5.13)
- Windows            Microsoft Visual Studio 2017 update 15.5.5
+ Windows            Microsoft Visual Studio 2017 update 15.9.16
 
 ### gcc
 
@@ -371,7 +383,7 @@ CC: Sun C++ 5.13 SunOS_i386 151846-10 2015/10/30
 
 The minimum accepted version of Visual Studio is 2010. Older versions will not
 be accepted by `configure`. The maximum accepted version of Visual Studio is
-2017. Versions older than 2017 are unlikely to continue working for long.
+2019. Versions older than 2017 are unlikely to continue working for long.
 
 If you have multiple versions of Visual Studio installed, `configure` will by
 default pick the latest. You can request a specific version to be used by
@@ -436,8 +448,8 @@ If a required library is not detected by `configure`, you need to provide the
 path to it. There are two forms of the `configure` arguments to point to an
 external library: `--with-<LIB>=<path>` or `--with-<LIB>-include=<path to
 include> --with-<LIB>-lib=<path to lib>`. The first variant is more concise,
-but require the include files an library files to reside in a default hierarchy
-under this directory. In most cases, it works fine.
+but require the include files and library files to reside in a default
+hierarchy under this directory. In most cases, it works fine.
 
 As a fallback, the second version allows you to point to the include directory
 and the lib directory separately.
@@ -447,7 +459,7 @@ and the lib directory separately.
 FreeType2 from [The FreeType Project](http://www.freetype.org/) is not required
 on any platform. The exception is on Unix-based platforms when configuring such
 that the build artifacts will reference a system installed library,
-rather than bundling the JDK’s own copy.
+rather than bundling the JDK's own copy.
 
   * To install on an apt-based Linux, try running `sudo apt-get install
     libfreetype6-dev`.
@@ -586,8 +598,8 @@ bash configure [options]
 
 This will create an output directory containing the configuration and setup an
 area for the build result. This directory typically looks like
-`build/linux-x64-normal-server-release`, but the actual name depends on your
-specific configuration. (It can also be set directly, see [Using Multiple
+`build/linux-x64-server-release`, but the actual name depends on your specific
+configuration. (It can also be set directly, see [Using Multiple
 Configurations](#using-multiple-configurations)). This directory is referred to
 as `$BUILD` in this documentation.
 
@@ -875,6 +887,64 @@ If all you want to do is to compile a 32-bit version, for the same OS, on a
 full-blown cross-compilation. (While this surely is possible, it's a lot more
 work and will take much longer to build.)
 
+### Cross compiling the easy way with OpenJDK devkits
+
+The OpenJDK build system provides out-of-the box support for creating and using
+so called devkits. A `devkit` is basically a collection of a cross-compiling
+toolchain and a sysroot environment which can easily be used together with the
+`--with-devkit` configure option to cross compile the OpenJDK. On Linux/x86_64,
+the following command:
+```
+bash configure --with-devkit=<devkit-path> --openjdk-target=ppc64-linux-gnu && make
+```
+
+will configure and build OpenJDK for Linux/ppc64 assuming that `<devkit-path>`
+points to a Linux/x86_64 to Linux/ppc64 devkit.
+
+Devkits can be created from the `make/devkit` directory by executing:
+```
+make [ TARGETS="<TARGET_TRIPLET>+" ] [ BASE_OS=<OS> ] [ BASE_OS_VERSION=<VER> ]
+```
+
+where `TARGETS` contains one or more `TARGET_TRIPLET`s of the form
+described in [section 3.4 of the GNU Autobook](
+https://sourceware.org/autobook/autobook/autobook_17.html). If no
+targets are given, a native toolchain for the current platform will be
+created. Currently, at least the following targets are known to work:
+
+ Supported devkit targets
+ ------------------------
+ x86_64-linux-gnu
+ aarch64-linux-gnu
+ arm-linux-gnueabihf
+ ppc64-linux-gnu
+ ppc64le-linux-gnu
+ s390x-linux-gnu
+
+`BASE_OS` must be one of "OEL6" for Oracle Enterprise Linux 6 or
+"Fedora" (if not specified "OEL6" will be the default). If the base OS
+is "Fedora" the corresponding Fedora release can be specified with the
+help of the `BASE_OS_VERSION` option (with "27" as default version).
+If the build is successful, the new devkits can be found in the
+`build/devkit/result` subdirectory:
+```
+cd make/devkit
+make TARGETS="ppc64le-linux-gnu aarch64-linux-gnu" BASE_OS=Fedora BASE_OS_VERSION=21
+ls -1 ../../build/devkit/result/
+x86_64-linux-gnu-to-aarch64-linux-gnu
+x86_64-linux-gnu-to-ppc64le-linux-gnu
+```
+
+Notice that devkits are not only useful for targeting different build
+platforms. Because they contain the full build dependencies for a
+system (i.e. compiler and root file system), they can easily be used
+to build well-known, reliable and reproducible build environments. You
+can for example create and use a devkit with GCC 7.3 and a Fedora 12
+sysroot environment (with glibc 2.11) on Ubuntu 14.04 (which doesn't
+have GCC 7.3 by default) to produce OpenJDK binaries which will run on
+all Linux systems with runtime libraries newer than the ones from
+Fedora 12 (e.g. Ubuntu 16.04, SLES 11 or RHEL 6).
+
 ### Boot JDK and Build JDK
 
 When cross-compiling, make sure you use a boot JDK that runs on the *build*
@@ -1018,6 +1088,51 @@ Note that X11 is needed even if you only want to build a headless JDK.
   * If the X11 libraries are not properly detected by `configure`, you can
     point them out by `--with-x`.
 
+### Creating And Using Sysroots With qemu-deboostrap
+
+Fortunately, you can create sysroots for foreign architectures with tools
+provided by your OS. On Debian/Ubuntu systems, one could use `qemu-deboostrap` to
+create the *target* system chroot, which would have the native libraries and headers
+specific to that *target* system. After that, we can use the cross-compiler on the *build*
+system, pointing into chroot to get the build dependencies right. This allows building
+for foreign architectures with native compilation speed.
+
+For example, cross-compiling to AArch64 from x86_64 could be done like this:
+
+  * Install cross-compiler on the *build* system:
+```
+apt install g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
+```
+
+  * Create chroot on the *build* system, configuring it for *target* system:
+```
+sudo qemu-debootstrap --arch=arm64 --verbose \
+       --include=fakeroot,build-essential,libx11-dev,libxext-dev,libxrender-dev,libxtst-dev,libxt-dev,libcups2-dev,libfontconfig1-dev,libasound2-dev,libfreetype6-dev,libpng12-dev \
+       --resolve-deps jessie /chroots/arm64 http://httpredir.debian.org/debian/
+```
+
+  * Configure and build with newly created chroot as sysroot/toolchain-path:
+```
+CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ sh ./configure --openjdk-target=aarch64-linux-gnu --with-sysroot=/chroots/arm64/ --with-toolchain-path=/chroots/arm64/
+make images
+ls build/linux-aarch64-normal-server-release/
+```
+
+The build does not create new files in that chroot, so it can be reused for multiple builds
+without additional cleanup.
+
+Architectures that are known to successfully cross-compile like this are:
+
+  Target        `CC`                      `CXX`                       `--arch=...` `--openjdk-target=...`
+  ------------  ------------------------- --------------------------- ------------ ----------------------
+  x86           default                   default                     i386         i386-linux-gnu
+  armhf         gcc-arm-linux-gnueabihf   g++-arm-linux-gnueabihf     armhf        arm-linux-gnueabihf
+  aarch64       gcc-aarch64-linux-gnu     g++-aarch64-linux-gnu       arm64        aarch64-linux-gnu
+  ppc64el       gcc-powerpc64le-linux-gnu g++-powerpc64le-linux-gnu   ppc64el      powerpc64le-linux-gnu
+  s390x         gcc-s390x-linux-gnu       g++-s390x-linux-gnu         s390x        s390x-linux-gnu
+
+Additional architectures might be supported by Debian/Ubuntu Ports.
+
 ### Building for ARM/aarch64
 
 A common cross-compilation target is the ARM CPU. When building for ARM, it is
@@ -1158,14 +1273,14 @@ ERROR: Build failed for target 'hotspot' in configuration 'linux-x64' (exit code
 
 === Output from failing command(s) repeated here ===
 * For target hotspot_variant-server_libjvm_objs_psMemoryPool.o:
-/localhome/hg/jdk9-sandbox/hotspot/src/share/vm/services/psMemoryPool.cpp:1:1: error: 'failhere' does not name a type
+/localhome/git/jdk-sandbox/hotspot/src/share/vm/services/psMemoryPool.cpp:1:1: error: 'failhere' does not name a type
    ... (rest of output omitted)
 
-* All command lines available in /localhome/hg/jdk9-sandbox/build/linux-x64/make-support/failure-logs.
+* All command lines available in /localhome/git/jdk-sandbox/build/linux-x64/make-support/failure-logs.
 === End of repeated output ===
 
 === Make failed targets repeated here ===
-lib/CompileJvm.gmk:207: recipe for target '/localhome/hg/jdk9-sandbox/build/linux-x64/hotspot/variant-server/libjvm/objs/psMemoryPool.o' failed
+lib/CompileJvm.gmk:207: recipe for target '/localhome/git/jdk-sandbox/build/linux-x64/hotspot/variant-server/libjvm/objs/psMemoryPool.o' failed
 make/Main.gmk:263: recipe for target 'hotspot-server-libs' failed
 === End of repeated output ===
 
@@ -1255,17 +1370,15 @@ Incremental rebuilds mean that when you modify part of the product, only the
 affected parts get rebuilt. While this works great in most cases, and
 significantly speed up the development process, from time to time complex
 interdependencies will result in an incorrect build result. This is the most
-common cause for unexpected build problems, together with inconsistencies
-between the different Mercurial repositories in the forest.
+common cause for unexpected build problems.
 
 Here are a suggested list of things to try if you are having unexpected build
 problems. Each step requires more time than the one before, so try them in
 order. Most issues will be solved at step 1 or 2.
 
- 1. Make sure your forest is up-to-date
+ 1. Make sure your repository is up-to-date
 
-    Run `bash get_source.sh` to make sure you have the latest version of all
-    repositories.
+    Run `git pull origin master` to make sure you have the latest changes.
 
  2. Clean build results
 
@@ -1290,13 +1403,13 @@ order. Most issues will be solved at step 1 or 2.
     make
     ```
 
- 4. Re-clone the Mercurial forest
+ 4. Re-clone the Git repository
 
-    Sometimes the Mercurial repositories themselves gets in a state that causes
-    the product to be un-buildable. In such a case, the simplest solution is
-    often the "sledgehammer approach": delete the entire forest, and re-clone
-    it. If you have local changes, save them first to a different location
-    using `hg export`.
+    Sometimes the Git repository gets in a state that causes the product
+    to be un-buildable. In such a case, the simplest solution is often the
+    "sledgehammer approach": delete the entire repository, and re-clone it.
+    If you have local changes, save them first to a different location using
+    `git format-patch`.
 
 ### Specific Build Issues
 
@@ -1346,38 +1459,6 @@ contact the Adoption Group. See the section on [Contributing to OpenJDK](
 #contributing-to-openjdk) for more information.
 
 ## Hints and Suggestions for Advanced Users
-
-### Setting Up a Forest for Pushing Changes (defpath)
-
-To help you prepare a proper push path for a Mercurial repository, there exists
-a useful tool known as [defpath](
-http://openjdk.java.net/projects/code-tools/defpath). It will help you setup a
-proper push path for pushing changes to the JDK.
-
-Install the extension by cloning
-`http://hg.openjdk.java.net/code-tools/defpath` and updating your `.hgrc` file.
-Here's one way to do this:
-
-```
-cd ~
-mkdir hg-ext
-cd hg-ext
-hg clone http://hg.openjdk.java.net/code-tools/defpath
-cat << EOT >> ~/.hgrc
-[extensions]
-defpath=~/hg-ext/defpath/defpath.py
-EOT
-```
-
-You can now setup a proper push path using:
-```
-hg defpath -d -u <your OpenJDK username>
-```
-
-If you also have the `trees` extension installed in Mercurial, you will
-automatically get a `tdefpath` command, which is even more useful. By running
-`hg tdefpath -du <username>` in the top repository of your forest, all repos
-will get setup automatically. This is the recommended usage.
 
 ### Bash Completion
 
@@ -1520,16 +1601,6 @@ pattern that will be used to limit the set of files being recompiled. For
 instance, `make java.base JDK_FILTER=javax/crypto` (or, to combine methods,
 `make java.base-java-only JDK_FILTER=javax/crypto`) will limit the compilation
 to files in the `javax.crypto` package.
-
-### Learn About Mercurial
-
-To become an efficient JDK developer, it is recommended that you invest in
-learning Mercurial properly. Here are some links that can get you started:
-
-  * [Mercurial for git users](http://www.mercurial-scm.org/wiki/GitConcepts)
-  * [The official Mercurial tutorial](http://www.mercurial-scm.org/wiki/Tutorial)
-  * [hg init](http://hginit.com/)
-  * [Mercurial: The Definitive Guide](http://hgbook.red-bean.com/read/)
 
 ## Understanding the Build System
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -53,6 +53,7 @@
 #include "runtime/arguments.hpp"
 #include "runtime/compilationPolicy.hpp"
 #include "runtime/deoptimization.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/flags/jvmFlag.hpp"
 #include "runtime/frame.inline.hpp"
 #include "runtime/handshake.hpp"
@@ -88,6 +89,9 @@
 #include "services/memTracker.hpp"
 #include "utilities/nativeCallStack.hpp"
 #endif // INCLUDE_NMT
+#if INCLUDE_AOT
+#include "aot/aotLoader.hpp"
+#endif // INCLUDE_AOT
 
 #ifdef LINUX
 #include "osContainer_linux.hpp"
@@ -175,6 +179,15 @@ WB_ENTRY(jboolean, WB_IsClassAlive(JNIEnv* env, jobject target, jstring name))
   return closure.found();
 WB_END
 
+WB_ENTRY(jint, WB_GetSymbolRefcount(JNIEnv* env, jobject unused, jstring name))
+  oop h_name = JNIHandles::resolve(name);
+  if (h_name == NULL) return false;
+  Symbol* sym = java_lang_String::as_symbol(h_name, CHECK_0);
+  TempNewSymbol tsym(sym); // Make sure to decrement reference count on sym on return
+  return (jint)sym->refcount();
+WB_END
+
+
 WB_ENTRY(void, WB_AddToBootstrapClassLoaderSearch(JNIEnv* env, jobject o, jstring segment)) {
 #if INCLUDE_JVMTI
   ResourceMark rm;
@@ -217,7 +230,6 @@ WB_END
 void TestReservedSpace_test();
 void TestReserveMemorySpecial_test();
 void TestVirtualSpace_test();
-void TestMetaspaceUtils_test();
 #endif
 
 WB_ENTRY(void, WB_RunMemoryUnitTests(JNIEnv* env, jobject o))
@@ -225,7 +237,6 @@ WB_ENTRY(void, WB_RunMemoryUnitTests(JNIEnv* env, jobject o))
   TestReservedSpace_test();
   TestReserveMemorySpecial_test();
   TestVirtualSpace_test();
-  TestMetaspaceUtils_test();
 #endif
 WB_END
 
@@ -672,6 +683,21 @@ WB_ENTRY(jint, WB_NMTGetHashSize(JNIEnv* env, jobject o))
   assert(hash_size > 0, "NMT hash_size should be > 0");
   return (jint)hash_size;
 WB_END
+
+WB_ENTRY(jlong, WB_NMTNewArena(JNIEnv* env, jobject o, jlong init_size))
+  Arena* arena =  new (mtTest) Arena(mtTest, size_t(init_size));
+  return (jlong)arena;
+WB_END
+
+WB_ENTRY(void, WB_NMTFreeArena(JNIEnv* env, jobject o, jlong arena))
+  Arena* a = (Arena*)arena;
+  delete a;
+WB_END
+
+WB_ENTRY(void, WB_NMTArenaMalloc(JNIEnv* env, jobject o, jlong arena, jlong size))
+  Arena* a = (Arena*)arena;
+  a->Amalloc(size_t(size));
+WB_END
 #endif // INCLUDE_NMT
 
 static jmethodID reflected_method_to_jmid(JavaThread* thread, JNIEnv* env, jobject method) {
@@ -973,6 +999,24 @@ WB_ENTRY(jint, WB_MatchesMethod(JNIEnv* env, jobject o, jobject method, jstring 
   delete m;
   assert(result == 0 || result == 1, "Result out of range");
   return result;
+WB_END
+
+WB_ENTRY(void, WB_MarkMethodProfiled(JNIEnv* env, jobject o, jobject method))
+  jmethodID jmid = reflected_method_to_jmid(thread, env, method);
+  CHECK_JNI_EXCEPTION(env);
+  methodHandle mh(THREAD, Method::checked_resolve_jmethod_id(jmid));
+
+  MethodData* mdo = mh->method_data();
+  if (mdo == NULL) {
+    Method::build_interpreter_method_data(mh, CHECK_AND_CLEAR);
+    mdo = mh->method_data();
+  }
+  mdo->init();
+  InvocationCounter* icnt = mdo->invocation_counter();
+  InvocationCounter* bcnt = mdo->backedge_counter();
+  // set i-counter according to TieredThresholdPolicy::is_method_profiled
+  icnt->set(InvocationCounter::wait_for_compile, Tier4MinInvocationThreshold);
+  bcnt->set(InvocationCounter::wait_for_compile, Tier4CompileThreshold);
 WB_END
 
 WB_ENTRY(void, WB_ClearMethodState(JNIEnv* env, jobject o, jobject method))
@@ -1322,6 +1366,7 @@ struct CodeBlobStub {
 };
 
 static jobjectArray codeBlob2objectArray(JavaThread* thread, JNIEnv* env, CodeBlobStub* cb) {
+  ResourceMark rm;
   jclass clazz = env->FindClass(vmSymbols::java_lang_Object()->as_C_string());
   CHECK_JNI_EXCEPTION_(env, NULL);
   jobjectArray result = env->NewObjectArray(4, clazz, NULL);
@@ -1441,9 +1486,6 @@ WB_ENTRY(jobjectArray, WB_GetCodeHeapEntries(JNIEnv* env, jobject o, jint blob_t
       blobs.append(stub);
     }
   }
-  if (blobs.length() == 0) {
-    return NULL;
-  }
   ThreadToNativeFromVM ttn(thread);
   jobjectArray result = NULL;
   jclass clazz = env->FindClass(vmSymbols::java_lang_Object()->as_C_string());
@@ -1508,7 +1550,7 @@ WB_ENTRY(jlong, WB_AllocateMetaspace(JNIEnv* env, jobject wb, jobject class_load
 
   oop class_loader_oop = JNIHandles::resolve(class_loader);
   ClassLoaderData* cld = class_loader_oop != NULL
-      ? java_lang_ClassLoader::loader_data(class_loader_oop)
+      ? java_lang_ClassLoader::loader_data_acquire(class_loader_oop)
       : ClassLoaderData::the_null_class_loader_data();
 
   void* metadata = MetadataFactory::new_array<u1>(cld, WhiteBox::array_bytes_to_length((size_t)size), thread);
@@ -1519,7 +1561,7 @@ WB_END
 WB_ENTRY(void, WB_FreeMetaspace(JNIEnv* env, jobject wb, jobject class_loader, jlong addr, jlong size))
   oop class_loader_oop = JNIHandles::resolve(class_loader);
   ClassLoaderData* cld = class_loader_oop != NULL
-      ? java_lang_ClassLoader::loader_data(class_loader_oop)
+      ? java_lang_ClassLoader::loader_data_acquire(class_loader_oop)
       : ClassLoaderData::the_null_class_loader_data();
 
   MetadataFactory::free_array(cld, (Array<u1>*)(uintptr_t)addr);
@@ -1812,7 +1854,7 @@ WB_END
 #endif // INCLUDE_CDS
 
 WB_ENTRY(jint, WB_HandshakeWalkStack(JNIEnv* env, jobject wb, jobject thread_handle, jboolean all_threads))
-  class TraceSelfClosure : public ThreadClosure {
+  class TraceSelfClosure : public HandshakeClosure {
     jint _num_threads_completed;
 
     void do_thread(Thread* th) {
@@ -1827,7 +1869,7 @@ WB_ENTRY(jint, WB_HandshakeWalkStack(JNIEnv* env, jobject wb, jobject thread_han
     }
 
   public:
-    TraceSelfClosure() : _num_threads_completed(0) {}
+    TraceSelfClosure() : HandshakeClosure("WB_TraceSelf"), _num_threads_completed(0) {}
 
     jint num_threads_completed() const { return _num_threads_completed; }
   };
@@ -1978,6 +2020,13 @@ WB_ENTRY(void, WB_DisableElfSectionCache(JNIEnv* env))
 #endif
 WB_END
 
+WB_ENTRY(jint, WB_AotLibrariesCount(JNIEnv* env, jobject o))
+  jint result = 0;
+#if INCLUDE_AOT
+  result = (jint) AOTLoader::heaps_count();
+#endif
+  return result;
+WB_END
 
 #define CC (char*)
 
@@ -1992,6 +2041,7 @@ static JNINativeMethod methods[] = {
   {CC"getHeapSpaceAlignment",            CC"()J",                   (void*)&WB_GetHeapSpaceAlignment},
   {CC"getHeapAlignment",                 CC"()J",                   (void*)&WB_GetHeapAlignment},
   {CC"isClassAlive0",                    CC"(Ljava/lang/String;)Z", (void*)&WB_IsClassAlive      },
+  {CC"getSymbolRefcount",                CC"(Ljava/lang/String;)I", (void*)&WB_GetSymbolRefcount },
   {CC"parseCommandLine0",
       CC"(Ljava/lang/String;C[Lsun/hotspot/parser/DiagnosticCommand;)[Ljava/lang/Object;",
       (void*) &WB_ParseCommandLine
@@ -2038,6 +2088,9 @@ static JNINativeMethod methods[] = {
   {CC"NMTReleaseMemory",    CC"(JJ)V",                (void*)&WB_NMTReleaseMemory   },
   {CC"NMTChangeTrackingLevel", CC"()Z",               (void*)&WB_NMTChangeTrackingLevel},
   {CC"NMTGetHashSize",      CC"()I",                  (void*)&WB_NMTGetHashSize     },
+  {CC"NMTNewArena",         CC"(J)J",                 (void*)&WB_NMTNewArena        },
+  {CC"NMTFreeArena",        CC"(J)V",                 (void*)&WB_NMTFreeArena       },
+  {CC"NMTArenaMalloc",      CC"(JJ)V",                (void*)&WB_NMTArenaMalloc     },
 #endif // INCLUDE_NMT
   {CC"deoptimizeFrames",   CC"(Z)I",                  (void*)&WB_DeoptimizeFrames  },
   {CC"deoptimizeAll",      CC"()V",                   (void*)&WB_DeoptimizeAll     },
@@ -2068,6 +2121,8 @@ static JNINativeMethod methods[] = {
       CC"(Ljava/lang/reflect/Executable;II)Z",        (void*)&WB_EnqueueMethodForCompilation},
   {CC"enqueueInitializerForCompilation0",
       CC"(Ljava/lang/Class;I)Z",                      (void*)&WB_EnqueueInitializerForCompilation},
+  {CC"markMethodProfiled",
+      CC"(Ljava/lang/reflect/Executable;)V",          (void*)&WB_MarkMethodProfiled},
   {CC"clearMethodState0",
       CC"(Ljava/lang/reflect/Executable;)V",          (void*)&WB_ClearMethodState},
   {CC"lockCompilation",    CC"()V",                   (void*)&WB_LockCompilation},
@@ -2200,6 +2255,7 @@ static JNINativeMethod methods[] = {
   {CC"isContainerized",           CC"()Z",            (void*)&WB_IsContainerized },
   {CC"printOsInfo",               CC"()V",            (void*)&WB_PrintOsInfo },
   {CC"disableElfSectionCache",    CC"()V",            (void*)&WB_DisableElfSectionCache },
+  {CC"aotLibrariesCount", CC"()I",                    (void*)&WB_AotLibrariesCount },
 };
 
 

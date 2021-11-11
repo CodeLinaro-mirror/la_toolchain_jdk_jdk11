@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,6 +36,7 @@
 #include "compiler/disassembler.hpp"
 #include "interpreter/interpreter.hpp"
 #include "logging/log.hpp"
+#include "logging/logStream.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/filemap.hpp"
 #include "oops/oop.inline.hpp"
@@ -416,6 +417,7 @@ struct tm* os::gmtime_pd(const time_t* clock, struct tm* res) {
   return NULL;
 }
 
+JNIEXPORT
 LONG WINAPI topLevelExceptionFilter(struct _EXCEPTION_POINTERS* exceptionInfo);
 
 // Thread start routine for all newly created threads
@@ -658,6 +660,10 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
   } else {
     log_warning(os, thread)("Failed to start thread - _beginthreadex failed (%s) for attributes: %s.",
       os::errno_name(errno), describe_beginthreadex_attributes(buf, sizeof(buf), stack_size, initflag));
+    // Log some OS information which might explain why creating the thread failed.
+    log_info(os, thread)("Number of threads approx. running in the VM: %d", Threads::number_of_threads());
+    LogStream st(Log(os, thread)::info());
+    os::print_memory_info(&st);
   }
 
   if (thread_handle == NULL) {
@@ -1353,14 +1359,24 @@ static int _print_module(const char* fname, address base_address,
 // in case of error it checks if .dll/.so was built for the
 // same architecture as Hotspot is running on
 void * os::dll_load(const char *name, char *ebuf, int ebuflen) {
+  log_info(os)("attempting shared library load of %s", name);
+
   void * result = LoadLibrary(name);
   if (result != NULL) {
+    Events::log(NULL, "Loaded shared library %s", name);
     // Recalculate pdb search path if a DLL was loaded successfully.
     SymbolEngine::recalc_search_path();
+    log_info(os)("shared library load of %s was successful", name);
     return result;
   }
-
   DWORD errcode = GetLastError();
+  // Read system error message into ebuf
+  // It may or may not be overwritten below (in the for loop and just above)
+  lasterror(ebuf, (size_t) ebuflen);
+  ebuf[ebuflen - 1] = '\0';
+  Events::log(NULL, "Loading shared library %s failed, error code %lu", name, errcode);
+  log_info(os)("shared library load of %s failed, error code %lu", name, errcode);
+
   if (errcode == ERROR_MOD_NOT_FOUND) {
     strncpy(ebuf, "Can't find dependent libraries", ebuflen - 1);
     ebuf[ebuflen - 1] = '\0';
@@ -1372,11 +1388,6 @@ void * os::dll_load(const char *name, char *ebuf, int ebuflen) {
   // for an architecture other than Hotspot is running in
   // - then print to buffer "DLL was built for a different architecture"
   // else call os::lasterror to obtain system error message
-
-  // Read system error message into ebuf
-  // It may or may not be overwritten below (in the for loop and just above)
-  lasterror(ebuf, (size_t) ebuflen);
-  ebuf[ebuflen - 1] = '\0';
   int fd = ::open(name, O_RDONLY | O_BINARY, 0);
   if (fd < 0) {
     return NULL;
@@ -1577,6 +1588,11 @@ void os::print_os_info_brief(outputStream* st) {
   os::print_os_info(st);
 }
 
+void os::win32::print_uptime_info(outputStream* st) {
+  unsigned long long ticks = GetTickCount64();
+  os::print_dhm(st, "OS uptime:", ticks/1000);
+}
+
 void os::print_os_info(outputStream* st) {
 #ifdef ASSERT
   char buffer[1024];
@@ -1589,6 +1605,10 @@ void os::print_os_info(outputStream* st) {
 #endif
   st->print("OS:");
   os::win32::print_windows_version(st);
+
+  os::win32::print_uptime_info(st);
+
+  VM_Version::print_platform_virtualization_info(st);
 }
 
 void os::win32::print_windows_version(outputStream* st) {
@@ -2115,23 +2135,23 @@ int os::signal_wait() {
 
 LONG Handle_Exception(struct _EXCEPTION_POINTERS* exceptionInfo,
                       address handler) {
-  JavaThread* thread = (JavaThread*) Thread::current_or_null();
-  // Save pc in thread
-#ifdef _M_AMD64
-  // Do not blow up if no thread info available.
-  if (thread) {
-    thread->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->Rip);
-  }
-  // Set pc to handler
-  exceptionInfo->ContextRecord->Rip = (DWORD64)handler;
+  Thread* thread = Thread::current_or_null();
+
+#if defined(_M_AMD64)
+  #define PC_NAME Rip
+#elif defined(_M_IX86)
+  #define PC_NAME Eip
 #else
-  // Do not blow up if no thread info available.
-  if (thread) {
-    thread->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->Eip);
-  }
-  // Set pc to handler
-  exceptionInfo->ContextRecord->Eip = (DWORD)(DWORD_PTR)handler;
+  #error unknown architecture
 #endif
+
+  // Save pc in thread
+  if (thread != nullptr && thread->is_Java_thread()) {
+    ((JavaThread*)thread)->set_saved_exception_pc((address)(DWORD_PTR)exceptionInfo->ContextRecord->PC_NAME);
+  }
+
+  // Set pc to handler
+  exceptionInfo->ContextRecord->PC_NAME = (DWORD64)handler;
 
   // Continue the execution
   return EXCEPTION_CONTINUE_EXECUTION;
@@ -2336,6 +2356,7 @@ bool os::win32::get_frame_at_stack_banging_point(JavaThread* thread,
 }
 
 //-----------------------------------------------------------------------------
+JNIEXPORT
 LONG WINAPI topLevelExceptionFilter(struct _EXCEPTION_POINTERS* exceptionInfo) {
   if (InterceptOSException) return EXCEPTION_CONTINUE_SEARCH;
   DWORD exception_code = exceptionInfo->ExceptionRecord->ExceptionCode;
@@ -2967,14 +2988,15 @@ void os::large_page_init() {
 int os::create_file_for_heap(const char* dir) {
 
   const char name_template[] = "/jvmheap.XXXXXX";
-  char *fullname = (char*)os::malloc((strlen(dir) + strlen(name_template) + 1), mtInternal);
+
+  size_t fullname_len = strlen(dir) + strlen(name_template);
+  char *fullname = (char*)os::malloc(fullname_len + 1, mtInternal);
   if (fullname == NULL) {
     vm_exit_during_initialization(err_msg("Malloc failed during creation of backing file for heap (%s)", os::strerror(errno)));
     return -1;
   }
-
-  (void)strncpy(fullname, dir, strlen(dir)+1);
-  (void)strncat(fullname, name_template, strlen(name_template));
+  int n = snprintf(fullname, fullname_len + 1, "%s%s", dir, name_template);
+  assert((size_t)n == fullname_len, "Unexpected number of characters in string");
 
   os::native_path(fullname);
 
@@ -3061,8 +3083,9 @@ char* os::reserve_memory_aligned(size_t size, size_t alignment, int file_desc) {
   assert(extra_size >= size, "overflow, size is too large to allow alignment");
 
   char* aligned_base = NULL;
+  static const int max_attempts = 20;
 
-  do {
+  for (int attempt = 0; attempt < max_attempts && aligned_base == NULL; attempt ++) {
     char* extra_base = os::reserve_memory(extra_size, NULL, alignment, file_desc);
     if (extra_base == NULL) {
       return NULL;
@@ -3070,15 +3093,22 @@ char* os::reserve_memory_aligned(size_t size, size_t alignment, int file_desc) {
     // Do manual alignment
     aligned_base = align_up(extra_base, alignment);
 
+    bool rc = false;
     if (file_desc != -1) {
-      os::unmap_memory(extra_base, extra_size);
+      rc = os::unmap_memory(extra_base, extra_size);
     } else {
-      os::release_memory(extra_base, extra_size);
+      rc = os::release_memory(extra_base, extra_size);
+    }
+    assert(rc, "release failed");
+    if (!rc) {
+      return NULL;
     }
 
     aligned_base = os::reserve_memory(size, aligned_base, 0, file_desc);
 
-  } while (aligned_base == NULL);
+  }
+
+  assert(aligned_base != NULL, "Did not manage to re-map after %d attempts?", max_attempts);
 
   return aligned_base;
 }
@@ -3537,6 +3567,43 @@ int os::sleep(Thread* thread, jlong ms, bool interruptable) {
 void os::naked_short_sleep(jlong ms) {
   assert(ms < 1000, "Un-interruptable sleep, short time use only");
   Sleep(ms);
+}
+
+void os::naked_short_nanosleep(jlong ns) {
+  assert(ns > -1 && ns < NANOUNITS, "Un-interruptable sleep, short time use only");
+  LARGE_INTEGER hundreds_nanos = { 0 };
+  HANDLE wait_timer = ::CreateWaitableTimer(NULL /* attributes*/,
+                                            true /* manual reset */,
+                                            NULL /* name */ );
+  if (wait_timer == NULL) {
+    log_warning(os)("Failed to CreateWaitableTimer: %u", GetLastError());
+    return;
+  }
+
+  // We need a minimum of one hundred nanos.
+  ns = ns > 100 ? ns : 100;
+
+  // Round ns to the nearst hundred of nanos.
+  // Negative values indicate relative time.
+  hundreds_nanos.QuadPart = -((ns + 50) / 100);
+
+  if (::SetWaitableTimer(wait_timer /* handle */,
+                         &hundreds_nanos /* due time */,
+                         0 /* period */,
+                         NULL /* comp func */,
+                         NULL /* comp func args */,
+                         FALSE /* resume */)) {
+    DWORD res = ::WaitForSingleObject(wait_timer /* handle */, INFINITE /* timeout */);
+    if (res != WAIT_OBJECT_0) {
+      if (res == WAIT_FAILED) {
+        log_warning(os)("Failed to WaitForSingleObject: %u", GetLastError());
+      } else {
+        log_warning(os)("Unexpected return from WaitForSingleObject: %s",
+                        res == WAIT_ABANDONED ? "WAIT_ABANDONED" : "WAIT_TIMEOUT");
+      }
+    }
+  }
+  ::CloseHandle(wait_timer /* handle */);
 }
 
 // Sleep forever; naked call to OS-specific sleep; use with CAUTION
@@ -4226,94 +4293,144 @@ static void file_attribute_data_to_stat(struct stat* sbuf, WIN32_FILE_ATTRIBUTE_
   }
 }
 
-// The following function is adapted from java.base/windows/native/libjava/canonicalize_md.c
-// Creates an UNC path from a single byte path. Return buffer is
-// allocated in C heap and needs to be freed by the caller.
-// Returns NULL on error.
-static wchar_t* create_unc_path(const char* path, errno_t &err) {
-  wchar_t* wpath = NULL;
-  size_t converted_chars = 0;
-  size_t path_len = strlen(path) + 1; // includes the terminating NULL
-  if (path[0] == '\\' && path[1] == '\\') {
-    if (path[2] == '?' && path[3] == '\\'){
-      // if it already has a \\?\ don't do the prefix
-      wpath = (wchar_t*)os::malloc(path_len * sizeof(wchar_t), mtInternal);
-      if (wpath != NULL) {
-        err = ::mbstowcs_s(&converted_chars, wpath, path_len, path, path_len);
-      } else {
-        err = ENOMEM;
-      }
-    } else {
-      // only UNC pathname includes double slashes here
-      wpath = (wchar_t*)os::malloc((path_len + 7) * sizeof(wchar_t), mtInternal);
-      if (wpath != NULL) {
-        ::wcscpy(wpath, L"\\\\?\\UNC\0");
-        err = ::mbstowcs_s(&converted_chars, &wpath[7], path_len, path, path_len);
-      } else {
-        err = ENOMEM;
-      }
-    }
-  } else {
-    wpath = (wchar_t*)os::malloc((path_len + 4) * sizeof(wchar_t), mtInternal);
-    if (wpath != NULL) {
-      ::wcscpy(wpath, L"\\\\?\\\0");
-      err = ::mbstowcs_s(&converted_chars, &wpath[4], path_len, path, path_len);
-    } else {
-      err = ENOMEM;
-    }
+static errno_t convert_to_unicode(char const* char_path, LPWSTR* unicode_path) {
+  // Get required buffer size to convert to Unicode
+  int unicode_path_len = MultiByteToWideChar(CP_ACP,
+                                             MB_ERR_INVALID_CHARS,
+                                             char_path, -1,
+                                             NULL, 0);
+  if (unicode_path_len == 0) {
+    return EINVAL;
   }
-  return wpath;
+
+  *unicode_path = NEW_C_HEAP_ARRAY(WCHAR, unicode_path_len, mtInternal);
+
+  int result = MultiByteToWideChar(CP_ACP,
+                                   MB_ERR_INVALID_CHARS,
+                                   char_path, -1,
+                                   *unicode_path, unicode_path_len);
+  assert(result == unicode_path_len, "length already checked above");
+
+  return ERROR_SUCCESS;
 }
 
-static void destroy_unc_path(wchar_t* wpath) {
-  os::free(wpath);
+static errno_t get_full_path(LPCWSTR unicode_path, LPWSTR* full_path) {
+  // Get required buffer size to convert to full path. The return
+  // value INCLUDES the terminating null character.
+  DWORD full_path_len = GetFullPathNameW(unicode_path, 0, NULL, NULL);
+  if (full_path_len == 0) {
+    return EINVAL;
+  }
+
+  *full_path = NEW_C_HEAP_ARRAY(WCHAR, full_path_len, mtInternal);
+
+  // When the buffer has sufficient size, the return value EXCLUDES the
+  // terminating null character
+  DWORD result = GetFullPathNameW(unicode_path, full_path_len, *full_path, NULL);
+  assert(result <= full_path_len, "length already checked above");
+
+  return ERROR_SUCCESS;
+}
+
+static void set_path_prefix(char* buf, LPWSTR* prefix, int* prefix_off, bool* needs_fullpath) {
+  *prefix_off = 0;
+  *needs_fullpath = true;
+
+  if (::isalpha(buf[0]) && !::IsDBCSLeadByte(buf[0]) && buf[1] == ':' && buf[2] == '\\') {
+    *prefix = L"\\\\?\\";
+  } else if (buf[0] == '\\' && buf[1] == '\\') {
+    if (buf[2] == '?' && buf[3] == '\\') {
+      *prefix = L"";
+      *needs_fullpath = false;
+    } else {
+      *prefix = L"\\\\?\\UNC";
+      *prefix_off = 1; // Overwrite the first char with the prefix, so \\share\path becomes \\?\UNC\share\path
+    }
+  } else {
+    *prefix = L"\\\\?\\";
+  }
+}
+
+// Returns the given path as an absolute wide path in unc format. The returned path is NULL
+// on error (with err being set accordingly) and should be freed via os::free() otherwise.
+// additional_space is the size of space, in wchar_t, the function will additionally add to
+// the allocation of return buffer (such that the size of the returned buffer is at least
+// wcslen(buf) + 1 + additional_space).
+static wchar_t* wide_abs_unc_path(char const* path, errno_t & err, int additional_space = 0) {
+  if ((path == NULL) || (path[0] == '\0')) {
+    err = ENOENT;
+    return NULL;
+  }
+
+  // Need to allocate at least room for 3 characters, since os::native_path transforms C: to C:.
+  size_t buf_len = 1 + MAX2((size_t)3, strlen(path));
+  char* buf = NEW_C_HEAP_ARRAY(char, buf_len, mtInternal);
+  strncpy(buf, path, buf_len);
+  os::native_path(buf);
+
+  LPWSTR prefix = NULL;
+  int prefix_off = 0;
+  bool needs_fullpath = true;
+  set_path_prefix(buf, &prefix, &prefix_off, &needs_fullpath);
+
+  LPWSTR unicode_path = NULL;
+  err = convert_to_unicode(buf, &unicode_path);
+  FREE_C_HEAP_ARRAY(char, buf);
+  if (err != ERROR_SUCCESS) {
+    return NULL;
+  }
+
+  LPWSTR converted_path = NULL;
+  if (needs_fullpath) {
+    err = get_full_path(unicode_path, &converted_path);
+  } else {
+    converted_path = unicode_path;
+  }
+
+  LPWSTR result = NULL;
+  if (converted_path != NULL) {
+    size_t prefix_len = wcslen(prefix);
+    size_t result_len = prefix_len - prefix_off + wcslen(converted_path) + additional_space + 1;
+    result = NEW_C_HEAP_ARRAY(WCHAR, result_len, mtInternal);
+    _snwprintf(result, result_len, L"%s%s", prefix, &converted_path[prefix_off]);
+
+    // Remove trailing pathsep (not for \\?\<DRIVE>:\, since it would make it relative)
+    result_len = wcslen(result);
+    if ((result[result_len - 1] == L'\\') &&
+        !(::iswalpha(result[4]) && result[5] == L':' && result_len == 7)) {
+      result[result_len - 1] = L'\0';
+    }
+  }
+
+  if (converted_path != unicode_path) {
+    FREE_C_HEAP_ARRAY(WCHAR, converted_path);
+  }
+  FREE_C_HEAP_ARRAY(WCHAR, unicode_path);
+
+  return static_cast<wchar_t*>(result); // LPWSTR and wchat_t* are the same type on Windows.
 }
 
 int os::stat(const char *path, struct stat *sbuf) {
-  char* pathbuf = (char*)os::strdup(path, mtInternal);
-  if (pathbuf == NULL) {
-    errno = ENOMEM;
+  errno_t err;
+  wchar_t* wide_path = wide_abs_unc_path(path, err);
+
+  if (wide_path == NULL) {
+    errno = err;
     return -1;
   }
-  os::native_path(pathbuf);
-  int ret;
-  WIN32_FILE_ATTRIBUTE_DATA file_data;
-  // Not using stat() to avoid the problem described in JDK-6539723
-  if (strlen(path) < MAX_PATH) {
-    BOOL bret = ::GetFileAttributesExA(pathbuf, GetFileExInfoStandard, &file_data);
-    if (!bret) {
-      errno = ::GetLastError();
-      ret = -1;
-    }
-    else {
-      file_attribute_data_to_stat(sbuf, file_data);
-      ret = 0;
-    }
-  } else {
-    errno_t err = ERROR_SUCCESS;
-    wchar_t* wpath = create_unc_path(pathbuf, err);
-    if (err != ERROR_SUCCESS) {
-      if (wpath != NULL) {
-        destroy_unc_path(wpath);
-      }
-      os::free(pathbuf);
-      errno = err;
-      return -1;
-    }
-    BOOL bret = ::GetFileAttributesExW(wpath, GetFileExInfoStandard, &file_data);
-    if (!bret) {
-      errno = ::GetLastError();
-      ret = -1;
-    } else {
-      file_attribute_data_to_stat(sbuf, file_data);
-      ret = 0;
-    }
-    destroy_unc_path(wpath);
-  }
-  os::free(pathbuf);
-  return ret;
-}
 
+  WIN32_FILE_ATTRIBUTE_DATA file_data;;
+  BOOL bret = ::GetFileAttributesExW(wide_path, GetFileExInfoStandard, &file_data);
+  os::free(wide_path);
+
+  if (!bret) {
+    errno = ::GetLastError();
+    return -1;
+  }
+
+  file_attribute_data_to_stat(sbuf, file_data);
+  return 0;
+}
 
 #define FT2INT64(ft) \
   ((jlong)((jlong)(ft).dwHighDateTime << 32 | (julong)(ft).dwLowDateTime))
@@ -4419,38 +4536,22 @@ bool os::dont_yield() {
   return DontYieldALot;
 }
 
-// This method is a slightly reworked copy of JDK's sysOpen
-// from src/windows/hpi/src/sys_api_md.c
-
 int os::open(const char *path, int oflag, int mode) {
-  char* pathbuf = (char*)os::strdup(path, mtInternal);
-  if (pathbuf == NULL) {
-    errno = ENOMEM;
+  errno_t err;
+  wchar_t* wide_path = wide_abs_unc_path(path, err);
+
+  if (wide_path == NULL) {
+    errno = err;
     return -1;
   }
-  os::native_path(pathbuf);
-  int ret;
-  if (strlen(path) < MAX_PATH) {
-    ret = ::open(pathbuf, oflag | O_BINARY | O_NOINHERIT, mode);
-  } else {
-    errno_t err = ERROR_SUCCESS;
-    wchar_t* wpath = create_unc_path(pathbuf, err);
-    if (err != ERROR_SUCCESS) {
-      if (wpath != NULL) {
-        destroy_unc_path(wpath);
-      }
-      os::free(pathbuf);
-      errno = err;
-      return -1;
-    }
-    ret = ::_wopen(wpath, oflag | O_BINARY | O_NOINHERIT, mode);
-    if (ret == -1) {
-      errno = ::GetLastError();
-    }
-    destroy_unc_path(wpath);
+  int fd = ::_wopen(wide_path, oflag | O_BINARY | O_NOINHERIT, mode);
+  os::free(wide_path);
+
+  if (fd == -1) {
+    errno = ::GetLastError();
   }
-  os::free(pathbuf);
-  return ret;
+
+  return fd;
 }
 
 FILE* os::open(int fd, const char* mode) {
@@ -4459,37 +4560,26 @@ FILE* os::open(int fd, const char* mode) {
 
 // Is a (classpath) directory empty?
 bool os::dir_is_empty(const char* path) {
-  char* search_path = (char*)os::malloc(strlen(path) + 3, mtInternal);
-  if (search_path == NULL) {
-    errno = ENOMEM;
-    return false;
-  }
-  strcpy(search_path, path);
-  os::native_path(search_path);
-  // Append "*", or possibly "\\*", to path
-  if (search_path[1] == ':' &&
-       (search_path[2] == '\0' ||
-         (search_path[2] == '\\' && search_path[3] == '\0'))) {
-    // No '\\' needed for cases like "Z:" or "Z:\"
-    strcat(search_path, "*");
-  }
-  else {
-    strcat(search_path, "\\*");
-  }
-  errno_t err = ERROR_SUCCESS;
-  wchar_t* wpath = create_unc_path(search_path, err);
-  if (err != ERROR_SUCCESS) {
-    if (wpath != NULL) {
-      destroy_unc_path(wpath);
-    }
-    os::free(search_path);
+  errno_t err;
+  wchar_t* wide_path = wide_abs_unc_path(path, err, 2);
+
+  if (wide_path == NULL) {
     errno = err;
     return false;
   }
+
+  // Make sure we end with "\\*"
+  if (wide_path[wcslen(wide_path) - 1] == L'\\') {
+    wcscat(wide_path, L"*");
+  } else {
+    wcscat(wide_path, L"\\*");
+  }
+
   WIN32_FIND_DATAW fd;
-  HANDLE f = ::FindFirstFileW(wpath, &fd);
-  destroy_unc_path(wpath);
+  HANDLE f = ::FindFirstFileW(wide_path, &fd);
+  os::free(wide_path);
   bool is_empty = true;
+
   if (f != INVALID_HANDLE_VALUE) {
     while (is_empty && ::FindNextFileW(f, &fd)) {
       // An empty directory contains only the current directory file
@@ -4500,17 +4590,17 @@ bool os::dir_is_empty(const char* path) {
       }
     }
     FindClose(f);
+  } else {
+    errno = ::GetLastError();
   }
-  os::free(search_path);
+
   return is_empty;
 }
 
 // create binary file, rewriting existing file if required
 int os::create_binary_file(const char* path, bool rewrite_existing) {
   int oflags = _O_CREAT | _O_WRONLY | _O_BINARY;
-  if (!rewrite_existing) {
-    oflags |= _O_EXCL;
-  }
+  oflags |= rewrite_existing ? _O_TRUNC : _O_EXCL;
   return ::open(path, oflags, _S_IREAD | _S_IWRITE);
 }
 
@@ -4697,9 +4787,6 @@ int os::fsync(int fd) {
 static int nonSeekAvailable(int, long *);
 static int stdinAvailable(int, long *);
 
-#define S_ISCHR(mode)   (((mode) & _S_IFCHR) == _S_IFCHR)
-#define S_ISFIFO(mode)  (((mode) & _S_IFIFO) == _S_IFIFO)
-
 // This code is a copy of JDK's sysAvailable
 // from src/windows/hpi/src/sys_api_md.c
 
@@ -4840,15 +4927,25 @@ static int stdinAvailable(int fd, long *pbytes) {
 char* os::pd_map_memory(int fd, const char* file_name, size_t file_offset,
                         char *addr, size_t bytes, bool read_only,
                         bool allow_exec) {
+
+  errno_t err;
+  wchar_t* wide_path = wide_abs_unc_path(file_name, err);
+
+  if (wide_path == NULL) {
+    return NULL;
+  }
+
   HANDLE hFile;
   char* base;
 
-  hFile = CreateFile(file_name, GENERIC_READ, FILE_SHARE_READ, NULL,
+  hFile = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (hFile == NULL) {
-    log_info(os)("CreateFile() failed: GetLastError->%ld.", GetLastError());
+  if (hFile == INVALID_HANDLE_VALUE) {
+    log_info(os)("CreateFileW() failed: GetLastError->%ld.", GetLastError());
+    os::free(wide_path);
     return NULL;
   }
+  os::free(wide_path);
 
   if (allow_exec) {
     // CreateFileMapping/MapViewOfFileEx can't map executable memory
@@ -4868,6 +4965,9 @@ char* os::pd_map_memory(int fd, const char* file_name, size_t file_offset,
       CloseHandle(hFile);
       return NULL;
     }
+
+    // Record virtual memory allocation
+    MemTracker::record_virtual_memory_reserve_and_commit((address)addr, bytes, CALLER_PC);
 
     DWORD bytes_read;
     OVERLAPPED overlapped;
@@ -4983,7 +5083,7 @@ bool os::pd_unmap_memory(char* addr, size_t bytes) {
 void os::pause() {
   char filename[MAX_PATH];
   if (PauseAtStartupFile && PauseAtStartupFile[0]) {
-    jio_snprintf(filename, MAX_PATH, PauseAtStartupFile);
+    jio_snprintf(filename, MAX_PATH, "%s", PauseAtStartupFile);
   } else {
     jio_snprintf(filename, MAX_PATH, "./vm.paused.%d", current_process_id());
   }

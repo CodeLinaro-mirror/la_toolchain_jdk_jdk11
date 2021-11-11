@@ -68,7 +68,7 @@ class ConcurrentHashTable : public CHeapObj<F> {
     void print_value_on(outputStream* st) const {};
   };
 
-  // Only constructed with placement new[] from an array allocated with MEMFLAGS
+  // Only constructed with placement new from an array allocated with MEMFLAGS
   // of InternalTable.
   class Bucket {
    private:
@@ -466,6 +466,12 @@ class ConcurrentHashTable : public CHeapObj<F> {
   // Visit all items with SCAN_FUNC when the resize lock is obtained.
   template <typename SCAN_FUNC>
   void do_scan(Thread* thread, SCAN_FUNC& scan_f);
+
+  // Visit all items with SCAN_FUNC without any protection.
+  // It will assume there is no other thread accessing this
+  // table during the safepoint. Must be called with VM thread.
+  template <typename SCAN_FUNC>
+  void do_safepoint_scan(SCAN_FUNC& scan_f);
 
   // Destroying items matching EVALUATE_FUNC, before destroying items
   // DELETE_FUNC is called, if resize lock is obtained. Else returns false.

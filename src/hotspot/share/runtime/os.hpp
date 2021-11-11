@@ -517,6 +517,7 @@ class os: AllStatic {
   // Ignores Thread.interrupt() (so keep it short).
   // ms = 0, will sleep for the least amount of time allowed by the OS.
   static void naked_short_sleep(jlong ms);
+  static void naked_short_nanosleep(jlong ns);
   static void infinite_sleep(); // never returns, use with CAUTION
   static void naked_yield () ;
   static OSReturn set_priority(Thread* thread, ThreadPriority priority);
@@ -558,6 +559,10 @@ class os: AllStatic {
   static void abort(bool dump_core = true);
 
   // Die immediately, no exit hook, no abort hook, no cleanup.
+  // Dump a core file, if possible, for debugging. os::abort() is the
+  // preferred means to abort the VM on error. os::die() should only
+  // be called if something has gone badly wrong. CreateCoredumpOnCrash
+  // is intentionally not honored by this function.
   static void die();
 
   // File i/o operations
@@ -632,6 +637,7 @@ class os: AllStatic {
   // Loads .dll/.so and
   // in case of error it checks if .dll/.so was built for the
   // same architecture as HotSpot is running on
+  // in case of an error NULL is returned and an error message is stored in ebuf
   static void* dll_load(const char *name, char *ebuf, int ebuflen);
 
   // lookup symbol in a shared library
@@ -686,6 +692,9 @@ class os: AllStatic {
   static void print_signal_handlers(outputStream* st, char* buf, size_t buflen);
   static void print_date_and_time(outputStream* st, char* buf, size_t buflen);
   static void print_instructions(outputStream* st, address pc, int unitsize);
+
+  // helper for output of seconds in days , hours and months
+  static void print_dhm(outputStream* st, const char* startStr, long sec);
 
   static void print_location(outputStream* st, intptr_t x, bool verbose = false);
   static size_t lasterror(char *buf, size_t len);

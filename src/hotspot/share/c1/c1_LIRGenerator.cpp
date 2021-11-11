@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -1047,20 +1047,21 @@ void LIRGenerator::move_to_phi(ValueStack* cur_state) {
 
 
 LIR_Opr LIRGenerator::new_register(BasicType type) {
-  int vreg = _virtual_register_number;
-  // add a little fudge factor for the bailout, since the bailout is
-  // only checked periodically.  This gives a few extra registers to
-  // hand out before we really run out, which helps us keep from
-  // tripping over assertions.
-  if (vreg + 20 >= LIR_OprDesc::vreg_max) {
-    bailout("out of virtual registers");
-    if (vreg + 2 >= LIR_OprDesc::vreg_max) {
-      // wrap it around
+  int vreg_num = _virtual_register_number;
+  // Add a little fudge factor for the bailout since the bailout is only checked periodically. This allows us to hand out
+  // a few extra registers before we really run out which helps to avoid to trip over assertions.
+  if (vreg_num + 20 >= LIR_OprDesc::vreg_max) {
+    bailout("out of virtual registers in LIR generator");
+    if (vreg_num + 2 >= LIR_OprDesc::vreg_max) {
+      // Wrap it around and continue until bailout really happens to avoid hitting assertions.
       _virtual_register_number = LIR_OprDesc::vreg_base;
+      vreg_num = LIR_OprDesc::vreg_base;
     }
   }
   _virtual_register_number += 1;
-  return LIR_OprFact::virtual_register(vreg, type);
+  LIR_Opr vreg = LIR_OprFact::virtual_register(vreg_num, type);
+  assert(vreg != LIR_OprFact::illegal(), "ran out of virtual registers");
+  return vreg;
 }
 
 
@@ -1285,9 +1286,10 @@ void LIRGenerator::do_getClass(Intrinsic* x) {
   // FIXME T_ADDRESS should actually be T_METADATA but it can't because the
   // meaning of these two is mixed up (see JDK-8026837).
   __ move(new LIR_Address(rcvr.result(), oopDesc::klass_offset_in_bytes(), T_ADDRESS), temp, info);
-  __ move_wide(new LIR_Address(temp, in_bytes(Klass::java_mirror_offset()), T_ADDRESS), result);
+  __ move_wide(new LIR_Address(temp, in_bytes(Klass::java_mirror_offset()), T_ADDRESS), temp);
   // mirror = ((OopHandle)mirror)->resolve();
-  __ move_wide(new LIR_Address(result, T_OBJECT), result);
+  access_load(IN_NATIVE, T_OBJECT,
+              LIR_OprFact::address(new LIR_Address(temp, T_OBJECT)), result);
 }
 
 // java.lang.Class::isPrimitive()
@@ -1305,7 +1307,7 @@ void LIRGenerator::do_isPrimitive(Intrinsic* x) {
   }
 
   __ move(new LIR_Address(rcvr.result(), java_lang_Class::klass_offset_in_bytes(), T_ADDRESS), temp, info);
-  __ cmp(lir_cond_notEqual, temp, LIR_OprFact::intConst(0));
+  __ cmp(lir_cond_notEqual, temp, LIR_OprFact::metadataConst(0));
   __ cmove(lir_cond_notEqual, LIR_OprFact::intConst(0), LIR_OprFact::intConst(1), result, T_BOOLEAN);
 }
 
@@ -1623,6 +1625,18 @@ void LIRGenerator::access_load_at(DecoratorSet decorators, BasicType type,
   }
 }
 
+void LIRGenerator::access_load(DecoratorSet decorators, BasicType type,
+                               LIR_Opr addr, LIR_Opr result) {
+  decorators |= C1_READ_ACCESS;
+  LIRAccess access(this, decorators, LIR_OprFact::illegalOpr, LIR_OprFact::illegalOpr, type);
+  access.set_resolved_addr(addr);
+  if (access.is_raw()) {
+    _barrier_set->BarrierSetC1::load(access, result);
+  } else {
+    _barrier_set->load(access, result);
+  }
+}
+
 void LIRGenerator::access_store_at(DecoratorSet decorators, BasicType type,
                                    LIRItem& base, LIR_Opr offset, LIR_Opr value,
                                    CodeEmitInfo* patch_info, CodeEmitInfo* store_emit_info) {
@@ -1640,7 +1654,7 @@ LIR_Opr LIRGenerator::access_atomic_cmpxchg_at(DecoratorSet decorators, BasicTyp
   // Atomic operations are SEQ_CST by default
   decorators |= C1_READ_ACCESS;
   decorators |= C1_WRITE_ACCESS;
-  decorators |= ((decorators & MO_DECORATOR_MASK) != 0) ? MO_SEQ_CST : 0;
+  decorators |= ((decorators & MO_DECORATOR_MASK) == 0) ? MO_SEQ_CST : 0;
   LIRAccess access(this, decorators, base, offset, type);
   if (access.is_raw()) {
     return _barrier_set->BarrierSetC1::atomic_cmpxchg_at(access, cmp_value, new_value);
@@ -1654,7 +1668,7 @@ LIR_Opr LIRGenerator::access_atomic_xchg_at(DecoratorSet decorators, BasicType t
   // Atomic operations are SEQ_CST by default
   decorators |= C1_READ_ACCESS;
   decorators |= C1_WRITE_ACCESS;
-  decorators |= ((decorators & MO_DECORATOR_MASK) != 0) ? MO_SEQ_CST : 0;
+  decorators |= ((decorators & MO_DECORATOR_MASK) == 0) ? MO_SEQ_CST : 0;
   LIRAccess access(this, decorators, base, offset, type);
   if (access.is_raw()) {
     return _barrier_set->BarrierSetC1::atomic_xchg_at(access, value);
@@ -1668,7 +1682,7 @@ LIR_Opr LIRGenerator::access_atomic_add_at(DecoratorSet decorators, BasicType ty
   // Atomic operations are SEQ_CST by default
   decorators |= C1_READ_ACCESS;
   decorators |= C1_WRITE_ACCESS;
-  decorators |= ((decorators & MO_DECORATOR_MASK) != 0) ? MO_SEQ_CST : 0;
+  decorators |= ((decorators & MO_DECORATOR_MASK) == 0) ? MO_SEQ_CST : 0;
   LIRAccess access(this, decorators, base, offset, type);
   if (access.is_raw()) {
     return _barrier_set->BarrierSetC1::atomic_add_at(access, value);
@@ -2138,7 +2152,7 @@ void LIRGenerator::do_UnsafeGetObject(UnsafeGetObject* x) {
   off.load_item();
   src.load_item();
 
-  DecoratorSet decorators = IN_HEAP;
+  DecoratorSet decorators = IN_HEAP | C1_UNSAFE_ACCESS;
 
   if (x->is_volatile()) {
     decorators |= MO_SEQ_CST;
@@ -2172,7 +2186,7 @@ void LIRGenerator::do_UnsafePutObject(UnsafePutObject* x) {
 
   set_no_result(x);
 
-  DecoratorSet decorators = IN_HEAP;
+  DecoratorSet decorators = IN_HEAP | C1_UNSAFE_ACCESS;
   if (type == T_ARRAY || type == T_OBJECT) {
     decorators |= ON_UNKNOWN_OOP_REF;
   }
@@ -2188,7 +2202,7 @@ void LIRGenerator::do_UnsafeGetAndSetObject(UnsafeGetAndSetObject* x) {
   LIRItem off(x->offset(), this);
   LIRItem value(x->value(), this);
 
-  DecoratorSet decorators = IN_HEAP | MO_SEQ_CST;
+  DecoratorSet decorators = IN_HEAP | C1_UNSAFE_ACCESS | MO_SEQ_CST;
 
   if (type == T_ARRAY || type == T_OBJECT) {
     decorators |= ON_UNKNOWN_OOP_REF;
@@ -2207,7 +2221,7 @@ void LIRGenerator::do_SwitchRanges(SwitchRangeArray* x, LIR_Opr value, BlockBegi
   int lng = x->length();
 
   for (int i = 0; i < lng; i++) {
-    SwitchRange* one_range = x->at(i);
+    C1SwitchRange* one_range = x->at(i);
     int low_key = one_range->low_key();
     int high_key = one_range->high_key();
     BlockBegin* dest = one_range->sux();
@@ -2239,7 +2253,7 @@ SwitchRangeArray* LIRGenerator::create_lookup_ranges(TableSwitch* x) {
     BlockBegin* sux = x->sux_at(0);
     int key = x->lo_key();
     BlockBegin* default_sux = x->default_sux();
-    SwitchRange* range = new SwitchRange(key, sux);
+    C1SwitchRange* range = new C1SwitchRange(key, sux);
     for (int i = 0; i < len; i++, key++) {
       BlockBegin* new_sux = x->sux_at(i);
       if (sux == new_sux) {
@@ -2250,7 +2264,7 @@ SwitchRangeArray* LIRGenerator::create_lookup_ranges(TableSwitch* x) {
         if (sux != default_sux) {
           res->append(range);
         }
-        range = new SwitchRange(key, new_sux);
+        range = new C1SwitchRange(key, new_sux);
       }
       sux = new_sux;
     }
@@ -2268,7 +2282,7 @@ SwitchRangeArray* LIRGenerator::create_lookup_ranges(LookupSwitch* x) {
     BlockBegin* default_sux = x->default_sux();
     int key = x->key_at(0);
     BlockBegin* sux = x->sux_at(0);
-    SwitchRange* range = new SwitchRange(key, sux);
+    C1SwitchRange* range = new C1SwitchRange(key, sux);
     for (int i = 1; i < len; i++) {
       int new_key = x->key_at(i);
       BlockBegin* new_sux = x->sux_at(i);
@@ -2280,7 +2294,7 @@ SwitchRangeArray* LIRGenerator::create_lookup_ranges(LookupSwitch* x) {
         if (range->sux() != default_sux) {
           res->append(range);
         }
-        range = new SwitchRange(new_key, new_sux);
+        range = new C1SwitchRange(new_key, new_sux);
       }
       key = new_key;
       sux = new_sux;
@@ -2949,14 +2963,19 @@ void LIRGenerator::do_ClassIDIntrinsic(Intrinsic* x) {
 void LIRGenerator::do_getEventWriter(Intrinsic* x) {
   LabelObj* L_end = new LabelObj();
 
+  // FIXME T_ADDRESS should actually be T_METADATA but it can't because the
+  // meaning of these two is mixed up (see JDK-8026837).
   LIR_Address* jobj_addr = new LIR_Address(getThreadPointer(),
                                            in_bytes(THREAD_LOCAL_WRITER_OFFSET_JFR),
-                                           T_OBJECT);
+                                           T_ADDRESS);
   LIR_Opr result = rlock_result(x);
-  __ move_wide(jobj_addr, result);
-  __ cmp(lir_cond_equal, result, LIR_OprFact::oopConst(NULL));
+  __ move(LIR_OprFact::oopConst(NULL), result);
+  LIR_Opr jobj = new_register(T_METADATA);
+  __ move_wide(jobj_addr, jobj);
+  __ cmp(lir_cond_equal, jobj, LIR_OprFact::metadataConst(0));
   __ branch(lir_cond_equal, T_OBJECT, L_end->label());
-  __ move_wide(new LIR_Address(result, T_OBJECT), result);
+
+  access_load(IN_NATIVE, T_OBJECT, LIR_OprFact::address(new LIR_Address(jobj, T_OBJECT)), result);
 
   __ branch_destination(L_end->label());
 }
@@ -3192,7 +3211,7 @@ void LIRGenerator::profile_parameters_at_call(ProfileCall* x) {
 void LIRGenerator::do_ProfileCall(ProfileCall* x) {
   // Need recv in a temporary register so it interferes with the other temporaries
   LIR_Opr recv = LIR_OprFact::illegalOpr;
-  LIR_Opr mdo = new_register(T_OBJECT);
+  LIR_Opr mdo = new_register(T_METADATA);
   // tmp is used to hold the counters on SPARC
   LIR_Opr tmp = new_pointer_register();
 

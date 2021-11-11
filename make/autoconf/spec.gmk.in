@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -130,8 +130,9 @@ SYSROOT_LDFLAGS := @SYSROOT_LDFLAGS@
 
 # The top-level directory of the source repository
 TOPDIR:=@TOPDIR@
-
-
+# Usually the top level directory, but could be something else if a custom
+# root is defined.
+WORKSPACE_ROOT:=@WORKSPACE_ROOT@
 IMPORT_MODULES_CLASSES:=@IMPORT_MODULES_CLASSES@
 IMPORT_MODULES_CMDS:=@IMPORT_MODULES_CMDS@
 IMPORT_MODULES_LIBS:=@IMPORT_MODULES_LIBS@
@@ -229,7 +230,8 @@ ifneq ($(COMPANY_NAME),)
   # Only export "VENDOR" to the build if COMPANY_NAME contains a real value.
   # Otherwise the default value for VENDOR, which is used to set the "java.vendor"
   # and "java.vm.vendor" properties is hard-coded into the source code (i.e. in
-  # System.c in the jdk for "vm.vendor" and vm_version.cpp in the VM for "java.vm.vendor")
+  # VersionProps.java.template in the jdk for "java.vendor" and
+  # vm_version.cpp in the VM for "java.vm.vendor")
   ifneq ($(COMPANY_NAME), N/A)
     VERSION_CFLAGS += -DVENDOR='"$(COMPANY_NAME)"'
   endif
@@ -285,6 +287,9 @@ USE_PRECOMPILED_HEADER := @USE_PRECOMPILED_HEADER@
 # Only build headless support or not
 ENABLE_HEADLESS_ONLY := @ENABLE_HEADLESS_ONLY@
 
+# Ship debug symbols (e.g. pdbs on Windows)
+SHIP_DEBUG_SYMBOLS := @SHIP_DEBUG_SYMBOLS@
+
 ENABLE_FULL_DOCS := @ENABLE_FULL_DOCS@
 
 # JDK_OUTPUTDIR specifies where a working jvm is built.
@@ -313,6 +318,8 @@ ENABLE_GENERATE_CLASSLIST := @ENABLE_GENERATE_CLASSLIST@
 EXCLUDE_TRANSLATIONS := @EXCLUDE_TRANSLATIONS@
 
 BUILD_MANPAGES := @BUILD_MANPAGES@
+
+ALLOW_ABSOLUTE_PATHS_IN_OUTPUT := @ALLOW_ABSOLUTE_PATHS_IN_OUTPUT@
 
 # The boot jdk to use. This is overridden in bootcycle-spec.gmk. Make sure to keep
 # it in sync.
@@ -357,6 +364,9 @@ LIBFFI_CFLAGS:=@LIBFFI_CFLAGS@
 ENABLE_LIBFFI_BUNDLING:=@ENABLE_LIBFFI_BUNDLING@
 LIBFFI_LIB_FILE:=@LIBFFI_LIB_FILE@
 GRAALUNIT_LIB := @GRAALUNIT_LIB@
+FILE_MACRO_CFLAGS := @FILE_MACRO_CFLAGS@
+
+STATIC_LIBS_CFLAGS := @STATIC_LIBS_CFLAGS@
 
 PACKAGE_PATH=@PACKAGE_PATH@
 
@@ -372,7 +382,7 @@ GCOV_ENABLED=@GCOV_ENABLED@
 export ASAN_ENABLED:=@ASAN_ENABLED@
 export DEVKIT_LIB_DIR:=@DEVKIT_LIB_DIR@
 ifeq ($(ASAN_ENABLED), yes)
-  export ASAN_OPTIONS="handle_segv=0 detect_leaks=0"
+  export ASAN_OPTIONS=handle_segv=0 detect_leaks=0
   ifneq ($(DEVKIT_LIB_DIR),)
     export LD_LIBRARY_PATH:=$(LD_LIBRARY_PATH):$(DEVKIT_LIB_DIR)
   endif
@@ -386,6 +396,9 @@ X_LIBS:=@X_LIBS@
 MACOSX_VERSION_MIN=@MACOSX_VERSION_MIN@
 # The highest allowed version of macosx
 MACOSX_VERSION_MAX=@MACOSX_VERSION_MAX@
+
+# The macosx code signing identity to use
+MACOSX_CODESIGN_IDENTITY=@MACOSX_CODESIGN_IDENTITY@
 
 # Toolchain type: gcc, clang, solstudio, lxc, microsoft...
 TOOLCHAIN_TYPE:=@TOOLCHAIN_TYPE@
@@ -462,6 +475,7 @@ JVM_RCFLAGS := @JVM_RCFLAGS@
 EXTRA_CFLAGS = @EXTRA_CFLAGS@
 EXTRA_CXXFLAGS = @EXTRA_CXXFLAGS@
 EXTRA_LDFLAGS = @EXTRA_LDFLAGS@
+EXTRA_ASFLAGS = @EXTRA_ASFLAGS@
 
 CXX:=@FIXPATH@ @CCACHE@ @ICECC@ @CXX@
 
@@ -469,6 +483,9 @@ CPP:=@FIXPATH@ @CPP@
 
 # The linker can be gcc or ld on unix systems, or link.exe on windows systems.
 LD:=@FIXPATH@ @LD@
+
+# Linker used by the jaotc tool for AOT compilation.
+LD_JAOTC:=@LD_JAOTC@
 
 # Xcode SDK path
 SDKROOT:=@SDKROOT@
@@ -600,7 +617,7 @@ JAVA_JAVAC=@FIXPATH@ $(JAVA_CMD) $(JAVA_FLAGS_JAVAC) $(JAVA_FLAGS)
 JAVAC=@FIXPATH@ $(JAVAC_CMD)
 JAVADOC=@FIXPATH@ $(JAVADOC_CMD)
 JAR=@FIXPATH@ $(JAR_CMD)
-JLINK = @FIXPATH@ $(JLINK_CMD) $(JAVA_TOOL_FLAGS_SMALL)
+JLINK = @FIXPATH@ $(JLINK_CMD)
 JMOD = @FIXPATH@ $(JMOD_CMD) $(JAVA_TOOL_FLAGS_SMALL)
 JARSIGNER=@FIXPATH@ $(JARSIGNER_CMD)
 # A specific java binary with specific options can be used to run
@@ -731,7 +748,7 @@ SETFILE:=@SETFILE@
 XATTR:=@XATTR@
 JT_HOME:=@JT_HOME@
 JTREGEXE:=@JTREGEXE@
-JIB_JAR:=@JIB_JAR@
+JIB_HOME:=@JIB_HOME@
 XCODEBUILD=@XCODEBUILD@
 DTRACE := @DTRACE@
 FIXPATH:=@FIXPATH@
@@ -815,6 +832,10 @@ USE_EXTERNAL_LCMS:=@USE_EXTERNAL_LCMS@
 LCMS_CFLAGS:=@LCMS_CFLAGS@
 LCMS_LIBS:=@LCMS_LIBS@
 
+USE_EXTERNAL_HARFBUZZ:=@USE_EXTERNAL_HARFBUZZ@
+HARFBUZZ_CFLAGS:=@HARFBUZZ_CFLAGS@
+HARFBUZZ_LIBS:=@HARFBUZZ_LIBS@
+
 USE_EXTERNAL_LIBPNG:=@USE_EXTERNAL_LIBPNG@
 PNG_LIBS:=@PNG_LIBS@
 PNG_CFLAGS:=@PNG_CFLAGS@
@@ -858,13 +879,27 @@ DOCS_IMAGE_DIR = $(IMAGES_OUTPUTDIR)/$(DOCS_IMAGE_SUBDIR)
 # Output docs directly into image
 DOCS_OUTPUTDIR := $(DOCS_IMAGE_DIR)
 
+# Static libs image
+STATIC_LIBS_IMAGE_SUBDIR := static-libs
+STATIC_LIBS_IMAGE_DIR := $(IMAGES_OUTPUTDIR)/$(STATIC_LIBS_IMAGE_SUBDIR)
+
+# Graal builder image
+GRAAL_BUILDER_IMAGE_SUBDIR := graal-builder-jdk
+GRAAL_BUILDER_IMAGE_DIR := $(IMAGES_OUTPUTDIR)/$(GRAAL_BUILDER_IMAGE_SUBDIR)
+
 # Macosx bundles directory definitions
 JDK_MACOSX_BUNDLE_SUBDIR=jdk-bundle
 JRE_MACOSX_BUNDLE_SUBDIR=jre-bundle
+JDK_MACOSX_BUNDLE_SUBDIR_SIGNED=jdk-bundle-signed
+JRE_MACOSX_BUNDLE_SUBDIR_SIGNED=jre-bundle-signed
 JDK_MACOSX_BUNDLE_DIR=$(IMAGES_OUTPUTDIR)/$(JDK_MACOSX_BUNDLE_SUBDIR)
 JRE_MACOSX_BUNDLE_DIR=$(IMAGES_OUTPUTDIR)/$(JRE_MACOSX_BUNDLE_SUBDIR)
-JDK_MACOSX_CONTENTS_SUBDIR=jdk-$(VERSION_NUMBER).jdk/Contents
-JRE_MACOSX_CONTENTS_SUBDIR=jre-$(VERSION_NUMBER).jre/Contents
+JDK_MACOSX_BUNDLE_DIR_SIGNED=$(IMAGES_OUTPUTDIR)/$(JDK_MACOSX_BUNDLE_SUBDIR_SIGNED)
+JRE_MACOSX_BUNDLE_DIR_SIGNED=$(IMAGES_OUTPUTDIR)/$(JRE_MACOSX_BUNDLE_SUBDIR_SIGNED)
+JDK_MACOSX_BUNDLE_TOP_DIR=jdk-$(VERSION_NUMBER).jdk
+JRE_MACOSX_BUNDLE_TOP_DIR=jre-$(VERSION_NUMBER).jre
+JDK_MACOSX_CONTENTS_SUBDIR=$(JDK_MACOSX_BUNDLE_TOP_DIR)/Contents
+JRE_MACOSX_CONTENTS_SUBDIR=$(JRE_MACOSX_BUNDLE_TOP_DIR)/Contents
 JDK_MACOSX_CONTENTS_DIR=$(JDK_MACOSX_BUNDLE_DIR)/$(JDK_MACOSX_CONTENTS_SUBDIR)
 JRE_MACOSX_CONTENTS_DIR=$(JRE_MACOSX_BUNDLE_DIR)/$(JRE_MACOSX_CONTENTS_SUBDIR)
 
@@ -886,6 +921,7 @@ JDK_SYMBOLS_BUNDLE_NAME := jdk-$(BASE_NAME)_bin$(DEBUG_PART)-symbols.tar.gz
 TEST_DEMOS_BUNDLE_NAME := jdk-$(BASE_NAME)_bin-tests-demos$(DEBUG_PART).tar.gz
 TEST_BUNDLE_NAME := jdk-$(BASE_NAME)_bin-tests$(DEBUG_PART).tar.gz
 DOCS_BUNDLE_NAME := jdk-$(BASE_NAME)_doc-api-spec$(DEBUG_PART).tar.gz
+STATIC_LIBS_BUNDLE_NAME := jdk-$(BASE_NAME)_bin-static-libs$(DEBUG_PART).tar.gz
 
 JDK_BUNDLE := $(BUNDLES_OUTPUTDIR)/$(JDK_BUNDLE_NAME)
 JRE_BUNDLE :=  $(BUNDLES_OUTPUTDIR)/$(JRE_BUNDLE_NAME)

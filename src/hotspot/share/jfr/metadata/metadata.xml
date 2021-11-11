@@ -26,8 +26,9 @@
 
 <Metadata>
 
-  <Event name="ThreadStart" category="Java Application" label="Java Thread Start" thread="true" startTime="false">
-    <Field type="Thread" name="thread" label="Java Thread" />
+  <Event name="ThreadStart" category="Java Application" label="Java Thread Start" thread="true" startTime="false" stackTrace="true">
+    <Field type="Thread" name="thread" label="New Java Thread" />
+    <Field type="Thread" name="parentThread" label="Parent Java Thread" />
   </Event>
 
   <Event name="ThreadEnd" category="Java Application" label="Java Thread End" thread="true" startTime="false">
@@ -614,6 +615,10 @@
     <Field type="string" name="osVersion" label="OS Version" />
   </Event>
 
+  <Event name="VirtualizationInformation" category="Operating System" label="Virtualization Information" period="endChunk">
+    <Field type="string" name="name" label="Name" />
+  </Event>
+
   <Event name="InitialSystemProperty" category="Java Virtual Machine" label="Initial System Property" description="System Property at JVM start" period="endChunk">
     <Field type="string" name="key" label="Key" />
     <Field type="string" name="value" label="Value" />
@@ -745,8 +750,8 @@
     <Field type="int" name="standardCompileCount" label="Standard Compilations" />
     <Field type="ulong" contentType="bytes" name="osrBytesCompiled" label="OSR Bytes Compiled" />
     <Field type="ulong" contentType="bytes" name="standardBytesCompiled" label="Standard Bytes Compiled" />
-    <Field type="ulong" contentType="bytes" name="nmetodsSize" label="Compilation Resulting Size" />
-    <Field type="ulong" contentType="bytes" name="nmetodCodeSize" label="Compilation Resulting Code Size" />
+    <Field type="ulong" contentType="bytes" name="nmethodsSize" label="Compilation Resulting Size" />
+    <Field type="ulong" contentType="bytes" name="nmethodCodeSize" label="Compilation Resulting Code Size" />
     <Field type="long" contentType="millis" name="peakTimeSpent" label="Peak Time" />
     <Field type="long" contentType="millis" name="totalTimeSpent" label="Total time" />
   </Event>
@@ -924,6 +929,27 @@
 
   <Type name="ZStatisticsSamplerType" label="Z Statistics Sampler">
     <Field type="string" name="sampler" label="Sampler" />
+  </Type>
+
+  <Event name="ShenandoahHeapRegionStateChange" category="Java Virtual Machine, GC, Detailed" label="Shenandoah Heap Region State Change" description="Information about a Shenandoah heap region state change"
+    startTime="false">
+    <Field type="uint" name="index" label="Index" />
+    <Field type="ShenandoahHeapRegionState" name="from" label="From" />
+    <Field type="ShenandoahHeapRegionState" name="to" label="To" />
+    <Field type="ulong" contentType="address" name="start" label="Start" />
+    <Field type="ulong" contentType="bytes" name="used" label="Used" />
+  </Event>
+
+  <Event name="ShenandoahHeapRegionInformation" category="Java Virtual Machine, GC, Detailed" label="Shenandoah Heap Region Information" description="Information about a specific heap region in the Shenandoah GC"
+    period="everyChunk">
+    <Field type="uint" name="index" label="Index" />
+    <Field type="ShenandoahHeapRegionState" name="state" label="State" />
+    <Field type="ulong" contentType="address" name="start" label="Start" />
+    <Field type="ulong" contentType="bytes" name="used" label="Used" />
+  </Event>
+
+  <Type name="ShenandoahHeapRegionState" label="Shenandoah Heap Region State">
+    <Field type="string" name="state" label="State" />
   </Type>
 
   <Type name="NetworkInterfaceName" label="Network Interface">

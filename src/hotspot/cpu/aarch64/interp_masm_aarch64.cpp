@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -168,7 +168,7 @@ void InterpreterMacroAssembler::get_unsigned_2_byte_index_at_bcp(
 }
 
 void InterpreterMacroAssembler::get_dispatch() {
-  unsigned long offset;
+  uint64_t offset;
   adrp(rdispatch, ExternalAddress((address)Interpreter::dispatch_table()), offset);
   lea(rdispatch, Address(rdispatch, offset));
 }
@@ -654,14 +654,16 @@ void InterpreterMacroAssembler::remove_activation(
 
   // remove activation
   // get sender esp
-  ldr(esp,
+  ldr(rscratch2,
       Address(rfp, frame::interpreter_frame_sender_sp_offset * wordSize));
   if (StackReservedPages > 0) {
     // testing if reserved zone needs to be re-enabled
     Label no_reserved_zone_enabling;
 
+    // look for an overflow into the stack reserved zone, i.e.
+    // interpreter_frame_sender_sp <= JavaThread::reserved_stack_activation
     ldr(rscratch1, Address(rthread, JavaThread::reserved_stack_activation_offset()));
-    cmp(esp, rscratch1);
+    cmp(rscratch2, rscratch1);
     br(Assembler::LS, no_reserved_zone_enabling);
 
     call_VM_leaf(
@@ -672,6 +674,9 @@ void InterpreterMacroAssembler::remove_activation(
 
     bind(no_reserved_zone_enabling);
   }
+
+  // restore sender esp
+  mov(esp, rscratch2);
   // remove frame anchor
   leave();
   // If we're returning to interpreted code we will shortly be
@@ -754,7 +759,7 @@ void InterpreterMacroAssembler::lock_object(Register lock_reg)
     // copy
     mov(rscratch1, sp);
     sub(swap_reg, swap_reg, rscratch1);
-    ands(swap_reg, swap_reg, (unsigned long)(7 - os::vm_page_size()));
+    ands(swap_reg, swap_reg, (uint64_t)(7 - os::vm_page_size()));
 
     // Save the test result, for recursive case, the result is zero
     str(swap_reg, Address(lock_reg, mark_offset));

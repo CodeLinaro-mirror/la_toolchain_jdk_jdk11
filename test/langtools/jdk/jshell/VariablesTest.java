@@ -23,7 +23,7 @@
 
 /*
  * @test
- * @bug 8144903 8177466 8191842
+ * @bug 8144903 8177466 8191842 8211694 8213725 8239536
  * @summary Tests for EvaluationState.variables
  * @library /tools/lib
  * @modules jdk.compiler/com.sun.tools.javac.api
@@ -466,6 +466,78 @@ public class VariablesTest extends KullaTesting {
         assertVarDisplayName("var v6 = new Runnable() { public void run() { } };", "<anonymous class implementing Runnable>");
     }
 
+    public void varType() {
+        assertEval("import java.util.*;");
+        var firstVar = varKey(assertEval("var v1 = List.of(1);", added(VALID)));
+        assertEval("import list.List;", DiagCheck.DIAG_OK, DiagCheck.DIAG_ERROR, added(VALID),
+                                        ste(firstVar, VALID, RECOVERABLE_NOT_DEFINED, true, MAIN_SNIPPET));
+        assertEval("var v2 = java.util.List.of(1);", added(VALID));
+        assertEval("v2", "[1]");
+    }
+
+    public void varDeclNoInit() {
+        assertVarDeclNoInit("byte", "b",  "0");
+        assertVarDeclNoInit("short", "h",  "0");
+        assertVarDeclNoInit("int", "i",  "0");
+        assertVarDeclNoInit("long", "l",  "0");
+        assertVarDeclNoInit("float", "f",  "0.0");
+        assertVarDeclNoInit("double", "d",  "0.0");
+        assertVarDeclNoInit("boolean", "n",  "false");
+        assertVarDeclNoInit("char", "c",  "'\\000'");
+        assertVarDeclNoInit("Object", "o",  "null");
+        assertVarDeclNoInit("String", "s", "null");
+    }
+
+    public void varDeclRedefNoInit() {
+        assertVarDeclRedefNoInit("byte", "b", "1", "0");
+        assertVarDeclRedefNoInit("short", "h", "2", "0");
+        assertVarDeclRedefNoInit("int", "i", "3", "0");
+        assertVarDeclRedefNoInit("long", "l", "4L", IGNORE_VALUE, "0");
+        assertVarDeclRedefNoInit("float", "f", "3.14f", IGNORE_VALUE, "0.0");
+        assertVarDeclRedefNoInit("double", "d", "3.1415926", "0.0");
+        assertVarDeclRedefNoInit("boolean", "n", "true", "false");
+        assertVarDeclRedefNoInit("char", "c", "'x'", "'\\000'");
+        assertVarDeclRedefNoInit("Object", "o", "new Object()", IGNORE_VALUE, "null");
+        assertVarDeclRedefNoInit("String", "s", "\"hi\"", "null");
+    }
+
+    public void badPkgVarDecl() {
+        Compiler compiler = new Compiler();
+        Path nopkgdirpath = Paths.get("cp", "xyz");
+        compiler.compile(nopkgdirpath,
+                "public class TestZ { public static int V = 0; }\n");
+        assertDeclareFail("import static xyz.TestZ.V;",
+                        "compiler.err.cant.access");
+
+
+        VarSnippet v1 = varKey(assertEval("var v = xyz.TestZ.V;", IGNORE_VALUE, null,
+                DiagCheck.DIAG_ERROR, DiagCheck.DIAG_OK, added(RECOVERABLE_NOT_DEFINED)));
+        assertVariableDeclSnippet(v1, "v", "java.lang.Object", RECOVERABLE_NOT_DEFINED, SubKind.VAR_DECLARATION_WITH_INITIALIZER_SUBKIND, 0, 1);
+        assertEval("1+1", "2");
+    }
+
+    private void assertVarDeclRedefNoInit(String typeName, String name, String value, String dvalue) {
+        assertVarDeclRedefNoInit(typeName, name, value, value, dvalue);
+    }
+
+    private void assertVarDeclRedefNoInit(String typeName, String name, String value, String rvalue, String dvalue) {
+        VarSnippet vs = varKey(assertEval(typeName + " " + name + " = " + value + ";", rvalue));
+        assertVarDeclNoInit(typeName,  name, dvalue,
+                ste(vs, VALID, VALID, false, null),
+                ste(vs, VALID, OVERWRITTEN, false, MAIN_SNIPPET));
+    }
+
+    private VarSnippet assertVarDeclNoInit(String typeName, String name, String dvalue) {
+        return assertVarDeclNoInit(typeName, name, dvalue, added(VALID));
+    }
+
+    private VarSnippet assertVarDeclNoInit(String typeName, String name, String dvalue, STEInfo mainInfo, STEInfo... updates) {
+        VarSnippet vs = varKey(assertEval(typeName + " " + name + ";", dvalue, mainInfo, updates));
+        assertEquals(vs.typeName(), typeName);
+        assertEval(name, dvalue, added(VALID));
+        return vs;
+    }
+
     private void assertVarDisplayName(String var, String typeName) {
         assertEquals(varKey(assertEval(var)).typeName(), typeName);
     }
@@ -516,6 +588,10 @@ public class VariablesTest extends KullaTesting {
                 "\n" +
                 "public interface J<T> {\n" +
                 "   public List<T> get();\n" +
+                "}\n",
+                "package list;\n" +
+                "\n" +
+                "public class List {\n" +
                 "}\n");
         String tpath = compiler.getPath(path).toString();
         setUp(b -> b

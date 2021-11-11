@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -372,6 +372,8 @@ CompactibleFreeListSpace::CompactibleFreeListSpace(BlockOffsetSharedArray* bs, M
     )
   }
   _dictionary->set_par_lock(&_parDictionaryAllocLock);
+
+  _used_stable = 0;
 }
 
 // Like CompactibleSpace forward() but always calls cross_threshold() to
@@ -575,6 +577,14 @@ bool CompactibleFreeListSpace::is_free_block(const HeapWord* p) const {
 
 size_t CompactibleFreeListSpace::used() const {
   return capacity() - free();
+}
+
+size_t CompactibleFreeListSpace::used_stable() const {
+  return _used_stable;
+}
+
+void CompactibleFreeListSpace::recalculate_used_stable() {
+  _used_stable = used();
 }
 
 size_t CompactibleFreeListSpace::free() const {
@@ -1168,6 +1178,10 @@ size_t CompactibleFreeListSpace::block_size(const HeapWord* p) const {
         return res;
       }
     } else {
+      // The barrier is required to prevent reordering of the free chunk check
+      // and the klass read.
+      OrderAccess::loadload();
+
       // Ensure klass read before size.
       Klass* k = oop(p)->klass_or_null_acquire();
       if (k != NULL) {
@@ -1218,6 +1232,10 @@ const {
         return res;
       }
     } else {
+      // The barrier is required to prevent reordering of the free chunk check
+      // and the klass read.
+      OrderAccess::loadload();
+
       // Ensure klass read before size.
       Klass* k = oop(p)->klass_or_null_acquire();
       if (k != NULL) {
@@ -1261,6 +1279,11 @@ bool CompactibleFreeListSpace::block_is_obj(const HeapWord* p) const {
   FreeChunk* fc = (FreeChunk*)p;
   assert(is_in_reserved(p), "Should be in space");
   if (FreeChunk::indicatesFreeChunk(p)) return false;
+
+  // The barrier is required to prevent reordering of the free chunk check
+  // and the klass read.
+  OrderAccess::loadload();
+
   Klass* k = oop(p)->klass_or_null_acquire();
   if (k != NULL) {
     // Ignore mark word because it may have been used to
@@ -1372,6 +1395,13 @@ HeapWord* CompactibleFreeListSpace::allocate(size_t size) {
     _bt.verify_not_unallocated(res, size);
     // mangle a just allocated object with a distinct pattern.
     debug_only(fc->mangleAllocated(size));
+  }
+
+  // During GC we do not need to recalculate the stable used value for
+  // every allocation in old gen. It is done once at the end of GC instead
+  // for performance reasons.
+  if (!CMSHeap::heap()->is_gc_active()) {
+    recalculate_used_stable();
   }
 
   return res;

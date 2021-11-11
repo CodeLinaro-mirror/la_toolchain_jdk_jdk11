@@ -33,7 +33,7 @@
 #include "memory/resourceArea.hpp"
 #include "oops/oop.inline.hpp"
 #include "oops/fieldStreams.hpp"
-#include "runtime/fieldDescriptor.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/jniHandles.inline.hpp"
 
@@ -553,6 +553,14 @@ void ciInstanceKlass::compute_injected_fields() {
   assert(_has_injected_fields == -1 || _has_injected_fields == has_injected_fields, "broken concurrent initialization");
   _has_injected_fields = has_injected_fields;
 }
+
+#if INCLUDE_SHENANDOAHGC
+bool ciInstanceKlass::has_object_fields() const {
+  GUARDED_VM_ENTRY(
+      return get_instanceKlass()->nonstatic_oop_map_size() > 0;
+    );
+}
+#endif
 
 // ------------------------------------------------------------------
 // ciInstanceKlass::find_method

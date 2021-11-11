@@ -54,6 +54,7 @@ import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 import jdk.internal.misc.Unsafe;
 import java.util.Scanner;
+import jtreg.SkippedException;
 
 class CrashApp {
     public static void main(String[] args) {
@@ -105,24 +106,32 @@ public class ClhsdbCDSCore {
             if (coreFileLocation == null) {
                 if (Platform.isOSX()) {
                     File coresDir = new File("/cores");
-                    if (!coresDir.isDirectory() || !coresDir.canWrite()) {
-                        throw new Error("cores is not a directory or does not have write permissions");
+                    if (!coresDir.isDirectory()) {
+                        cleanup();
+                        throw new Error(coresDir + " is not a directory");
+                    }
+                    // the /cores directory is usually not writable on macOS 10.15
+                    if (!coresDir.canWrite()) {
+                        cleanup();
+                        throw new SkippedException("Directory \"" + coresDir +
+                            "\" is not writable");
                     }
                 } else if (Platform.isLinux()) {
                     // Check if a crash report tool is installed.
                     File corePatternFile = new File(CORE_PATTERN_FILE_NAME);
-                    Scanner scanner = new Scanner(corePatternFile);
-                    while (scanner.hasNextLine()) {
-                        String line = scanner.nextLine();
-                        line = line.trim();
-                        System.out.println(line);
-                        if (line.startsWith("|")) {
-                            System.out.println(
-                                "\nThis system uses a crash report tool ($cat /proc/sys/kernel/core_pattern).\n" +
-                                "Core files might not be generated. Please reset /proc/sys/kernel/core_pattern\n" +
-                                "to enable core generation. Skipping this test.");
-                            cleanup();
-                            return;
+                    try (Scanner scanner = new Scanner(corePatternFile)) {
+                        while (scanner.hasNextLine()) {
+                            String line = scanner.nextLine();
+                            line = line.trim();
+                            System.out.println(line);
+                            if (line.startsWith("|")) {
+                                System.out.println(
+                                    "\nThis system uses a crash report tool ($cat /proc/sys/kernel/core_pattern).\n" +
+                                    "Core files might not be generated. Please reset /proc/sys/kernel/core_pattern\n" +
+                                    "to enable core generation. Skipping this test.");
+                                cleanup();
+                                throw new SkippedException("This system uses a crash report tool");
+                            }
                         }
                     }
                 }
@@ -145,16 +154,14 @@ public class ClhsdbCDSCore {
 
             if (useSharedSpacesOutput == null) {
                 // Output could be null due to attach permission issues.
-                System.out.println("Could not determine the UseSharedSpaces value - test skipped.");
                 cleanup();
-                return;
+                throw new SkippedException("Could not determine the UseSharedSpaces value");
             }
 
             if (!useSharedSpacesOutput.contains("true")) {
                 // CDS archive is not mapped. Skip the rest of the test.
-                System.out.println("The CDS archive is not mapped - test skipped.");
                 cleanup();
-                return;
+                throw new SkippedException("The CDS archive is not mapped");
             }
 
             cmds = List.of("printmdo -a", "printall", "jstack -v");
@@ -189,6 +196,8 @@ public class ClhsdbCDSCore {
             unExpStrMap.put("jstack -v", List.of(
                 "sun.jvm.hotspot.debugger.UnmappedAddressException"));
             test.runOnCore(TEST_CDS_CORE_FILE_NAME, cmds, expStrMap, unExpStrMap);
+        } catch (SkippedException e) {
+            throw e;
         } catch (Exception ex) {
             throw new RuntimeException("Test ERROR " + ex, ex);
         }
@@ -206,6 +215,7 @@ public class ClhsdbCDSCore {
             .get();
         stringWithLocation = stringWithLocation.substring(stringWithLocation
             .indexOf(LOCATIONS_STRING) + LOCATIONS_STRING.length());
+        System.out.println("getCoreFileLocation found stringWithLocation = " + stringWithLocation);
         String coreWithPid;
         if (stringWithLocation.contains("or ")) {
             Matcher m = Pattern.compile("or.* ([^ ]+[^\\)])\\)?").matcher(stringWithLocation);

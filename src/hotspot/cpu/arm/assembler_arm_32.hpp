@@ -953,8 +953,8 @@ class Assembler : public AbstractAssembler  {
 
   F(fldmia, 1, 1)    F(fldmfd, 1, 1)
   F(fldmdb, 1, 2)    F(fldmea, 1, 2)
-  F(fstmia, 0, 1)    F(fstmfd, 0, 1)
-  F(fstmdb, 0, 2)    F(fstmea, 0, 2)
+  F(fstmia, 0, 1)    F(fstmea, 0, 1)
+  F(fstmdb, 0, 2)    F(fstmfd, 0, 2)
 #undef F
 
   // fconst{s,d} encoding:
@@ -1083,6 +1083,7 @@ class Assembler : public AbstractAssembler  {
       break;
     default:
       ShouldNotReachHere();
+      return;
     }
     emit_int32(0xf << 28 | 0x1 << 25 | 0x1 << 23 | 0x1 << 4 |
               (imm8 >> 7) << 24 | ((imm8 & 0x70) >> 4) << 16 | (imm8 & 0xf) |
@@ -1113,6 +1114,7 @@ class Assembler : public AbstractAssembler  {
       break;
     default:
       ShouldNotReachHere();
+      return;
     }
     emit_int32(cond << 28 | 0x1D /* 0b11101 */ << 23 | 0xB /* 0b1011 */ << 8 | 0x1 << 4 |
               quad << 21 | b << 22 |  e << 5 | Rs->encoding() << 12 |
@@ -1143,6 +1145,7 @@ class Assembler : public AbstractAssembler  {
       break;
     default:
       ShouldNotReachHere();
+      return;
     }
     emit_int32(0xF /* 0b1111 */ << 28 | 0x3B /* 0b00111011 */ << 20 | 0x6 /* 0b110 */ << 9 |
                quad << 6 | imm4 << 16 |

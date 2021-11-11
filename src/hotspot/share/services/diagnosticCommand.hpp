@@ -331,6 +331,7 @@ class HeapDumpDCmd : public DCmdWithParser {
 protected:
   DCmdArgument<char*> _filename;
   DCmdArgument<bool>  _all;
+  DCmdArgument<bool> _overwrite;
 public:
   HeapDumpDCmd(outputStream* output, bool heap);
   static const char* name() {
@@ -646,7 +647,7 @@ public:
 class CodeHeapAnalyticsDCmd : public DCmdWithParser {
 protected:
   DCmdArgument<char*> _function;
-  DCmdArgument<char*> _granularity;
+  DCmdArgument<jlong> _granularity;
 public:
   CodeHeapAnalyticsDCmd(outputStream* output, bool heap);
   static const char* name() {
@@ -881,7 +882,7 @@ public:
     return "High: Switches the VM into Java debug mode.";
   }
   static const JavaPermission permission() {
-    JavaPermission p = { "java.lang.management.ManagementPermission", "monitor", NULL };
+    JavaPermission p = { "java.lang.management.ManagementPermission", "control", NULL };
     return p;
   }
   static int num_arguments() { return 0; }

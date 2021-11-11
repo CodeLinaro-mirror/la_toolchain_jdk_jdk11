@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -47,6 +47,7 @@ import java.util.regex.Pattern;
 import sun.net.dns.ResolverConfiguration;
 import sun.security.krb5.internal.crypto.EType;
 import sun.security.krb5.internal.Krb5;
+import sun.security.util.SecurityProperties;
 
 /**
  * This class maintains key-value pairs of Kerberos configurable constants
@@ -54,6 +55,41 @@ import sun.security.krb5.internal.Krb5;
  */
 
 public class Config {
+
+    /**
+     * {@systemProperty sun.security.krb5.disableReferrals} property
+     * indicating whether or not cross-realm referrals (RFC 6806) are
+     * enabled.
+     */
+    public static final boolean DISABLE_REFERRALS;
+
+    /**
+     * {@systemProperty sun.security.krb5.maxReferrals} property
+     * indicating the maximum number of cross-realm referral
+     * hops allowed.
+     */
+    public static final int MAX_REFERRALS;
+
+    static {
+        String disableReferralsProp =
+                SecurityProperties.privilegedGetOverridable(
+                        "sun.security.krb5.disableReferrals");
+        if (disableReferralsProp != null) {
+            DISABLE_REFERRALS = "true".equalsIgnoreCase(disableReferralsProp);
+        } else {
+            DISABLE_REFERRALS = false;
+        }
+
+        int maxReferralsValue = 5;
+        String maxReferralsProp =
+                SecurityProperties.privilegedGetOverridable(
+                        "sun.security.krb5.maxReferrals");
+        try {
+            maxReferralsValue = Integer.parseInt(maxReferralsProp);
+        } catch (NumberFormatException e) {
+        }
+        MAX_REFERRALS = maxReferralsValue;
+    }
 
     /*
      * Only allow a single instance of Config.
@@ -117,6 +153,7 @@ public class Config {
         KdcComm.initStatic();
         EType.initStatic();
         Checksum.initStatic();
+        KrbAsReqBuilder.ReferralsState.initStatic();
     }
 
 
@@ -129,17 +166,16 @@ public class Config {
 
         String osVersion = getProperty("os.version");
         String[] fragments = osVersion.split("\\.");
-
-        // sanity check the "10." part of the version
-        if (!fragments[0].equals("10")) return false;
         if (fragments.length < 2) return false;
 
-        // check if Mac OS X 10.7(.y)
+        // check if Mac OS X 10.7(.y) or higher
         try {
+            int majorVers = Integer.parseInt(fragments[0]);
             int minorVers = Integer.parseInt(fragments[1]);
-            if (minorVers >= 7) return true;
+            if (majorVers > 10) return true;
+            if (majorVers == 10 && minorVers >= 7) return true;
         } catch (NumberFormatException e) {
-            // was not an integer
+            // were not integers
         }
 
         return false;

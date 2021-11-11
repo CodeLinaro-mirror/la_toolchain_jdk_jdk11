@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, 2015, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,6 +26,7 @@
 #include "precompiled.hpp"
 #include "asm/macroAssembler.hpp"
 #include "asm/macroAssembler.inline.hpp"
+#include "atomic_aarch64.hpp"
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
 #include "interpreter/interpreter.hpp"
@@ -35,6 +36,7 @@
 #include "oops/objArrayKlass.hpp"
 #include "oops/oop.inline.hpp"
 #include "prims/methodHandles.hpp"
+#include "runtime/atomic.hpp"
 #include "runtime/frame.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -44,10 +46,6 @@
 #include "utilities/align.hpp"
 #ifdef COMPILER2
 #include "opto/runtime.hpp"
-#endif
-
-#ifdef BUILTIN_SIM
-#include "../../../../../../simulator/simulator.hpp"
 #endif
 
 // Declaration and definition of StubGenerator (no .hpp file).
@@ -217,16 +215,8 @@ class StubGenerator: public StubCodeGenerator {
 
     // stub code
 
-    // we need a C prolog to bootstrap the x86 caller into the sim
-    __ c_stub_prolog(8, 0, MacroAssembler::ret_type_void);
-
     address aarch64_entry = __ pc();
 
-#ifdef BUILTIN_SIM
-    // Save sender's SP for stack traces.
-    __ mov(rscratch1, sp);
-    __ str(rscratch1, Address(__ pre(sp, -2 * wordSize)));
-#endif
     // set up frame and move sp to end of save area
     __ enter();
     __ sub(sp, rfp, -sp_after_call_off * wordSize);
@@ -297,8 +287,6 @@ class StubGenerator: public StubCodeGenerator {
     __ mov(r13, sp);
     __ blr(c_rarg4);
 
-    // tell the simulator we have returned to the stub
-
     // we do this here because the notify will already have been done
     // if we get to the next instruction via an exception
     //
@@ -308,9 +296,6 @@ class StubGenerator: public StubCodeGenerator {
     // pc against the address saved below. so we may need to allow for
     // this extra instruction in the check.
 
-    if (NotifySimulator) {
-      __ notify(Assembler::method_reentry);
-    }
     // save current address for use by exception handling code
 
     return_address = __ pc();
@@ -373,12 +358,6 @@ class StubGenerator: public StubCodeGenerator {
     __ ldp(c_rarg4, c_rarg5,  entry_point);
     __ ldp(c_rarg6, c_rarg7,  parameter_size);
 
-#ifndef PRODUCT
-    // tell the simulator we are about to end Java execution
-    if (NotifySimulator) {
-      __ notify(Assembler::method_exit);
-    }
-#endif
     // leave frame and return to caller
     __ leave();
     __ ret(lr);
@@ -411,13 +390,6 @@ class StubGenerator: public StubCodeGenerator {
   // rsp.
   //
   // r0: exception oop
-
-  // NOTE: this is used as a target from the signal handler so it
-  // needs an x86 prolog which returns into the current simulator
-  // executing the generated catch_exception code. so the prolog
-  // needs to install rax in a sim register and adjust the sim's
-  // restart pc to enter the generated code at the start position
-  // then return from native to simulated execution.
 
   address generate_catch_exception() {
     StubCodeMark mark(this, "StubRoutines", "catch_exception");
@@ -613,7 +585,7 @@ class StubGenerator: public StubCodeGenerator {
 #endif
     BLOCK_COMMENT("call MacroAssembler::debug");
     __ mov(rscratch1, CAST_FROM_FN_PTR(address, MacroAssembler::debug64));
-    __ blrt(rscratch1, 3, 0, 1);
+    __ blr(rscratch1);
 
     return start;
   }
@@ -711,7 +683,6 @@ class StubGenerator: public StubCodeGenerator {
     int unit = wordSize * direction;
     int bias = (UseSIMDForMemoryOps ? 4:2) * wordSize;
 
-    int offset;
     const Register t0 = r3, t1 = r4, t2 = r5, t3 = r6,
       t4 = r7, t5 = r10, t6 = r11, t7 = r12;
     const Register stride = r13;
@@ -725,8 +696,11 @@ class StubGenerator: public StubCodeGenerator {
       stub_name = "forward_copy_longs";
     else
       stub_name = "backward_copy_longs";
-    StubCodeMark mark(this, "StubRoutines", stub_name);
+
     __ align(CodeEntryAlignment);
+
+    StubCodeMark mark(this, "StubRoutines", stub_name);
+
     __ bind(start);
 
     Label unaligned_copy_long;
@@ -1091,10 +1065,10 @@ class StubGenerator: public StubCodeGenerator {
                    Register count, Register tmp, int step) {
     copy_direction direction = step < 0 ? copy_backwards : copy_forwards;
     bool is_backwards = step < 0;
-    int granularity = uabs(step);
+    unsigned int granularity = uabs(step);
     const Register t0 = r3, t1 = r4;
 
-    // <= 96 bytes do inline. Direction doesn't matter because we always
+    // <= 80 (or 96 for SIMD) bytes do inline. Direction doesn't matter because we always
     // load all the data before writing anything
     Label copy4, copy8, copy16, copy32, copy80, copy128, copy_big, finish;
     const Register t2 = r5, t3 = r6, t4 = r7, t5 = r8;
@@ -1149,9 +1123,32 @@ class StubGenerator: public StubCodeGenerator {
     // (96 bytes if SIMD because we do 32 byes per instruction)
     __ bind(copy80);
     if (UseSIMDForMemoryOps) {
-      __ ld4(v0, v1, v2, v3, __ T16B, Address(s, 0));
+      __ ldpq(v0, v1, Address(s, 0));
+      __ ldpq(v2, v3, Address(s, 32));
+      // Unaligned pointers can be an issue for copying.
+      // The issue has more chances to happen when granularity of data is
+      // less than 4(sizeof(jint)). Pointers for arrays of jint are at least
+      // 4 byte aligned. Pointers for arrays of jlong are 8 byte aligned.
+      // The most performance drop has been seen for the range 65-80 bytes.
+      // For such cases using the pair of ldp/stp instead of the third pair of
+      // ldpq/stpq fixes the performance issue.
+      if (granularity < sizeof (jint)) {
+        Label copy96;
+        __ cmp(count, u1(80/granularity));
+        __ br(Assembler::HI, copy96);
+        __ ldp(t0, t1, Address(send, -16));
+
+        __ stpq(v0, v1, Address(d, 0));
+        __ stpq(v2, v3, Address(d, 32));
+        __ stp(t0, t1, Address(dend, -16));
+        __ b(finish);
+
+        __ bind(copy96);
+      }
       __ ldpq(v4, v5, Address(send, -32));
-      __ st4(v0, v1, v2, v3, __ T16B, Address(d, 0));
+
+      __ stpq(v0, v1, Address(d, 0));
+      __ stpq(v2, v3, Address(d, 32));
       __ stpq(v4, v5, Address(dend, -32));
     } else {
       __ ldp(t0, t1, Address(s, 0));
@@ -1309,10 +1306,10 @@ class StubGenerator: public StubCodeGenerator {
       __ ldr(temp, Address(a, rscratch2, Address::lsl(exact_log2(size))));
       __ verify_oop(temp);
     } else {
-      __ ldrw(r16, Address(a, rscratch2, Address::lsl(exact_log2(size))));
+      __ ldrw(temp, Address(a, rscratch2, Address::lsl(exact_log2(size))));
       __ decode_heap_oop(temp); // calls verify_oop
     }
-    __ add(rscratch2, rscratch2, size);
+    __ add(rscratch2, rscratch2, 1);
     __ b(loop);
     __ bind(end);
   }
@@ -1330,7 +1327,7 @@ class StubGenerator: public StubCodeGenerator {
   //
   // If 'from' and/or 'to' are aligned on 4-byte boundaries, we let
   // the hardware handle it.  The two dwords within qwords that span
-  // cache line boundaries will still be loaded and stored atomicly.
+  // cache line boundaries will still be loaded and stored atomically.
   //
   // Side Effects:
   //   disjoint_int_copy_entry is set to the no-overlap entry point
@@ -1360,7 +1357,7 @@ class StubGenerator: public StubCodeGenerator {
     }
 
     BarrierSetAssembler *bs = BarrierSet::barrier_set()->barrier_set_assembler();
-    bs->arraycopy_prologue(_masm, decorators, is_oop, d, count, saved_reg);
+    bs->arraycopy_prologue(_masm, decorators, is_oop, s, d, count, saved_reg);
 
     if (is_oop) {
       // save regs before copy_memory
@@ -1372,8 +1369,6 @@ class StubGenerator: public StubCodeGenerator {
       __ pop(RegSet::of(d, count), sp);
       if (VerifyOops)
         verify_oop_array(size, d, count, r16);
-      __ sub(count, count, 1); // make an inclusive end pointer
-      __ lea(count, Address(d, count, Address::lsl(exact_log2(size))));
     }
 
     bs->arraycopy_epilogue(_masm, decorators, is_oop, d, count, rscratch1, RegSet());
@@ -1381,12 +1376,6 @@ class StubGenerator: public StubCodeGenerator {
     __ leave();
     __ mov(r0, zr); // return 0
     __ ret(lr);
-#ifdef BUILTIN_SIM
-    {
-      AArch64Simulator *sim = AArch64Simulator::get_current(UseSimulatorCache, DisableBCCheck);
-      sim->notifyCompile(const_cast<char*>(name), start);
-    }
-#endif
     return start;
   }
 
@@ -1403,7 +1392,7 @@ class StubGenerator: public StubCodeGenerator {
   //
   // If 'from' and/or 'to' are aligned on 4-byte boundaries, we let
   // the hardware handle it.  The two dwords within qwords that span
-  // cache line boundaries will still be loaded and stored atomicly.
+  // cache line boundaries will still be loaded and stored atomically.
   //
   address generate_conjoint_copy(size_t size, bool aligned, bool is_oop, address nooverlap_target,
                                  address *entry, const char *name,
@@ -1434,7 +1423,7 @@ class StubGenerator: public StubCodeGenerator {
     }
 
     BarrierSetAssembler *bs = BarrierSet::barrier_set()->barrier_set_assembler();
-    bs->arraycopy_prologue(_masm, decorators, is_oop, d, count, saved_regs);
+    bs->arraycopy_prologue(_masm, decorators, is_oop, s, d, count, saved_regs);
 
     if (is_oop) {
       // save regs before copy_memory
@@ -1445,19 +1434,11 @@ class StubGenerator: public StubCodeGenerator {
       __ pop(RegSet::of(d, count), sp);
       if (VerifyOops)
         verify_oop_array(size, d, count, r16);
-      __ sub(count, count, 1); // make an inclusive end pointer
-      __ lea(count, Address(d, count, Address::lsl(exact_log2(size))));
     }
     bs->arraycopy_epilogue(_masm, decorators, is_oop, d, count, rscratch1, RegSet());
     __ leave();
     __ mov(r0, zr); // return 0
     __ ret(lr);
-#ifdef BUILTIN_SIM
-    {
-      AArch64Simulator *sim = AArch64Simulator::get_current(UseSimulatorCache, DisableBCCheck);
-      sim->notifyCompile(const_cast<char*>(name), start);
-    }
-#endif
     return start;
 }
 
@@ -1571,7 +1552,7 @@ class StubGenerator: public StubCodeGenerator {
   //
   // If 'from' and/or 'to' are aligned on 4-byte boundaries, we let
   // the hardware handle it.  The two dwords within qwords that span
-  // cache line boundaries will still be loaded and stored atomicly.
+  // cache line boundaries will still be loaded and stored atomically.
   //
   // Side Effects:
   //   disjoint_int_copy_entry is set to the no-overlap entry point
@@ -1595,7 +1576,7 @@ class StubGenerator: public StubCodeGenerator {
   //
   // If 'from' and/or 'to' are aligned on 4-byte boundaries, we let
   // the hardware handle it.  The two dwords within qwords that span
-  // cache line boundaries will still be loaded and stored atomicly.
+  // cache line boundaries will still be loaded and stored atomically.
   //
   address generate_conjoint_int_copy(bool aligned, address nooverlap_target,
                                      address *entry, const char *name,
@@ -1789,14 +1770,14 @@ class StubGenerator: public StubCodeGenerator {
     }
 #endif //ASSERT
 
-    DecoratorSet decorators = IN_HEAP | IS_ARRAY | ARRAYCOPY_CHECKCAST;
+    DecoratorSet decorators = IN_HEAP | IS_ARRAY | ARRAYCOPY_CHECKCAST | ARRAYCOPY_DISJOINT;
     bool is_oop = true;
     if (dest_uninitialized) {
       decorators |= IS_DEST_UNINITIALIZED;
     }
 
     BarrierSetAssembler *bs = BarrierSet::barrier_set()->barrier_set_assembler();
-    bs->arraycopy_prologue(_masm, decorators, is_oop, to, count, wb_pre_saved_regs);
+    bs->arraycopy_prologue(_masm, decorators, is_oop, from, to, count, wb_pre_saved_regs);
 
     // save the original count
     __ mov(count_save, count);
@@ -1839,8 +1820,7 @@ class StubGenerator: public StubCodeGenerator {
     __ br(Assembler::EQ, L_done_pop);
 
     __ BIND(L_do_card_marks);
-    __ add(to, to, -heapOopSize);         // make an inclusive end pointer
-    bs->arraycopy_epilogue(_masm, decorators, is_oop, start_to, to, rscratch1, wb_post_saved_regs);
+    bs->arraycopy_epilogue(_masm, decorators, is_oop, start_to, count_save, rscratch1, wb_post_saved_regs);
 
     __ bind(L_done_pop);
     __ pop(RegSet::of(r18, r19, r20, r21), sp);
@@ -1976,13 +1956,13 @@ class StubGenerator: public StubCodeGenerator {
     const Register dst_pos    = c_rarg3;  // destination position
     const Register length     = c_rarg4;
 
-    StubCodeMark mark(this, "StubRoutines", name);
+    __ align(CodeEntryAlignment);
 
+    StubCodeMark mark(this, "StubRoutines", name);
 
     // Registers used as temps
     const Register dst_klass  = c_rarg5;
 
-    __ align(CodeEntryAlignment);
     address start = __ pc();
 
     __ enter(); // required for proper stackwalking of RuntimeStub frame
@@ -3105,7 +3085,6 @@ class StubGenerator: public StubCodeGenerator {
     return start;
   }
 
-#ifndef BUILTIN_SIM
   // Safefetch stubs.
   void generate_safefetch(const char* name, int size, address* entry,
                           address* fault_pc, address* continuation_pc) {
@@ -3145,7 +3124,6 @@ class StubGenerator: public StubCodeGenerator {
     __ mov(r0, c_rarg1);
     __ ret(lr);
   }
-#endif
 
   /**
    *  Arguments:
@@ -3253,19 +3231,26 @@ class StubGenerator: public StubCodeGenerator {
     Register buff   = c_rarg1;
     Register len    = c_rarg2;
     Register nmax  = r4;
-    Register base = r5;
+    Register base  = r5;
     Register count = r6;
     Register temp0 = rscratch1;
     Register temp1 = rscratch2;
-    Register temp2 = r7;
+    FloatRegister vbytes = v0;
+    FloatRegister vs1acc = v1;
+    FloatRegister vs2acc = v2;
+    FloatRegister vtable = v3;
 
     // Max number of bytes we can process before having to take the mod
     // 0x15B0 is 5552 in decimal, the largest n such that 255n(n+1)/2 + (n+1)(BASE-1) <= 2^32-1
-    unsigned long BASE = 0xfff1;
-    unsigned long NMAX = 0x15B0;
+    uint64_t BASE = 0xfff1;
+    uint64_t NMAX = 0x15B0;
 
     __ mov(base, BASE);
     __ mov(nmax, NMAX);
+
+    // Load accumulation coefficients for the upper 16 bits
+    __ lea(temp0, ExternalAddress((address) StubRoutines::aarch64::_adler_table));
+    __ ld1(vtable, __ T16B, Address(temp0));
 
     // s1 is initialized to the lower 16 bits of adler
     // s2 is initialized to the upper 16 bits of adler
@@ -3307,53 +3292,8 @@ class StubGenerator: public StubCodeGenerator {
 
     __ bind(L_nmax_loop);
 
-    __ ldp(temp0, temp1, Address(__ post(buff, 16)));
-
-    __ add(s1, s1, temp0, ext::uxtb);
-    __ ubfx(temp2, temp0, 8, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 16, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 24, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 32, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 40, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 48, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp0, Assembler::LSR, 56);
-    __ add(s2, s2, s1);
-
-    __ add(s1, s1, temp1, ext::uxtb);
-    __ ubfx(temp2, temp1, 8, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 16, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 24, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 32, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 40, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 48, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp1, Assembler::LSR, 56);
-    __ add(s2, s2, s1);
+    generate_updateBytesAdler32_accum(s1, s2, buff, temp0, temp1,
+                                      vbytes, vs1acc, vs2acc, vtable);
 
     __ subs(count, count, 16);
     __ br(Assembler::HS, L_nmax_loop);
@@ -3396,53 +3336,8 @@ class StubGenerator: public StubCodeGenerator {
 
     __ bind(L_by16_loop);
 
-    __ ldp(temp0, temp1, Address(__ post(buff, 16)));
-
-    __ add(s1, s1, temp0, ext::uxtb);
-    __ ubfx(temp2, temp0, 8, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 16, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 24, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 32, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 40, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp0, 48, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp0, Assembler::LSR, 56);
-    __ add(s2, s2, s1);
-
-    __ add(s1, s1, temp1, ext::uxtb);
-    __ ubfx(temp2, temp1, 8, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 16, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 24, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 32, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 40, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ ubfx(temp2, temp1, 48, 8);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp2);
-    __ add(s2, s2, s1);
-    __ add(s1, s1, temp1, Assembler::LSR, 56);
-    __ add(s2, s2, s1);
+    generate_updateBytesAdler32_accum(s1, s2, buff, temp0, temp1,
+                                      vbytes, vs1acc, vs2acc, vtable);
 
     __ subs(len, len, 16);
     __ br(Assembler::HS, L_by16_loop);
@@ -3494,6 +3389,43 @@ class StubGenerator: public StubCodeGenerator {
     __ ret(lr);
 
     return start;
+  }
+
+  void generate_updateBytesAdler32_accum(Register s1, Register s2, Register buff,
+          Register temp0, Register temp1, FloatRegister vbytes,
+          FloatRegister vs1acc, FloatRegister vs2acc, FloatRegister vtable) {
+    // Below is a vectorized implementation of updating s1 and s2 for 16 bytes.
+    // We use b1, b2, ..., b16 to denote the 16 bytes loaded in each iteration.
+    // In non-vectorized code, we update s1 and s2 as:
+    //   s1 <- s1 + b1
+    //   s2 <- s2 + s1
+    //   s1 <- s1 + b2
+    //   s2 <- s2 + b1
+    //   ...
+    //   s1 <- s1 + b16
+    //   s2 <- s2 + s1
+    // Putting above assignments together, we have:
+    //   s1_new = s1 + b1 + b2 + ... + b16
+    //   s2_new = s2 + (s1 + b1) + (s1 + b1 + b2) + ... + (s1 + b1 + b2 + ... + b16)
+    //          = s2 + s1 * 16 + (b1 * 16 + b2 * 15 + ... + b16 * 1)
+    //          = s2 + s1 * 16 + (b1, b2, ... b16) dot (16, 15, ... 1)
+    __ ld1(vbytes, __ T16B, Address(__ post(buff, 16)));
+
+    // s2 = s2 + s1 * 16
+    __ add(s2, s2, s1, Assembler::LSL, 4);
+
+    // vs1acc = b1 + b2 + b3 + ... + b16
+    // vs2acc = (b1 * 16) + (b2 * 15) + (b3 * 14) + ... + (b16 * 1)
+    __ umullv(vs2acc, __ T8B, vtable, vbytes);
+    __ umlalv(vs2acc, __ T16B, vtable, vbytes);
+    __ uaddlv(vs1acc, __ T16B, vbytes);
+    __ uaddlv(vs2acc, __ T8H, vs2acc);
+
+    // s1 = s1 + vs1acc, s2 = s2 + vs2acc
+    __ fmovd(temp0, vs1acc);
+    __ fmovd(temp1, vs2acc);
+    __ add(s1, s1, temp0);
+    __ add(s2, s2, temp1);
   }
 
   /**
@@ -3657,7 +3589,6 @@ class StubGenerator: public StubCodeGenerator {
   }
 
   address generate_has_negatives(address &has_negatives_long) {
-    StubCodeMark mark(this, "StubRoutines", "has_negatives");
     const int large_loop_size = 64;
     const uint64_t UPPER_BIT_MASK=0x8080808080808080;
     int dcache_line = VM_Version::dcache_line_size();
@@ -3665,6 +3596,9 @@ class StubGenerator: public StubCodeGenerator {
     Register ary1 = r1, len = r2, result = r0;
 
     __ align(CodeEntryAlignment);
+
+    StubCodeMark mark(this, "StubRoutines", "has_negatives");
+
     address entry = __ pc();
 
     __ enter();
@@ -3904,7 +3838,6 @@ class StubGenerator: public StubCodeGenerator {
   // cnt1 = r10 - amount of elements left to check, reduced by wordSize
   // r3-r5 are reserved temporary registers
   address generate_large_array_equals() {
-    StubCodeMark mark(this, "StubRoutines", "large_array_equals");
     Register a1 = r1, a2 = r2, result = r0, cnt1 = r10, tmp1 = rscratch1,
         tmp2 = rscratch2, tmp3 = r3, tmp4 = r4, tmp5 = r5, tmp6 = r11,
         tmp7 = r12, tmp8 = r13;
@@ -3919,6 +3852,9 @@ class StubGenerator: public StubCodeGenerator {
         tmp5, tmp6, tmp7, tmp8);
 
     __ align(CodeEntryAlignment);
+
+    StubCodeMark mark(this, "StubRoutines", "large_array_equals");
+
     address entry = __ pc();
     __ enter();
     __ sub(cnt1, cnt1, wordSize);  // first 8 bytes were loaded outside of stub
@@ -4077,14 +4013,14 @@ class StubGenerator: public StubCodeGenerator {
         : "compare_long_string_different_encoding UL");
     address entry = __ pc();
     Label SMALL_LOOP, TAIL, TAIL_LOAD_16, LOAD_LAST, DIFF1, DIFF2,
-        DONE, CALCULATE_DIFFERENCE, LARGE_LOOP_PREFETCH, SMALL_LOOP_ENTER,
+        DONE, CALCULATE_DIFFERENCE, LARGE_LOOP_PREFETCH, NO_PREFETCH,
         LARGE_LOOP_PREFETCH_REPEAT1, LARGE_LOOP_PREFETCH_REPEAT2;
     Register result = r0, str1 = r1, cnt1 = r2, str2 = r3, cnt2 = r4,
         tmp1 = r10, tmp2 = r11, tmp3 = r12, tmp4 = r14;
     FloatRegister vtmpZ = v0, vtmp = v1, vtmp3 = v2;
     RegSet spilled_regs = RegSet::of(tmp3, tmp4);
 
-    int prefetchLoopExitCondition = MAX(32, SoftwarePrefetchHintDistance/2);
+    int prefetchLoopExitCondition = MAX2(64, SoftwarePrefetchHintDistance/2);
 
     __ eor(vtmpZ, __ T16B, vtmpZ, vtmpZ);
     // cnt2 == amount of characters left to compare
@@ -4111,7 +4047,7 @@ class StubGenerator: public StubCodeGenerator {
 
     if (SoftwarePrefetchHintDistance >= 0) {
       __ cmp(cnt2, prefetchLoopExitCondition);
-      __ br(__ LT, SMALL_LOOP);
+      __ br(__ LT, NO_PREFETCH);
       __ bind(LARGE_LOOP_PREFETCH);
         __ prfm(Address(tmp2, SoftwarePrefetchHintDistance));
         __ mov(tmp4, 2);
@@ -4131,51 +4067,20 @@ class StubGenerator: public StubCodeGenerator {
           __ br(__ GE, LARGE_LOOP_PREFETCH);
     }
     __ cbz(cnt2, LOAD_LAST); // no characters left except last load
+    __ bind(NO_PREFETCH);
     __ subs(cnt2, cnt2, 16);
     __ br(__ LT, TAIL);
-    __ b(SMALL_LOOP_ENTER);
     __ bind(SMALL_LOOP); // smaller loop
       __ subs(cnt2, cnt2, 16);
-    __ bind(SMALL_LOOP_ENTER);
       compare_string_16_x_LU(tmpL, tmpU, DIFF1, DIFF2);
       __ br(__ GE, SMALL_LOOP);
-      __ cbz(cnt2, LOAD_LAST);
-    __ bind(TAIL); // 1..15 characters left
-      __ cmp(cnt2, -8);
-      __ br(__ GT, TAIL_LOAD_16);
-      __ ldrd(vtmp, Address(tmp2));
-      __ zip1(vtmp3, __ T8B, vtmp, vtmpZ);
-
-      __ ldr(tmpU, Address(__ post(cnt1, 8)));
-      __ fmovd(tmpL, vtmp3);
-      __ eor(rscratch2, tmp3, tmpL);
-      __ cbnz(rscratch2, DIFF2);
-      __ umov(tmpL, vtmp3, __ D, 1);
-      __ eor(rscratch2, tmpU, tmpL);
-      __ cbnz(rscratch2, DIFF1);
-      __ b(LOAD_LAST);
-    __ bind(TAIL_LOAD_16);
-      __ ldrq(vtmp, Address(tmp2));
-      __ ldr(tmpU, Address(__ post(cnt1, 8)));
-      __ zip1(vtmp3, __ T16B, vtmp, vtmpZ);
-      __ zip2(vtmp, __ T16B, vtmp, vtmpZ);
-      __ fmovd(tmpL, vtmp3);
-      __ eor(rscratch2, tmp3, tmpL);
-      __ cbnz(rscratch2, DIFF2);
-
-      __ ldr(tmp3, Address(__ post(cnt1, 8)));
-      __ umov(tmpL, vtmp3, __ D, 1);
-      __ eor(rscratch2, tmpU, tmpL);
-      __ cbnz(rscratch2, DIFF1);
-
-      __ ldr(tmpU, Address(__ post(cnt1, 8)));
-      __ fmovd(tmpL, vtmp);
-      __ eor(rscratch2, tmp3, tmpL);
-      __ cbnz(rscratch2, DIFF2);
-
-      __ umov(tmpL, vtmp, __ D, 1);
-      __ eor(rscratch2, tmpU, tmpL);
-      __ cbnz(rscratch2, DIFF1);
+      __ cmn(cnt2, (u1)16);
+      __ br(__ EQ, LOAD_LAST);
+    __ bind(TAIL); // 1..15 characters left until last load (last 4 characters)
+      __ add(cnt1, cnt1, cnt2, __ LSL, 1); // Address of 8 bytes before last 4 characters in UTF-16 string
+      __ add(tmp2, tmp2, cnt2); // Address of 16 bytes before last 4 characters in Latin1 string
+      __ ldr(tmp3, Address(cnt1, -8));
+      compare_string_16_x_LU(tmpL, tmpU, DIFF1, DIFF2); // last 16 characters before last load
       __ b(LOAD_LAST);
     __ bind(DIFF2);
       __ mov(tmpU, tmp3);
@@ -4183,10 +4088,12 @@ class StubGenerator: public StubCodeGenerator {
       __ pop(spilled_regs, sp);
       __ b(CALCULATE_DIFFERENCE);
     __ bind(LOAD_LAST);
+      // Last 4 UTF-16 characters are already pre-loaded into tmp3 by compare_string_16_x_LU.
+      // No need to load it again
+      __ mov(tmpU, tmp3);
       __ pop(spilled_regs, sp);
 
       __ ldrs(vtmp, Address(strL));
-      __ ldr(tmpU, Address(strU));
       __ zip1(vtmp, __ T8B, vtmp, vtmpZ);
       __ fmovd(tmpL, vtmp);
 
@@ -4229,7 +4136,7 @@ class StubGenerator: public StubCodeGenerator {
         DIFF_LAST_POSITION, DIFF_LAST_POSITION2;
     // exit from large loop when less than 64 bytes left to read or we're about
     // to prefetch memory behind array border
-    int largeLoopExitCondition = MAX(64, SoftwarePrefetchHintDistance)/(isLL ? 1 : 2);
+    int largeLoopExitCondition = MAX2(64, SoftwarePrefetchHintDistance)/(isLL ? 1 : 2);
     // cnt1/cnt2 contains amount of characters to compare. cnt1 can be re-used
     // update cnt2 counter with already loaded 8 bytes
     __ sub(cnt2, cnt2, wordSize/(isLL ? 1 : 2));
@@ -4248,10 +4155,10 @@ class StubGenerator: public StubCodeGenerator {
         compare_string_16_bytes_same(DIFF, DIFF2);
         __ br(__ GT, LARGE_LOOP_PREFETCH);
         __ cbz(cnt2, LAST_CHECK_AND_LENGTH_DIFF); // no more chars left?
-        // less than 16 bytes left?
-        __ subs(cnt2, cnt2, isLL ? 16 : 8);
-        __ br(__ LT, TAIL);
     }
+    // less than 16 bytes left?
+    __ subs(cnt2, cnt2, isLL ? 16 : 8);
+    __ br(__ LT, TAIL);
     __ bind(SMALL_LOOP);
       compare_string_16_bytes_same(DIFF, DIFF2);
       __ subs(cnt2, cnt2, isLL ? 16 : 8);
@@ -4380,6 +4287,7 @@ class StubGenerator: public StubCodeGenerator {
     __ ldr(ch1, Address(str1));
     // Read whole register from str2. It is safe, because length >=8 here
     __ ldr(ch2, Address(str2));
+    __ sub(cnt2, cnt2, cnt1);
     __ andr(first, ch1, str1_isL ? 0xFF : 0xFFFF);
     if (str1_isL != str2_isL) {
       __ eor(v0, __ T16B, v0, v0);
@@ -4653,7 +4561,7 @@ class StubGenerator: public StubCodeGenerator {
     address entry = __ pc();
     Label LOOP, LOOP_START, LOOP_PRFM, LOOP_PRFM_START, DONE;
     Register src = r0, dst = r1, len = r2, octetCounter = r3;
-    const int large_loop_threshold = MAX(64, SoftwarePrefetchHintDistance)/8 + 4;
+    const int large_loop_threshold = MAX2(64, SoftwarePrefetchHintDistance)/8 + 4;
 
     // do one more 8-byte read to have address 16-byte aligned in most cases
     // also use single store instruction
@@ -4777,6 +4685,315 @@ class StubGenerator: public StubCodeGenerator {
     return start;
   }
 
+#ifdef LINUX
+
+  // ARMv8.1 LSE versions of the atomic stubs used by Atomic::PlatformXX.
+  //
+  // If LSE is in use, generate LSE versions of all the stubs. The
+  // non-LSE versions are in atomic_aarch64.S.
+
+  // class AtomicStubMark records the entry point of a stub and the
+  // stub pointer which will point to it. The stub pointer is set to
+  // the entry point when ~AtomicStubMark() is called, which must be
+  // after ICache::invalidate_range. This ensures safe publication of
+  // the generated code.
+  class AtomicStubMark {
+    address _entry_point;
+    aarch64_atomic_stub_t *_stub;
+    MacroAssembler *_masm;
+  public:
+    AtomicStubMark(MacroAssembler *masm, aarch64_atomic_stub_t *stub) {
+      _masm = masm;
+      __ align(32);
+      _entry_point = __ pc();
+      _stub = stub;
+    }
+    ~AtomicStubMark() {
+      *_stub = (aarch64_atomic_stub_t)_entry_point;
+    }
+  };
+
+  // NB: For memory_order_conservative we need a trailing membar after
+  // LSE atomic operations but not a leading membar.
+  //
+  // We don't need a leading membar because a clause in the Arm ARM
+  // says:
+  //
+  //   Barrier-ordered-before
+  //
+  //   Barrier instructions order prior Memory effects before subsequent
+  //   Memory effects generated by the same Observer. A read or a write
+  //   RW1 is Barrier-ordered-before a read or a write RW 2 from the same
+  //   Observer if and only if RW1 appears in program order before RW 2
+  //   and [ ... ] at least one of RW 1 and RW 2 is generated by an atomic
+  //   instruction with both Acquire and Release semantics.
+  //
+  // All the atomic instructions {ldaddal, swapal, casal} have Acquire
+  // and Release semantics, therefore we don't need a leading
+  // barrier. However, there is no corresponding Barrier-ordered-after
+  // relationship, therefore we need a trailing membar to prevent a
+  // later store or load from being reordered with the store in an
+  // atomic instruction.
+  //
+  // This was checked by using the herd7 consistency model simulator
+  // (http://diy.inria.fr/) with this test case:
+  //
+  // AArch64 LseCas
+  // { 0:X1=x; 0:X2=y; 1:X1=x; 1:X2=y; }
+  // P0 | P1;
+  // LDR W4, [X2] | MOV W3, #0;
+  // DMB LD       | MOV W4, #1;
+  // LDR W3, [X1] | CASAL W3, W4, [X1];
+  //              | DMB ISH;
+  //              | STR W4, [X2];
+  // exists
+  // (0:X3=0 /\ 0:X4=1)
+  //
+  // If X3 == 0 && X4 == 1, the store to y in P1 has been reordered
+  // with the store to x in P1. Without the DMB in P1 this may happen.
+  //
+  // At the time of writing we don't know of any AArch64 hardware that
+  // reorders stores in this way, but the Reference Manual permits it.
+
+  void gen_cas_entry(Assembler::operand_size size,
+                     atomic_memory_order order) {
+    Register prev = r3, ptr = c_rarg0, compare_val = c_rarg1,
+      exchange_val = c_rarg2;
+    bool acquire, release;
+    switch (order) {
+      case memory_order_relaxed:
+        acquire = false;
+        release = false;
+        break;
+      default:
+        acquire = true;
+        release = true;
+        break;
+    }
+    __ mov(prev, compare_val);
+    __ lse_cas(prev, exchange_val, ptr, size, acquire, release, /*not_pair*/true);
+    if (order == memory_order_conservative) {
+      __ membar(Assembler::StoreStore|Assembler::StoreLoad);
+    }
+    if (size == Assembler::xword) {
+      __ mov(r0, prev);
+    } else {
+      __ movw(r0, prev);
+    }
+    __ ret(lr);
+  }
+
+  void gen_ldaddal_entry(Assembler::operand_size size) {
+    Register prev = r2, addr = c_rarg0, incr = c_rarg1;
+    __ ldaddal(size, incr, prev, addr);
+    __ membar(Assembler::StoreStore|Assembler::StoreLoad);
+    if (size == Assembler::xword) {
+      __ mov(r0, prev);
+    } else {
+      __ movw(r0, prev);
+    }
+    __ ret(lr);
+  }
+
+  void gen_swpal_entry(Assembler::operand_size size) {
+    Register prev = r2, addr = c_rarg0, incr = c_rarg1;
+    __ swpal(size, incr, prev, addr);
+    __ membar(Assembler::StoreStore|Assembler::StoreLoad);
+    if (size == Assembler::xword) {
+      __ mov(r0, prev);
+    } else {
+      __ movw(r0, prev);
+    }
+    __ ret(lr);
+  }
+
+  void generate_atomic_entry_points() {
+    if (! UseLSE) {
+      return;
+    }
+
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "atomic entry points");
+    address first_entry = __ pc();
+
+    // All memory_order_conservative
+    AtomicStubMark mark_fetch_add_4(_masm, &aarch64_atomic_fetch_add_4_impl);
+    gen_ldaddal_entry(Assembler::word);
+    AtomicStubMark mark_fetch_add_8(_masm, &aarch64_atomic_fetch_add_8_impl);
+    gen_ldaddal_entry(Assembler::xword);
+
+    AtomicStubMark mark_xchg_4(_masm, &aarch64_atomic_xchg_4_impl);
+    gen_swpal_entry(Assembler::word);
+    AtomicStubMark mark_xchg_8_impl(_masm, &aarch64_atomic_xchg_8_impl);
+    gen_swpal_entry(Assembler::xword);
+
+    // CAS, memory_order_conservative
+    AtomicStubMark mark_cmpxchg_1(_masm, &aarch64_atomic_cmpxchg_1_impl);
+    gen_cas_entry(MacroAssembler::byte, memory_order_conservative);
+    AtomicStubMark mark_cmpxchg_4(_masm, &aarch64_atomic_cmpxchg_4_impl);
+    gen_cas_entry(MacroAssembler::word, memory_order_conservative);
+    AtomicStubMark mark_cmpxchg_8(_masm, &aarch64_atomic_cmpxchg_8_impl);
+    gen_cas_entry(MacroAssembler::xword, memory_order_conservative);
+
+    // CAS, memory_order_relaxed
+    AtomicStubMark mark_cmpxchg_1_relaxed
+      (_masm, &aarch64_atomic_cmpxchg_1_relaxed_impl);
+    gen_cas_entry(MacroAssembler::byte, memory_order_relaxed);
+    AtomicStubMark mark_cmpxchg_4_relaxed
+      (_masm, &aarch64_atomic_cmpxchg_4_relaxed_impl);
+    gen_cas_entry(MacroAssembler::word, memory_order_relaxed);
+    AtomicStubMark mark_cmpxchg_8_relaxed
+      (_masm, &aarch64_atomic_cmpxchg_8_relaxed_impl);
+    gen_cas_entry(MacroAssembler::xword, memory_order_relaxed);
+
+    ICache::invalidate_range(first_entry, __ pc() - first_entry);
+  }
+#endif // LINUX
+
+  void generate_base64_encode_simdround(Register src, Register dst,
+        FloatRegister codec, u8 size) {
+
+    FloatRegister in0  = v4,  in1  = v5,  in2  = v6;
+    FloatRegister out0 = v16, out1 = v17, out2 = v18, out3 = v19;
+    FloatRegister ind0 = v20, ind1 = v21, ind2 = v22, ind3 = v23;
+
+    Assembler::SIMD_Arrangement arrangement = size == 16 ? __ T16B : __ T8B;
+
+    __ ld3(in0, in1, in2, arrangement, __ post(src, 3 * size));
+
+    __ ushr(ind0, arrangement, in0,  2);
+
+    __ ushr(ind1, arrangement, in1,  2);
+    __ shl(in0,   arrangement, in0,  6);
+    __ orr(ind1,  arrangement, ind1, in0);
+    __ ushr(ind1, arrangement, ind1, 2);
+
+    __ ushr(ind2, arrangement, in2,  4);
+    __ shl(in1,   arrangement, in1,  4);
+    __ orr(ind2,  arrangement, in1,  ind2);
+    __ ushr(ind2, arrangement, ind2, 2);
+
+    __ shl(ind3,  arrangement, in2,  2);
+    __ ushr(ind3, arrangement, ind3, 2);
+
+    __ tbl(out0,  arrangement, codec,  4, ind0);
+    __ tbl(out1,  arrangement, codec,  4, ind1);
+    __ tbl(out2,  arrangement, codec,  4, ind2);
+    __ tbl(out3,  arrangement, codec,  4, ind3);
+
+    __ st4(out0,  out1, out2, out3, arrangement, __ post(dst, 4 * size));
+  }
+
+   /**
+   *  Arguments:
+   *
+   *  Input:
+   *  c_rarg0   - src_start
+   *  c_rarg1   - src_offset
+   *  c_rarg2   - src_length
+   *  c_rarg3   - dest_start
+   *  c_rarg4   - dest_offset
+   *  c_rarg5   - isURL
+   *
+   */
+  address generate_base64_encodeBlock() {
+
+    static const char toBase64[64] = {
+      'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+      'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+      'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+      'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+      '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'
+    };
+
+    static const char toBase64URL[64] = {
+      'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+      'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+      'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+      'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+      '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '_'
+    };
+
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "encodeBlock");
+    address start = __ pc();
+
+    Register src   = c_rarg0;  // source array
+    Register soff  = c_rarg1;  // source start offset
+    Register send  = c_rarg2;  // source end offset
+    Register dst   = c_rarg3;  // dest array
+    Register doff  = c_rarg4;  // position for writing to dest array
+    Register isURL = c_rarg5;  // Base64 or URL chracter set
+
+    // c_rarg6 and c_rarg7 are free to use as temps
+    Register codec  = c_rarg6;
+    Register length = c_rarg7;
+
+    Label ProcessData, Process48B, Process24B, Process3B, SIMDExit, Exit;
+
+    __ add(src, src, soff);
+    __ add(dst, dst, doff);
+    __ sub(length, send, soff);
+
+    // load the codec base address
+    __ lea(codec, ExternalAddress((address) toBase64));
+    __ cbz(isURL, ProcessData);
+    __ lea(codec, ExternalAddress((address) toBase64URL));
+
+    __ BIND(ProcessData);
+
+    // too short to formup a SIMD loop, roll back
+    __ cmp(length, (u1)24);
+    __ br(Assembler::LT, Process3B);
+
+    __ ld1(v0, v1, v2, v3, __ T16B, Address(codec));
+
+    __ BIND(Process48B);
+    __ cmp(length, (u1)48);
+    __ br(Assembler::LT, Process24B);
+    generate_base64_encode_simdround(src, dst, v0, 16);
+    __ sub(length, length, 48);
+    __ b(Process48B);
+
+    __ BIND(Process24B);
+    __ cmp(length, (u1)24);
+    __ br(Assembler::LT, SIMDExit);
+    generate_base64_encode_simdround(src, dst, v0, 8);
+    __ sub(length, length, 24);
+
+    __ BIND(SIMDExit);
+    __ cbz(length, Exit);
+
+    __ BIND(Process3B);
+    //  3 src bytes, 24 bits
+    __ ldrb(r10, __ post(src, 1));
+    __ ldrb(r11, __ post(src, 1));
+    __ ldrb(r12, __ post(src, 1));
+    __ orrw(r11, r11, r10, Assembler::LSL, 8);
+    __ orrw(r12, r12, r11, Assembler::LSL, 8);
+    // codec index
+    __ ubfmw(r15, r12, 18, 23);
+    __ ubfmw(r14, r12, 12, 17);
+    __ ubfmw(r13, r12, 6,  11);
+    __ andw(r12,  r12, 63);
+    // get the code based on the codec
+    __ ldrb(r15, Address(codec, r15, Address::uxtw(0)));
+    __ ldrb(r14, Address(codec, r14, Address::uxtw(0)));
+    __ ldrb(r13, Address(codec, r13, Address::uxtw(0)));
+    __ ldrb(r12, Address(codec, r12, Address::uxtw(0)));
+    __ strb(r15, __ post(dst, 1));
+    __ strb(r14, __ post(dst, 1));
+    __ strb(r13, __ post(dst, 1));
+    __ strb(r12, __ post(dst, 1));
+    __ sub(length, length, 3);
+    __ cbnz(length, Process3B);
+
+    __ BIND(Exit);
+    __ ret(lr);
+
+    return start;
+  }
+
   // Continuation point for throwing of implicit exceptions that are
   // not handled in the current activation. Fabricates an exception
   // oop and initiates normal exception dispatching in this
@@ -4838,7 +5055,7 @@ class StubGenerator: public StubCodeGenerator {
 
     // Set up last_Java_sp and last_Java_fp
     address the_pc = __ pc();
-    __ set_last_Java_frame(sp, rfp, (address)NULL, rscratch1);
+    __ set_last_Java_frame(sp, rfp, the_pc, rscratch1);
 
     // Call runtime
     if (arg1 != noreg) {
@@ -4851,7 +5068,7 @@ class StubGenerator: public StubCodeGenerator {
     __ mov(c_rarg0, rthread);
     BLOCK_COMMENT("call runtime_entry");
     __ mov(rscratch1, runtime_entry);
-    __ blrt(rscratch1, 3 /* number_of_arguments */, 0, 1);
+    __ blr(rscratch1);
 
     // Generate oop map
     OopMap* map = new OopMap(framesize, 0);
@@ -5389,12 +5606,12 @@ class StubGenerator: public StubCodeGenerator {
     // In C, approximately:
 
     // void
-    // montgomery_multiply(unsigned long Pa_base[], unsigned long Pb_base[],
-    //                     unsigned long Pn_base[], unsigned long Pm_base[],
-    //                     unsigned long inv, int len) {
-    //   unsigned long t0 = 0, t1 = 0, t2 = 0; // Triple-precision accumulator
-    //   unsigned long *Pa, *Pb, *Pn, *Pm;
-    //   unsigned long Ra, Rb, Rn, Rm;
+    // montgomery_multiply(julong Pa_base[], julong Pb_base[],
+    //                     julong Pn_base[], julong Pm_base[],
+    //                     julong inv, int len) {
+    //   julong t0 = 0, t1 = 0, t2 = 0; // Triple-precision accumulator
+    //   julong *Pa, *Pb, *Pn, *Pm;
+    //   julong Ra, Rb, Rn, Rm;
 
     //   int i;
 
@@ -5602,11 +5819,12 @@ class StubGenerator: public StubCodeGenerator {
     // In C, approximately:
 
     // void
-    // montgomery_square(unsigned long Pa_base[], unsigned long Pn_base[],
-    //                   unsigned long Pm_base[], unsigned long inv, int len) {
-    //   unsigned long t0 = 0, t1 = 0, t2 = 0; // Triple-precision accumulator
-    //   unsigned long *Pa, *Pb, *Pn, *Pm;
-    //   unsigned long Ra, Rb, Rn, Rm;
+    // montgomery_multiply(julong Pa_base[], julong Pb_base[],
+    //                     julong Pn_base[], julong Pm_base[],
+    //                     julong inv, int len) {
+    //   julong t0 = 0, t1 = 0, t2 = 0; // Triple-precision accumulator
+    //   julong *Pa, *Pb, *Pn, *Pm;
+    //   julong Ra, Rb, Rn, Rm;
 
     //   int i;
 
@@ -5799,6 +6017,7 @@ class StubGenerator: public StubCodeGenerator {
     // byte_array_inflate stub for large arrays.
     StubRoutines::aarch64::_large_byte_array_inflate = generate_large_byte_array_inflate();
 
+#ifdef COMPILER2
     if (UseMultiplyToLenIntrinsic) {
       StubRoutines::_multiplyToLen = generate_multiplyToLen();
     }
@@ -5824,11 +6043,15 @@ class StubGenerator: public StubCodeGenerator {
       // because it's faster for the sizes of modulus we care about.
       StubRoutines::_montgomerySquare = g.generate_multiply();
     }
+#endif // COMPILER2
 
-#ifndef BUILTIN_SIM
     // generate GHASH intrinsics code
     if (UseGHASHIntrinsics) {
       StubRoutines::_ghash_processBlocks = generate_ghash_processBlocks();
+    }
+
+    if (UseBASE64Intrinsics) {
+        StubRoutines::_base64_encodeBlock = generate_base64_encodeBlock();
     }
 
     if (UseAESIntrinsics) {
@@ -5859,8 +6082,13 @@ class StubGenerator: public StubCodeGenerator {
     generate_safefetch("SafeFetchN", sizeof(intptr_t), &StubRoutines::_safefetchN_entry,
                                                        &StubRoutines::_safefetchN_fault_pc,
                                                        &StubRoutines::_safefetchN_continuation_pc);
-#endif
-    StubRoutines::aarch64::set_completed();
+#ifdef LINUX
+
+    generate_atomic_entry_points();
+
+#endif // LINUX
+
+  StubRoutines::aarch64::set_completed();
   }
 
  public:
@@ -5876,3 +6104,30 @@ class StubGenerator: public StubCodeGenerator {
 void StubGenerator_generate(CodeBuffer* code, bool all) {
   StubGenerator g(code, all);
 }
+
+
+#ifdef LINUX
+
+// Define pointers to atomic stubs and initialize them to point to the
+// code in atomic_aarch64.S.
+
+#define DEFAULT_ATOMIC_OP(OPNAME, SIZE, RELAXED)                                \
+  extern "C" uint64_t aarch64_atomic_ ## OPNAME ## _ ## SIZE ## RELAXED ## _default_impl \
+    (volatile void *ptr, uint64_t arg1, uint64_t arg2);                 \
+  aarch64_atomic_stub_t aarch64_atomic_ ## OPNAME ## _ ## SIZE ## RELAXED ## _impl \
+    = aarch64_atomic_ ## OPNAME ## _ ## SIZE ## RELAXED ## _default_impl;
+
+DEFAULT_ATOMIC_OP(fetch_add, 4, )
+DEFAULT_ATOMIC_OP(fetch_add, 8, )
+DEFAULT_ATOMIC_OP(xchg, 4, )
+DEFAULT_ATOMIC_OP(xchg, 8, )
+DEFAULT_ATOMIC_OP(cmpxchg, 1, )
+DEFAULT_ATOMIC_OP(cmpxchg, 4, )
+DEFAULT_ATOMIC_OP(cmpxchg, 8, )
+DEFAULT_ATOMIC_OP(cmpxchg, 1, _relaxed)
+DEFAULT_ATOMIC_OP(cmpxchg, 4, _relaxed)
+DEFAULT_ATOMIC_OP(cmpxchg, 8, _relaxed)
+
+#undef DEFAULT_ATOMIC_OP
+
+#endif // LINUX

@@ -30,6 +30,7 @@
 #include "code/debugInfoRec.hpp"
 #include "compiler/compileBroker.hpp"
 #include "compiler/compilerDirectives.hpp"
+#include "compiler/disassembler.hpp"
 #include "compiler/oopMap.hpp"
 #include "memory/allocation.inline.hpp"
 #include "opto/ad.hpp"
@@ -1118,7 +1119,10 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
 
   // Emit the constant table.
   if (has_mach_constant_base_node()) {
-    constant_table().emit(*cb);
+    if (!constant_table().emit(*cb)) {
+      C->record_failure("consts section overflow");
+      return;
+    }
   }
 
   // Create an array of labels, one for each basic block
@@ -1127,10 +1131,8 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
     blk_labels[i].init();
   }
 
-  // ------------------
   // Now fill in the code buffer
   Node *delay_slot = NULL;
-
   for (uint i = 0; i < nblocks; i++) {
     Block* block = _cfg->get_block(i);
     Node* head = block->head();
@@ -1385,9 +1387,10 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
       if (node_offsets && n->_idx < node_offset_limit)
         node_offsets[n->_idx] = cb->insts_size();
 #endif
+      assert(!failing(), "Should not reach here if failing.");
 
       // "Normal" instruction case
-      DEBUG_ONLY( uint instr_offset = cb->insts_size(); )
+      DEBUG_ONLY(uint instr_offset = cb->insts_size());
       n->emit(*cb, _regalloc);
       current_offset  = cb->insts_size();
 
@@ -1399,8 +1402,17 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
       }
 
 #ifdef ASSERT
-      if (n->size(_regalloc) < (current_offset-instr_offset)) {
+      uint n_size = n->size(_regalloc);
+      if (n_size < (current_offset-instr_offset)) {
+        MachNode* mach = n->as_Mach();
         n->dump();
+        mach->dump_format(_regalloc, tty);
+        tty->print_cr(" n_size (%d), current_offset (%d), instr_offset (%d)", n_size, current_offset, instr_offset);
+        Disassembler::decode(cb->insts_begin() + instr_offset, cb->insts_begin() + current_offset + 1, tty);
+        tty->print_cr(" ------------------- ");
+        BufferBlob* blob = this->scratch_buffer_blob();
+        address blob_begin = blob->content_begin();
+        Disassembler::decode(blob_begin, blob_begin + n_size + 1, tty);
         assert(false, "wrong size of mach node");
       }
 #endif
@@ -1551,11 +1563,12 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
       // be sure to tag this tty output with the compile ID.
       if (xtty != NULL) {
         xtty->head("opto_assembly compile_id='%d'%s", compile_id(),
-                   is_osr_compilation()    ? " compile_kind='osr'" :
-                   "");
+                   is_osr_compilation() ? " compile_kind='osr'" : "");
       }
       if (method() != NULL) {
         method()->print_metadata();
+      } else if (stub_name() != NULL) {
+        tty->print_cr("Generating RuntimeStub - %s", stub_name());
       }
       dump_asm(node_offsets, node_offset_limit);
       if (xtty != NULL) {
@@ -1777,8 +1790,8 @@ void Compile::ScheduleAndBundle() {
   if (!do_scheduling())
     return;
 
-  // Scheduling code works only with pairs (16 bytes) maximum.
-  if (max_vector_size() > 16)
+  // Scheduling code works only with pairs (8 bytes) maximum.
+  if (max_vector_size() > 8)
     return;
 
   TracePhase tp("isched", &timers[_t_instrSched]);
@@ -2391,12 +2404,9 @@ void Scheduling::DoScheduling() {
     }
     assert(!last->is_Mach() || last->as_Mach()->ideal_Opcode() != Op_Con, "");
     if( last->is_Catch() ||
-       // Exclude unreachable path case when Halt node is in a separate block.
-       (_bb_end > 1 && last->is_Mach() && last->as_Mach()->ideal_Opcode() == Op_Halt) ) {
-      // There must be a prior call.  Skip it.
-      while( !bb->get_node(--_bb_end)->is_MachCall() ) {
-        assert( bb->get_node(_bb_end)->is_MachProj(), "skipping projections after expected call" );
-      }
+       (last->is_Mach() && last->as_Mach()->ideal_Opcode() == Op_Halt) ) {
+      // There might be a prior call.  Skip it.
+      while (_bb_start < _bb_end && bb->get_node(--_bb_end)->is_MachProj());
     } else if( last->is_MachNullCheck() ) {
       // Backup so the last null-checked memory instruction is
       // outside the schedulable range. Skip over the nullcheck,

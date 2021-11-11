@@ -48,6 +48,7 @@
 #include "runtime/unhandledOops.hpp"
 #include "utilities/align.hpp"
 #include "utilities/exceptions.hpp"
+#include "utilities/globalDefinitions.hpp"
 #include "utilities/macros.hpp"
 #ifdef ZERO
 # include "stack_zero.hpp"
@@ -94,15 +95,21 @@ class WorkerThread;
 
 // Class hierarchy
 // - Thread
-//   - NamedThread
-//     - VMThread
-//     - ConcurrentGCThread
-//     - WorkerThread
-//       - GangWorker
-//       - GCTaskThread
 //   - JavaThread
 //     - various subclasses eg CompilerThread, ServiceThread
-//   - WatcherThread
+//   - NonJavaThread
+//     - NamedThread
+//       - VMThread
+//       - ConcurrentGCThread
+//       - WorkerThread
+//         - GangWorker
+//         - GCTaskThread
+//     - WatcherThread
+//     - JfrThreadSampler
+//
+// All Thread subclasses must be either JavaThread or NonJavaThread.
+// This means !t->is_Java_thread() iff t is a NonJavaThread, or t is
+// a partially constructed/destroyed Thread.
 
 class Thread: public ThreadShadow {
   friend class VMStructs;
@@ -380,7 +387,7 @@ class Thread: public ThreadShadow {
 
   // Constructor
   Thread();
-  virtual ~Thread();
+  virtual ~Thread() = 0;        // Thread is abstract.
 
   // Manage Thread::current()
   void initialize_thread_current();
@@ -399,6 +406,7 @@ class Thread: public ThreadShadow {
   virtual bool is_Java_thread()     const            { return false; }
   virtual bool is_Compiler_thread() const            { return false; }
   virtual bool is_Code_cache_sweeper_thread() const  { return false; }
+  virtual bool is_service_thread() const             { return false; }
   virtual bool is_hidden_from_external_view() const  { return false; }
   virtual bool is_jvmti_agent_thread() const         { return false; }
   // True iff the thread can perform GC operations at a safepoint.
@@ -638,7 +646,7 @@ protected:
 
   bool    on_local_stack(address adr) const {
     // QQQ this has knowledge of direction, ought to be a stack method
-    return (_stack_base >= adr && adr >= stack_end());
+    return (_stack_base > adr && adr >= stack_end());
   }
 
   uintptr_t self_raw_id()                    { return _self_raw_id; }
@@ -771,9 +779,45 @@ inline Thread* Thread::current_or_null_safe() {
   return NULL;
 }
 
+class NonJavaThread: public Thread {
+  friend class VMStructs;
+
+  NonJavaThread* volatile _next;
+
+  class List;
+  static List _the_list;
+
+ public:
+  NonJavaThread();
+  ~NonJavaThread();
+
+  class Iterator;
+};
+
+// Provides iteration over the list of NonJavaThreads.  Because list
+// management occurs in the NonJavaThread constructor and destructor,
+// entries in the list may not be fully constructed instances of a
+// derived class.  Threads created after an iterator is constructed
+// will not be visited by the iterator.  The scope of an iterator is a
+// critical section; there must be no safepoint checks in that scope.
+class NonJavaThread::Iterator : public StackObj {
+  uint _protect_enter;
+  NonJavaThread* _current;
+
+  NONCOPYABLE(Iterator);
+
+public:
+  Iterator();
+  ~Iterator();
+
+  bool end() const { return _current == NULL; }
+  NonJavaThread* current() const { return _current; }
+  void step();
+};
+
 // Name support for threads.  non-JavaThread subclasses with multiple
 // uniquely named instances should derive from this.
-class NamedThread: public Thread {
+class NamedThread: public NonJavaThread {
   friend class VMStructs;
   enum {
     max_name_len = 64
@@ -818,7 +862,7 @@ class WorkerThread: public NamedThread {
 };
 
 // A single WatcherThread is used for simulating timer interrupts.
-class WatcherThread: public Thread {
+class WatcherThread: public NonJavaThread {
   friend class VMStructs;
  public:
   virtual void run();
@@ -1039,6 +1083,11 @@ class JavaThread: public Thread {
   // Support for high precision, thread sensitive counters in JVMCI compiled code.
   jlong*    _jvmci_counters;
 
+  // Fast thread locals for use by JVMCI
+  intptr_t*  _jvmci_reserved0;
+  intptr_t*  _jvmci_reserved1;
+  oop        _jvmci_reserved_oop0;
+
  public:
   static jlong* _jvmci_old_thread_counters;
   static void collect_counters(typeArrayOop array);
@@ -1176,7 +1225,11 @@ class JavaThread: public Thread {
   // Safepoint support
 #if !(defined(PPC64) || defined(AARCH64))
   JavaThreadState thread_state() const           { return _thread_state; }
-  void set_thread_state(JavaThreadState s)       { _thread_state = s;    }
+  void set_thread_state(JavaThreadState s)       {
+    assert(current_or_null() == NULL || current_or_null() == this,
+           "state change should only be called by the current thread");
+    _thread_state = s;
+  }
 #else
   // Use membars when accessing volatile _thread_state. See
   // Threads::create_vm() for size checks.
@@ -1228,16 +1281,12 @@ class JavaThread: public Thread {
     return _handshake.has_operation();
   }
 
-  void cancel_handshake() {
-    _handshake.cancel(this);
-  }
-
   void handshake_process_by_self() {
     _handshake.process_by_self(this);
   }
 
-  void handshake_process_by_vmthread() {
-    _handshake.process_by_vmthread(this);
+  HandshakeState::ProcessResult handshake_try_process_by_vmThread(HandshakeOperation* op) {
+    return _handshake.try_process_by_vmThread(this);
   }
 
   // Suspend/resume support for JavaThread
@@ -2194,7 +2243,7 @@ class Threads: AllStatic {
   static void print_on_error(outputStream* st, Thread* current, char* buf, int buflen);
   static void print_on_error(Thread* this_thread, outputStream* st, Thread* current, char* buf,
                              int buflen, bool* found_current);
-  static void print_threads_compiling(outputStream* st, char* buf, int buflen);
+  static void print_threads_compiling(outputStream* st, char* buf, int buflen, bool short_form = false);
 
   // Get Java threads that are waiting to enter a monitor.
   static GrowableArray<JavaThread*>* get_pending_threads(ThreadsList * t_list,
@@ -2213,13 +2262,6 @@ class Threads: AllStatic {
   static void deoptimized_wrt_marked_nmethods();
 };
 
-
-// Thread iterator
-class ThreadClosure: public StackObj {
- public:
-  virtual void do_thread(Thread* thread) = 0;
-};
-
 class SignalHandlerMark: public StackObj {
  private:
   Thread* _thread;
@@ -2234,5 +2276,19 @@ class SignalHandlerMark: public StackObj {
   }
 };
 
+class UnlockFlagSaver {
+  private:
+    JavaThread* _thread;
+    bool _do_not_unlock;
+  public:
+    UnlockFlagSaver(JavaThread* t) {
+      _thread = t;
+      _do_not_unlock = t->do_not_unlock_if_synchronized();
+      t->set_do_not_unlock_if_synchronized(false);
+    }
+    ~UnlockFlagSaver() {
+      _thread->set_do_not_unlock_if_synchronized(_do_not_unlock);
+    }
+};
 
 #endif // SHARE_VM_RUNTIME_THREAD_HPP

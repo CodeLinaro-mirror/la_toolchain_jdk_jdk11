@@ -102,11 +102,11 @@ import javax.swing.UIManager;
 import com.apple.laf.AquaMenuBarUI;
 import sun.awt.AWTAccessor;
 import sun.awt.AppContext;
-import sun.awt.CGraphicsConfig;
 import sun.awt.CGraphicsDevice;
 import sun.awt.LightweightFrame;
 import sun.awt.SunToolkit;
 import sun.awt.datatransfer.DataTransferer;
+import sun.awt.dnd.SunDragSourceContextPeer;
 import sun.awt.util.ThreadGroupUtils;
 import sun.java2d.opengl.OGLRenderQueue;
 import sun.lwawt.LWComponentPeer;
@@ -455,6 +455,16 @@ public final class LWCToolkit extends LWToolkit {
 
     @Override
     protected boolean syncNativeQueue(long timeout) {
+        if (timeout <= 0) {
+            return false;
+        }
+        if (SunDragSourceContextPeer.isDragDropInProgress()
+                || EventQueue.isDispatchThread()) {
+            // The java code started the DnD, but the native drag may still not
+            // start, the last attempt to flush the native events,
+            // also do not block EDT for a long time
+            timeout = 50;
+        }
         return nativeSyncQueue(timeout);
     }
 
@@ -470,7 +480,11 @@ public final class LWCToolkit extends LWToolkit {
 
     @Override
     public Insets getScreenInsets(final GraphicsConfiguration gc) {
-        return ((CGraphicsConfig) gc).getDevice().getScreenInsets();
+        GraphicsDevice gd = gc.getDevice();
+        if (!(gd instanceof CGraphicsDevice)) {
+            return super.getScreenInsets(gc);
+        }
+        return ((CGraphicsDevice)gd).getScreenInsets();
     }
 
     @Override
@@ -786,6 +800,23 @@ public final class LWCToolkit extends LWToolkit {
         }
 
         return locale;
+    }
+
+    public static boolean isLocaleUSInternationalPC(Locale locale) {
+        return (locale != null ?
+            locale.toString().equals("_US_UserDefined_15000") : false);
+    }
+
+    public static boolean isCharModifierKeyInUSInternationalPC(char ch) {
+        // 5 characters: APOSTROPHE, QUOTATION MARK, ACCENT GRAVE, SMALL TILDE,
+        // CIRCUMFLEX ACCENT
+        final char[] modifierKeys = {'\'', '"', '`', '\u02DC', '\u02C6'};
+        for (char modKey : modifierKeys) {
+            if (modKey == ch) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override

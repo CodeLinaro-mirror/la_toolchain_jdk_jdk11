@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -40,8 +40,11 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.UUID;
+
+import jdk.test.lib.Utils;
 import jdk.test.lib.process.OutputBuffer;
 import jdk.test.lib.process.ProcessTools;
 import jdk.test.lib.process.StreamPumper;
@@ -230,7 +233,11 @@ public class LingeredApp {
     public void waitAppTerminate() {
         // This code is modeled after tail end of ProcessTools.getOutput().
         try {
-            appProcess.waitFor();
+            // If the app hangs, we don't want to wait for the to test timeout.
+            if (!appProcess.waitFor(Utils.adjustTimeout(appWaitTime), TimeUnit.SECONDS)) {
+                appProcess.destroy();
+                appProcess.waitFor();
+            }
             outPumperThread.join();
             errPumperThread.join();
         } catch (InterruptedException e) {
@@ -356,13 +363,15 @@ public class LingeredApp {
     }
 
     private void finishApp() {
-        OutputBuffer output = getOutput();
-        String msg =
-            " LingeredApp stdout: [" + output.getStdout() + "];\n" +
-            " LingeredApp stderr: [" + output.getStderr() + "]\n" +
-            " LingeredApp exitValue = " + appProcess.exitValue();
+        if (appProcess != null) {
+            OutputBuffer output = getOutput();
+            String msg =
+                    " LingeredApp stdout: [" + output.getStdout() + "];\n" +
+                    " LingeredApp stderr: [" + output.getStderr() + "]\n" +
+                    " LingeredApp exitValue = " + appProcess.exitValue();
 
-        System.err.println(msg);
+            System.err.println(msg);
+        }
     }
 
     /**
@@ -376,12 +385,14 @@ public class LingeredApp {
         // an exception before the LA actually starts
         if (appProcess != null) {
             waitAppTerminate();
+
+            finishApp();
+
             int exitcode = appProcess.exitValue();
             if (exitcode != 0) {
                 throw new IOException("LingeredApp terminated with non-zero exit code " + exitcode);
             }
         }
-        finishApp();
     }
 
     /**
@@ -488,18 +499,22 @@ public class LingeredApp {
         }
 
         String theLockFileName = args[0];
+        Path path = Paths.get(theLockFileName);
 
         try {
-            Path path = Paths.get(theLockFileName);
-
             while (Files.exists(path)) {
                 // Touch the lock to indicate our readiness
                 setLastModified(theLockFileName, epoch());
                 Thread.sleep(spinDelay);
             }
-        } catch (NoSuchFileException ex) {
+        } catch (IOException ex) {
             // Lock deleted while we are setting last modified time.
-            // Ignore error and lets the app exits
+            // Ignore the error and let the app exit.
+            if (Files.exists(path)) {
+                // If the lock file was not removed, return an error.
+                System.err.println("LingeredApp IOException: lock file still exists");
+                System.exit(4);
+            }
         } catch (Exception ex) {
             System.err.println("LingeredApp ERROR: " + ex);
             // Leave exit_code = 1 to Java launcher

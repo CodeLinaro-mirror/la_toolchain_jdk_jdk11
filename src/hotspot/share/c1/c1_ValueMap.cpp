@@ -328,7 +328,7 @@ class LoopInvariantCodeMotion : public StackObj  {
 };
 
 LoopInvariantCodeMotion::LoopInvariantCodeMotion(ShortLoopOptimizer *slo, GlobalValueNumbering* gvn, BlockBegin* loop_header, BlockList* loop_blocks)
-  : _gvn(gvn), _short_loop_optimizer(slo) {
+  : _gvn(gvn), _short_loop_optimizer(slo), _insertion_point(NULL), _state(NULL), _insert_is_pred(false) {
 
   TRACE_VALUE_NUMBERING(tty->print_cr("using loop invariant code motion loop_header = %d", loop_header->block_id()));
   TRACE_VALUE_NUMBERING(tty->print_cr("** loop invariant code motion for short loop B%d", loop_header->block_id()));
@@ -488,6 +488,7 @@ GlobalValueNumbering::GlobalValueNumbering(IR* ir)
   : _current_map(NULL)
   , _value_maps(ir->linear_scan_order()->length(), ir->linear_scan_order()->length(), NULL)
   , _compilation(ir->compilation())
+  , _has_substitutions(false)
 {
   TRACE_VALUE_NUMBERING(tty->print_cr("****** start of global value numbering"));
 

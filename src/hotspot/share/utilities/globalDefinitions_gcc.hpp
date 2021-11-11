@@ -218,8 +218,8 @@ inline int g_isnan(double f) { return isnan(f); }
 
 // Checking for finiteness
 
-inline int g_isfinite(jfloat  f)                 { return finite(f); }
-inline int g_isfinite(jdouble f)                 { return finite(f); }
+inline int g_isfinite(jfloat  f)                 { return isfinite(f); }
+inline int g_isfinite(jdouble f)                 { return isfinite(f); }
 
 
 // Wide characters
@@ -281,8 +281,8 @@ inline int wcslen(const jchar* x) { return wcslen((const wchar_t*)x); }
 // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53017
 //
 // GCC versions older than 4.6.4 would fail even with "+0", and needs additional
-// cast to typeof(x) to work around the similar bug.
+// cast to __typeof__(x) to work around the similar bug.
 //
-#define ATTRIBUTE_ALIGNED(x) __attribute__((aligned((typeof(x))x+0)))
+#define ATTRIBUTE_ALIGNED(x) __attribute__((aligned((__typeof__(x))x+0)))
 
 #endif // SHARE_VM_UTILITIES_GLOBALDEFINITIONS_GCC_HPP

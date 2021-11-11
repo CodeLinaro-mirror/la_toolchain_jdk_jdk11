@@ -117,7 +117,7 @@ static Node* split_if(IfNode *iff, PhaseIterGVN *igvn) {
   // No intervening control, like a simple Call
   Node *r = iff->in(0);
   if( !r->is_Region() ) return NULL;
-  if (r->is_Loop() && r->in(LoopNode::LoopBackControl)->is_top()) return NULL; // going away anyway
+  if (r->is_Loop()) return NULL;
   if( phi->region() != r ) return NULL;
   // No other users of the cmp/bool
   if (b->outcnt() != 1 || cmp->outcnt() != 1) {
@@ -238,40 +238,19 @@ static Node* split_if(IfNode *iff, PhaseIterGVN *igvn) {
 
   // Make a region merging constants and a region merging the rest
   uint req_c = 0;
-  Node* predicate_proj = NULL;
-  int nb_predicate_proj = 0;
   for (uint ii = 1; ii < r->req(); ii++) {
     if (phi->in(ii) == con1) {
       req_c++;
     }
     Node* proj = PhaseIdealLoop::find_predicate(r->in(ii));
     if (proj != NULL) {
-      nb_predicate_proj++;
-      predicate_proj = proj;
+      return NULL;
     }
   }
 
   // If all the defs of the phi are the same constant, we already have the desired end state.
   // Skip the split that would create empty phi and region nodes.
   if((r->req() - req_c) == 1) {
-    return NULL;
-  }
-
-  if (nb_predicate_proj > 1) {
-    // Can happen in case of loop unswitching and when the loop is
-    // optimized out: it's not a loop anymore so we don't care about
-    // predicates.
-    assert(!r->is_Loop(), "this must not be a loop anymore");
-    predicate_proj = NULL;
-  }
-  Node* predicate_c = NULL;
-  Node* predicate_x = NULL;
-  bool counted_loop = r->is_CountedLoop();
-  if (counted_loop) {
-    // Ignore counted loops for now because the split-if logic does not work
-    // in all the cases (for example, with strip mined loops). Also, above
-    // checks only pass for already degraded loops without a tripcount phi
-    // and these are essentially dead and will go away during igvn.
     return NULL;
   }
 
@@ -283,22 +262,10 @@ static Node* split_if(IfNode *iff, PhaseIterGVN *igvn) {
   for (uint i = 1, i_c = 1, i_x = 1; i < len; i++) {
     if (phi->in(i) == con1) {
       region_c->init_req( i_c++, r  ->in(i) );
-      if (r->in(i) == predicate_proj)
-        predicate_c = predicate_proj;
     } else {
       region_x->init_req( i_x,   r  ->in(i) );
       phi_x   ->init_req( i_x++, phi->in(i) );
-      if (r->in(i) == predicate_proj)
-        predicate_x = predicate_proj;
     }
-  }
-  if (predicate_c != NULL && (req_c > 1)) {
-    assert(predicate_x == NULL, "only one predicate entry expected");
-    predicate_c = NULL; // Do not clone predicate below merge point
-  }
-  if (predicate_x != NULL && ((len - req_c) > 2)) {
-    assert(predicate_c == NULL, "only one predicate entry expected");
-    predicate_x = NULL; // Do not clone predicate below merge point
   }
 
   // Register the new RegionNodes but do not transform them.  Cannot
@@ -341,20 +308,8 @@ static Node* split_if(IfNode *iff, PhaseIterGVN *igvn) {
   // Make the true/false arms
   Node *iff_c_t = phase->transform(new IfTrueNode (iff_c));
   Node *iff_c_f = phase->transform(new IfFalseNode(iff_c));
-  if (predicate_c != NULL) {
-    assert(predicate_x == NULL, "only one predicate entry expected");
-    // Clone loop predicates to each path
-    iff_c_t = igvn->clone_loop_predicates(predicate_c, iff_c_t, !counted_loop);
-    iff_c_f = igvn->clone_loop_predicates(predicate_c, iff_c_f, !counted_loop);
-  }
   Node *iff_x_t = phase->transform(new IfTrueNode (iff_x));
   Node *iff_x_f = phase->transform(new IfFalseNode(iff_x));
-  if (predicate_x != NULL) {
-    assert(predicate_c == NULL, "only one predicate entry expected");
-    // Clone loop predicates to each path
-    iff_x_t = igvn->clone_loop_predicates(predicate_x, iff_x_t, !counted_loop);
-    iff_x_f = igvn->clone_loop_predicates(predicate_x, iff_x_f, !counted_loop);
-  }
 
   // Merge the TRUE paths
   Node *region_s = new RegionNode(3);
@@ -633,7 +588,7 @@ Node* IfNode::up_one_dom(Node *curr, bool linear_only) {
     if( din4->is_Call() &&      // Handle a slow-path call on either arm
         (din4 = din4->in(0)) )
       din4 = din4->in(0);
-    if( din3 == din4 && din3->is_If() )
+    if (din3 != NULL && din3 == din4 && din3->is_If()) // Regions not degraded to a copy
       return din3;              // Skip around diamonds
   }
 
@@ -919,8 +874,6 @@ bool IfNode::fold_compares_helper(ProjNode* proj, ProjNode* success, ProjNode* f
       hi_type->_hi == max_jint && lo_type->_lo == min_jint) {
     assert((dom_bool->_test.is_less() && !proj->_con) ||
            (dom_bool->_test.is_greater() && proj->_con), "incorrect test");
-    // this test was canonicalized
-    assert(this_bool->_test.is_less() && fail->_con, "incorrect test");
 
     // this_bool = <
     //   dom_bool = >= (proj = True) or dom_bool = < (proj = False)
@@ -943,19 +896,25 @@ bool IfNode::fold_compares_helper(ProjNode* proj, ProjNode* success, ProjNode* f
       if (lo_test == BoolTest::gt || lo_test == BoolTest::le) {
         lo = igvn->transform(new AddINode(lo, igvn->intcon(1)));
       }
-    } else {
-      assert(hi_test == BoolTest::le, "bad test");
+    } else if (hi_test == BoolTest::le) {
       if (lo_test == BoolTest::ge || lo_test == BoolTest::lt) {
         adjusted_lim = igvn->transform(new SubINode(hi, lo));
         adjusted_lim = igvn->transform(new AddINode(adjusted_lim, igvn->intcon(1)));
         cond = BoolTest::lt;
-      } else {
-        assert(lo_test == BoolTest::gt || lo_test == BoolTest::le, "bad test");
+      } else if (lo_test == BoolTest::gt || lo_test == BoolTest::le) {
         adjusted_lim = igvn->transform(new SubINode(hi, lo));
         lo = igvn->transform(new AddINode(lo, igvn->intcon(1)));
         cond = BoolTest::lt;
+      } else {
+        assert(false, "unhandled lo_test: %d", lo_test);
+        return false;
       }
+    } else {
+      assert(igvn->_worklist.member(in(1)) && in(1)->Value(igvn) != igvn->type(in(1)), "unhandled hi_test: %d", hi_test);
+      return false;
     }
+    // this test was canonicalized
+    assert(this_bool->_test.is_less() && fail->_con, "incorrect test");
   } else if (lo_type != NULL && hi_type != NULL && lo_type->_lo > hi_type->_hi &&
              lo_type->_hi == max_jint && hi_type->_lo == min_jint) {
 
@@ -982,31 +941,38 @@ bool IfNode::fold_compares_helper(ProjNode* proj, ProjNode* success, ProjNode* f
 
     assert((dom_bool->_test.is_less() && proj->_con) ||
            (dom_bool->_test.is_greater() && !proj->_con), "incorrect test");
-    // this test was canonicalized
-    assert(this_bool->_test.is_less() && !fail->_con, "incorrect test");
 
     cond = (hi_test == BoolTest::le || hi_test == BoolTest::gt) ? BoolTest::gt : BoolTest::ge;
 
     if (lo_test == BoolTest::lt) {
       if (hi_test == BoolTest::lt || hi_test == BoolTest::ge) {
         cond = BoolTest::ge;
-      } else {
-        assert(hi_test == BoolTest::le || hi_test == BoolTest::gt, "bad test");
+      } else if (hi_test == BoolTest::le || hi_test == BoolTest::gt) {
         adjusted_lim = igvn->transform(new SubINode(hi, lo));
         adjusted_lim = igvn->transform(new AddINode(adjusted_lim, igvn->intcon(1)));
         cond = BoolTest::ge;
+      } else {
+        assert(false, "unhandled hi_test: %d", hi_test);
+        return false;
       }
     } else if (lo_test == BoolTest::le) {
       if (hi_test == BoolTest::lt || hi_test == BoolTest::ge) {
         lo = igvn->transform(new AddINode(lo, igvn->intcon(1)));
         cond = BoolTest::ge;
-      } else {
-        assert(hi_test == BoolTest::le || hi_test == BoolTest::gt, "bad test");
+      } else if (hi_test == BoolTest::le || hi_test == BoolTest::gt) {
         adjusted_lim = igvn->transform(new SubINode(hi, lo));
         lo = igvn->transform(new AddINode(lo, igvn->intcon(1)));
         cond = BoolTest::ge;
+      } else {
+        assert(false, "unhandled hi_test: %d", hi_test);
+        return false;
       }
+    } else {
+      assert(igvn->_worklist.member(in(1)) && in(1)->Value(igvn) != igvn->type(in(1)), "unhandled lo_test: %d", lo_test);
+      return false;
     }
+    // this test was canonicalized
+    assert(this_bool->_test.is_less() && !fail->_con, "incorrect test");
   } else {
     const TypeInt* failtype  = filtered_int_type(igvn, n, proj);
     if (failtype != NULL) {
@@ -1027,11 +993,15 @@ bool IfNode::fold_compares_helper(ProjNode* proj, ProjNode* success, ProjNode* f
   }
 
   if (lo && hi) {
+    Node* hook = new Node(1);
+    hook->init_req(0, lo); // Add a use to lo to prevent him from dying
     // Merge the two compares into a single unsigned compare by building (CmpU (n - lo) (hi - lo))
     Node* adjusted_val = igvn->transform(new SubINode(n,  lo));
     if (adjusted_lim == NULL) {
       adjusted_lim = igvn->transform(new SubINode(hi, lo));
     }
+    hook->del_req(0); // Just yank bogus edge
+    hook->destruct();
     Node* newcmp = igvn->transform(new CmpUNode(adjusted_val, adjusted_lim));
     Node* newbool = igvn->transform(new BoolNode(newcmp, cond));
 
@@ -1521,14 +1491,16 @@ Node* IfNode::dominated_by(Node* prev_dom, PhaseIterGVN *igvn) {
     // Loop ends when projection has no more uses.
     for (DUIterator_Last jmin, j = ifp->last_outs(jmin); j >= jmin; --j) {
       Node* s = ifp->last_out(j);   // Get child of IfTrue/IfFalse
-      if( !s->depends_only_on_test() ) {
+      if (s->depends_only_on_test() && igvn->no_dependent_zero_check(s)) {
+        // For control producers.
+        // Do not rewire Div and Mod nodes which could have a zero divisor to avoid skipping their zero check.
+        igvn->replace_input_of(s, 0, data_target); // Move child to data-target
+      } else {
         // Find the control input matching this def-use edge.
         // For Regions it may not be in slot 0.
         uint l;
-        for( l = 0; s->in(l) != ifp; l++ ) { }
+        for (l = 0; s->in(l) != ifp; l++) { }
         igvn->replace_input_of(s, l, ctrl_target);
-      } else {                      // Else, for control producers,
-        igvn->replace_input_of(s, 0, data_target); // Move child to data-target
       }
     } // End for each child of a projection
 

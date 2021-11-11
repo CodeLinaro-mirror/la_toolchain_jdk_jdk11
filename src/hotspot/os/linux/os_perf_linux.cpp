@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,6 +28,7 @@
 #include "os_linux.inline.hpp"
 #include "runtime/os.hpp"
 #include "runtime/os_perf.hpp"
+#include "utilities/globalDefinitions.hpp"
 
 #include CPU_HEADER(vm_version_ext)
 
@@ -780,11 +781,7 @@ char* SystemProcessInterface::SystemProcesses::ProcessIterator::get_exe_path() {
 
 char* SystemProcessInterface::SystemProcesses::ProcessIterator::allocate_string(const char* str) const {
   if (str != NULL) {
-    size_t len = strlen(str);
-    char* tmp = NEW_C_HEAP_ARRAY(char, len+1, mtInternal);
-    strncpy(tmp, str, len);
-    tmp[len] = '\0';
-    return tmp;
+    return os::strdup_check_oom(str, mtInternal);
   }
   return NULL;
 }
@@ -961,8 +958,7 @@ class NetworkPerformanceInterface::NetworkPerformance : public CHeapObj<mtIntern
   friend class NetworkPerformanceInterface;
  private:
   NetworkPerformance();
-  NetworkPerformance(const NetworkPerformance& rhs); // no impl
-  NetworkPerformance& operator=(const NetworkPerformance& rhs); // no impl
+  NONCOPYABLE(NetworkPerformance);
   bool initialize();
   ~NetworkPerformance();
   int64_t read_counter(const char* iface, const char* counter) const;

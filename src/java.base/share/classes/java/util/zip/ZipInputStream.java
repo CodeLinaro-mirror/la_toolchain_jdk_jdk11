@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,7 +30,9 @@ import java.io.IOException;
 import java.io.EOFException;
 import java.io.PushbackInputStream;
 import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
+
+import sun.nio.cs.UTF_8;
+
 import static java.util.zip.ZipConstants64.*;
 import static java.util.zip.ZipUtils.*;
 
@@ -78,7 +80,7 @@ class ZipInputStream extends InflaterInputStream implements ZipConstants {
      * @param in the actual input stream
      */
     public ZipInputStream(InputStream in) {
-        this(in, StandardCharsets.UTF_8);
+        this(in, UTF_8.INSTANCE);
     }
 
     /**
@@ -297,7 +299,7 @@ class ZipInputStream extends InflaterInputStream implements ZipConstants {
         readFully(b, 0, len);
         // Force to use UTF-8 if the USE_UTF8 bit is ON
         ZipEntry e = createZipEntry(((flag & USE_UTF8) != 0)
-                                    ? zc.toStringUTF8(b, len)
+                                    ? ZipCoder.toStringUTF8(b, len)
                                     : zc.toString(b, len));
         // now get the remaining fields for the entry
         if ((flag & 1) == 1) {
@@ -321,7 +323,7 @@ class ZipInputStream extends InflaterInputStream implements ZipConstants {
             byte[] extra = new byte[len];
             readFully(extra, 0, len);
             e.setExtra0(extra,
-                        e.csize == ZIP64_MAGICVAL || e.size == ZIP64_MAGICVAL);
+                        e.csize == ZIP64_MAGICVAL || e.size == ZIP64_MAGICVAL, true);
         }
         return e;
     }

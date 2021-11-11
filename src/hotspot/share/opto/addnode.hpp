@@ -217,9 +217,39 @@ public:
 // all the behavior of addition on a ring.  Only new thing is that we allow
 // 2 equal inputs to be equal.
 class MaxNode : public AddNode {
+private:
+  static Node* build_min_max(Node* a, Node* b, bool is_max, bool is_unsigned, const Type* t, PhaseGVN& gvn);
+  static Node* build_min_max_diff_with_zero(Node* a, Node* b, bool is_max, const Type* t, PhaseGVN& gvn);
+
 public:
   MaxNode( Node *in1, Node *in2 ) : AddNode(in1,in2) {}
   virtual int Opcode() const = 0;
+
+  static Node* unsigned_max(Node* a, Node* b, const Type* t, PhaseGVN& gvn) {
+    return build_min_max(a, b, true, true, t, gvn);
+  }
+
+  static Node* unsigned_min(Node* a, Node* b, const Type* t, PhaseGVN& gvn) {
+    return build_min_max(a, b, false, true, t, gvn);
+  }
+
+  static Node* signed_max(Node* a, Node* b, const Type* t, PhaseGVN& gvn) {
+    return build_min_max(a, b, true, false, t, gvn);
+  }
+
+  static Node* signed_min(Node* a, Node* b, const Type* t, PhaseGVN& gvn) {
+    return build_min_max(a, b, false, false, t, gvn);
+  }
+
+  // max(a-b, 0)
+  static Node* max_diff_with_zero(Node* a, Node* b, const Type* t, PhaseGVN& gvn) {
+    return build_min_max_diff_with_zero(a, b, true, t, gvn);
+  }
+
+  // min(a-b, 0)
+  static Node* min_diff_with_zero(Node* a, Node* b, const Type* t, PhaseGVN& gvn) {
+    return build_min_max_diff_with_zero(a, b, false, t, gvn);
+  }
 };
 
 //------------------------------MaxINode---------------------------------------
@@ -247,6 +277,54 @@ public:
   virtual const Type *bottom_type() const { return TypeInt::INT; }
   virtual uint ideal_reg() const { return Op_RegI; }
   virtual Node *Ideal(PhaseGVN *phase, bool can_reshape);
+};
+
+//------------------------------MaxFNode---------------------------------------
+// Maximum of 2 floats.
+class MaxFNode : public MaxNode {
+public:
+  MaxFNode(Node *in1, Node *in2) : MaxNode(in1, in2) {}
+  virtual int Opcode() const;
+  virtual const Type *add_ring(const Type*, const Type*) const;
+  virtual const Type *add_id() const { return TypeF::NEG_INF; }
+  virtual const Type *bottom_type() const { return Type::FLOAT; }
+  virtual uint ideal_reg() const { return Op_RegF; }
+};
+
+//------------------------------MinFNode---------------------------------------
+// Minimum of 2 floats.
+class MinFNode : public MaxNode {
+public:
+  MinFNode(Node *in1, Node *in2) : MaxNode(in1, in2) {}
+  virtual int Opcode() const;
+  virtual const Type *add_ring(const Type*, const Type*) const;
+  virtual const Type *add_id() const { return TypeF::POS_INF; }
+  virtual const Type *bottom_type() const { return Type::FLOAT; }
+  virtual uint ideal_reg() const { return Op_RegF; }
+};
+
+//------------------------------MaxDNode---------------------------------------
+// Maximum of 2 doubles.
+class MaxDNode : public MaxNode {
+public:
+  MaxDNode(Node *in1, Node *in2) : MaxNode(in1, in2) {}
+  virtual int Opcode() const;
+  virtual const Type *add_ring(const Type*, const Type*) const;
+  virtual const Type *add_id() const { return TypeD::NEG_INF; }
+  virtual const Type *bottom_type() const { return Type::DOUBLE; }
+  virtual uint ideal_reg() const { return Op_RegD; }
+};
+
+//------------------------------MinDNode---------------------------------------
+// Minimum of 2 doubles.
+class MinDNode : public MaxNode {
+public:
+  MinDNode(Node *in1, Node *in2) : MaxNode(in1, in2) {}
+  virtual int Opcode() const;
+  virtual const Type *add_ring(const Type*, const Type*) const;
+  virtual const Type *add_id() const { return TypeD::POS_INF; }
+  virtual const Type *bottom_type() const { return Type::DOUBLE; }
+  virtual uint ideal_reg() const { return Op_RegD; }
 };
 
 #endif // SHARE_VM_OPTO_ADDNODE_HPP

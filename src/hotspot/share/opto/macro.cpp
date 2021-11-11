@@ -47,9 +47,13 @@
 #include "opto/subnode.hpp"
 #include "opto/type.hpp"
 #include "runtime/sharedRuntime.hpp"
+#include "utilities/macros.hpp"
 #if INCLUDE_G1GC
 #include "gc/g1/g1ThreadLocalData.hpp"
 #endif // INCLUDE_G1GC
+#if INCLUDE_SHENANDOAHGC
+#include "gc/shenandoah/c2/shenandoahBarrierSetC2.hpp"
+#endif
 
 
 //
@@ -265,7 +269,11 @@ static Node *scan_mem_chain(Node *mem, int alias_idx, int offset, Node *start_me
         }
         mem = in->in(TypeFunc::Memory);
       } else {
+#ifdef ASSERT
+        in->dump();
+        mem->dump();
         assert(false, "unexpected projection");
+#endif
       }
     } else if (mem->is_Store()) {
       const TypePtr* atype = mem->as_Store()->adr_type();
@@ -276,8 +284,9 @@ static Node *scan_mem_chain(Node *mem, int alias_idx, int offset, Node *start_me
         uint adr_iid = atype->is_oopptr()->instance_id();
         // Array elements references have the same alias_idx
         // but different offset and different instance_id.
-        if (adr_offset == offset && adr_iid == alloc->_idx)
+        if (adr_offset == offset && adr_iid == alloc->_idx) {
           return mem;
+        }
       } else {
         assert(adr_idx == Compile::AliasIdxRaw, "address must match or be raw");
       }
@@ -291,10 +300,11 @@ static Node *scan_mem_chain(Node *mem, int alias_idx, int offset, Node *start_me
         InitializeNode* init = alloc->as_Allocate()->initialization();
         // We are looking for stored value, return Initialize node
         // or memory edge from Allocate node.
-        if (init != NULL)
+        if (init != NULL) {
           return init;
-        else
+        } else {
           return alloc->in(TypeFunc::Memory); // It will produce zero value (see callers).
+        }
       }
       // Otherwise skip it (the call updated 'mem' value).
     } else if (mem->Opcode() == Op_SCMemProj) {
@@ -343,6 +353,7 @@ Node* PhaseMacroExpand::make_arraycopy_load(ArrayCopyNode* ac, intptr_t offset, 
   }
   Node* res = NULL;
   if (ac->is_clonebasic()) {
+    assert(ac->in(ArrayCopyNode::Src) != ac->in(ArrayCopyNode::Dest), "clone source equals destination");
     Node* base = ac->in(ArrayCopyNode::Src)->in(AddPNode::Base);
     Node* adr = _igvn.transform(new AddPNode(base, base, MakeConX(offset)));
     const TypePtr* adr_type = _igvn.type(base)->is_ptr()->add_offset(offset);
@@ -350,17 +361,40 @@ Node* PhaseMacroExpand::make_arraycopy_load(ArrayCopyNode* ac, intptr_t offset, 
   } else {
     if (ac->modifies(offset, offset, &_igvn, true)) {
       assert(ac->in(ArrayCopyNode::Dest) == alloc->result_cast(), "arraycopy destination should be allocation's result");
-      uint shift  = exact_log2(type2aelembytes(bt));
-      Node* diff = _igvn.transform(new SubINode(ac->in(ArrayCopyNode::SrcPos), ac->in(ArrayCopyNode::DestPos)));
-#ifdef _LP64
-      diff = _igvn.transform(new ConvI2LNode(diff));
-#endif
-      diff = _igvn.transform(new LShiftXNode(diff, intcon(shift)));
+      uint shift = exact_log2(type2aelembytes(bt));
+      Node* src_pos = ac->in(ArrayCopyNode::SrcPos);
+      Node* dest_pos = ac->in(ArrayCopyNode::DestPos);
+      const TypeInt* src_pos_t = _igvn.type(src_pos)->is_int();
+      const TypeInt* dest_pos_t = _igvn.type(dest_pos)->is_int();
 
-      Node* off = _igvn.transform(new AddXNode(MakeConX(offset), diff));
-      Node* base = ac->in(ArrayCopyNode::Src);
-      Node* adr = _igvn.transform(new AddPNode(base, base, off));
-      const TypePtr* adr_type = _igvn.type(base)->is_ptr()->add_offset(offset);
+      Node* adr = NULL;
+      const TypePtr* adr_type = NULL;
+      if (src_pos_t->is_con() && dest_pos_t->is_con()) {
+        intptr_t off = ((src_pos_t->get_con() - dest_pos_t->get_con()) << shift) + offset;
+        Node* base = ac->in(ArrayCopyNode::Src);
+        adr = _igvn.transform(new AddPNode(base, base, MakeConX(off)));
+        adr_type = _igvn.type(base)->is_ptr()->add_offset(off);
+        if (ac->in(ArrayCopyNode::Src) == ac->in(ArrayCopyNode::Dest)) {
+          // Don't emit a new load from src if src == dst but try to get the value from memory instead
+          return value_from_mem(ac->in(TypeFunc::Memory), ctl, ft, ftype, adr_type->isa_oopptr(), alloc);
+        }
+      } else {
+        Node* diff = _igvn.transform(new SubINode(ac->in(ArrayCopyNode::SrcPos), ac->in(ArrayCopyNode::DestPos)));
+#ifdef _LP64
+        diff = _igvn.transform(new ConvI2LNode(diff));
+#endif
+        diff = _igvn.transform(new LShiftXNode(diff, intcon(shift)));
+
+        Node* off = _igvn.transform(new AddXNode(MakeConX(offset), diff));
+        Node* base = ac->in(ArrayCopyNode::Src);
+        adr = _igvn.transform(new AddPNode(base, base, off));
+        adr_type = _igvn.type(base)->is_ptr()->add_offset(Type::OffsetBot);
+        if (ac->in(ArrayCopyNode::Src) == ac->in(ArrayCopyNode::Dest)) {
+          // Non constant offset in the array: we can't statically
+          // determine the value
+          return NULL;
+        }
+      }
       res = LoadNode::make(_igvn, ctl, mem, adr, adr_type, type, bt, MemNode::unordered, LoadNode::Pinned);
     }
   }
@@ -434,7 +468,17 @@ Node *PhaseMacroExpand::value_from_mem_phi(Node *mem, BasicType ft, const Type *
       if (val == mem) {
         values.at_put(j, mem);
       } else if (val->is_Store()) {
-        values.at_put(j, val->in(MemNode::ValueIn));
+        Node* n = val->in(MemNode::ValueIn);
+#if INCLUDE_SHENANDOAHGC
+        if (UseShenandoahGC) {
+          BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+          n = bs->step_over_gc_barrier(n);
+        }
+#endif
+        if (is_subword_type(ft)) {
+          n = Compile::narrow_value(ft, n, phi_type, &_igvn, true);
+        }
+        values.at_put(j, n);
       } else if(val->is_Proj() && val->in(0) == alloc) {
         values.at_put(j, _igvn.zerocon(ft));
       } else if (val->is_Phi()) {
@@ -456,10 +500,8 @@ Node *PhaseMacroExpand::value_from_mem_phi(Node *mem, BasicType ft, const Type *
         }
         values.at_put(j, res);
       } else {
-#ifdef ASSERT
-        val->dump();
+        DEBUG_ONLY( val->dump(); )
         assert(false, "unknown node on this path");
-#endif
         return NULL;  // unknown node on this path
       }
     }
@@ -488,7 +530,6 @@ Node *PhaseMacroExpand::value_from_mem(Node *sfpt_mem, Node *sfpt_ctl, BasicType
   Node *alloc_mem = alloc->in(TypeFunc::Memory);
   Arena *a = Thread::current()->resource_area();
   VectorSet visited(a);
-
 
   bool done = sfpt_mem == alloc_mem;
   Node *mem = sfpt_mem;
@@ -538,6 +579,7 @@ Node *PhaseMacroExpand::value_from_mem(Node *sfpt_mem, Node *sfpt_ctl, BasicType
     } else if (mem->is_ArrayCopy()) {
       done = true;
     } else {
+      DEBUG_ONLY( mem->dump(); )
       assert(false, "unexpected node");
     }
   }
@@ -546,7 +588,16 @@ Node *PhaseMacroExpand::value_from_mem(Node *sfpt_mem, Node *sfpt_ctl, BasicType
       // hit a sentinel, return appropriate 0 value
       return _igvn.zerocon(ft);
     } else if (mem->is_Store()) {
+#if INCLUDE_SHENANDOAHGC
+      Node* n = mem->in(MemNode::ValueIn);
+      if (UseShenandoahGC) {
+        BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+        n = bs->step_over_gc_barrier(n);
+      }
+      return n;
+#else
       return mem->in(MemNode::ValueIn);
+#endif
     } else if (mem->is_Phi()) {
       // attempt to produce a Phi reflecting the values on the input paths of the Phi
       Node_Stack value_phis(a, 8);
@@ -623,6 +674,7 @@ bool PhaseMacroExpand::can_eliminate_allocation(AllocateNode *alloc, GrowableArr
                                    k < kmax && can_eliminate; k++) {
           Node* n = use->fast_out(k);
           if (!n->is_Store() && n->Opcode() != Op_CastP2X &&
+              SHENANDOAHGC_ONLY((!UseShenandoahGC || !ShenandoahBarrierSetC2::is_shenandoah_wb_pre_call(n)) &&)
               !(n->is_ArrayCopy() &&
                 n->as_ArrayCopy()->is_clonebasic() &&
                 n->in(ArrayCopyNode::Dest) == use)) {
@@ -923,8 +975,8 @@ void PhaseMacroExpand::process_users_of_allocation(CallNode *alloc) {
             assert(ac->is_clonebasic(), "unexpected array copy kind");
             Node* membar_after = ac->proj_out(TypeFunc::Control)->unique_ctrl_out();
             disconnect_projections(ac, _igvn);
-            assert(alloc->in(0)->is_Proj() && alloc->in(0)->in(0)->Opcode() == Op_MemBarCPUOrder, "mem barrier expected before allocation");
-            Node* membar_before = alloc->in(0)->in(0);
+            assert(alloc->in(TypeFunc::Memory)->is_Proj() && alloc->in(TypeFunc::Memory)->in(0)->Opcode() == Op_MemBarCPUOrder, "mem barrier expected before allocation");
+            Node* membar_before = alloc->in(TypeFunc::Memory)->in(0);
             disconnect_projections(membar_before->as_MemBar(), _igvn);
             if (membar_after->is_MemBar()) {
               disconnect_projections(membar_after->as_MemBar(), _igvn);
@@ -934,6 +986,7 @@ void PhaseMacroExpand::process_users_of_allocation(CallNode *alloc) {
           }
           k -= (oc2 - use->outcnt());
         }
+        _igvn.remove_dead_node(use);
       } else if (use->is_ArrayCopy()) {
         // Disconnect ArrayCopy node
         ArrayCopyNode* ac = use->as_ArrayCopy();
@@ -1964,15 +2017,15 @@ void PhaseMacroExpand::expand_allocate_array(AllocateArrayNode *alloc) {
 // Mark all associated (same box and obj) lock and unlock nodes for
 // elimination if some of them marked already.
 void PhaseMacroExpand::mark_eliminated_box(Node* oldbox, Node* obj) {
-  if (oldbox->as_BoxLock()->is_eliminated())
+  if (oldbox->as_BoxLock()->is_eliminated()) {
     return; // This BoxLock node was processed already.
-
+  }
   // New implementation (EliminateNestedLocks) has separate BoxLock
   // node for each locked region so mark all associated locks/unlocks as
   // eliminated even if different objects are referenced in one locked region
   // (for example, OSR compilation of nested loop inside locked scope).
   if (EliminateNestedLocks ||
-      oldbox->as_BoxLock()->is_simple_lock_region(NULL, obj)) {
+      oldbox->as_BoxLock()->is_simple_lock_region(NULL, obj, NULL)) {
     // Box is used only in one lock region. Mark this box as eliminated.
     _igvn.hash_delete(oldbox);
     oldbox->as_BoxLock()->set_eliminated(); // This changes box's hash value
@@ -2144,11 +2197,7 @@ bool PhaseMacroExpand::eliminate_locking_node(AbstractLockNode *alock) {
 
 #ifndef PRODUCT
   if (PrintEliminateLocks) {
-    if (alock->is_Lock()) {
-      tty->print_cr("++++ Eliminated: %d Lock", alock->_idx);
-    } else {
-      tty->print_cr("++++ Eliminated: %d Unlock", alock->_idx);
-    }
+    tty->print_cr("++++ Eliminated: %d %s '%s'", alock->_idx, (alock->is_Lock() ? "Lock" : "Unlock"), alock->kind_as_string());
   }
 #endif
 
@@ -2520,16 +2569,21 @@ void PhaseMacroExpand::eliminate_macro_nodes() {
   if (C->macro_count() == 0)
     return;
 
-  // First, attempt to eliminate locks
+  // Before elimination may re-mark (change to Nested or NonEscObj)
+  // all associated (same box and obj) lock and unlock nodes.
   int cnt = C->macro_count();
   for (int i=0; i < cnt; i++) {
     Node *n = C->macro_node(i);
     if (n->is_AbstractLock()) { // Lock and Unlock nodes
-      // Before elimination mark all associated (same box and obj)
-      // lock and unlock nodes.
       mark_eliminated_locking_nodes(n->as_AbstractLock());
     }
   }
+  // Re-marking may break consistency of Coarsened locks.
+  if (!C->coarsened_locks_consistent()) {
+    return; // recompile without Coarsened locks if broken
+  }
+
+  // First, attempt to eliminate locks
   bool progress = true;
   while (progress) {
     progress = false;
@@ -2570,9 +2624,10 @@ void PhaseMacroExpand::eliminate_macro_nodes() {
         break;
       case Node::Class_OuterStripMinedLoop:
         break;
+      case Node::Class_Opaque1:
+        break;
       default:
         assert(n->Opcode() == Op_LoopLimit ||
-               n->Opcode() == Op_Opaque1   ||
                n->Opcode() == Op_Opaque2   ||
                n->Opcode() == Op_Opaque3   ||
                BarrierSet::barrier_set()->barrier_set_c2()->is_gc_barrier_node(n),
@@ -2589,6 +2644,7 @@ void PhaseMacroExpand::eliminate_macro_nodes() {
 bool PhaseMacroExpand::expand_macro_nodes() {
   // Last attempt to eliminate macro nodes.
   eliminate_macro_nodes();
+  if (C->failing())  return true;
 
   // Make sure expansion will not cause node limit to be exceeded.
   // Worst case is a macro node gets expanded into about 200 nodes.
@@ -2614,7 +2670,7 @@ bool PhaseMacroExpand::expand_macro_nodes() {
         C->remove_macro_node(n);
         _igvn._worklist.push(n);
         success = true;
-      } else if (n->Opcode() == Op_Opaque1 || n->Opcode() == Op_Opaque2) {
+      } else if (n->is_Opaque1() || n->Opcode() == Op_Opaque2) {
         _igvn.replace_node(n, n->in(1));
         success = true;
 #if INCLUDE_RTM_OPT

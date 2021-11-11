@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -74,7 +74,7 @@ class SharedRuntime: AllStatic {
 
 #ifndef PRODUCT
   // Counters
-  static int     _nof_megamorphic_calls;         // total # of megamorphic calls (through vtable)
+  static int64_t _nof_megamorphic_calls;         // total # of megamorphic calls (through vtable)
 #endif // !PRODUCT
 
  private:
@@ -337,6 +337,11 @@ class SharedRuntime: AllStatic {
   // Find the method that called us.
   static methodHandle find_callee_method(JavaThread* thread, TRAPS);
 
+  static void monitor_enter_helper(oopDesc* obj, BasicLock* lock, JavaThread* thread,
+                                   bool use_inlined_fast_locking);
+
+  static void monitor_exit_helper(oopDesc* obj, BasicLock* lock, JavaThread* thread,
+                                  bool use_inlined_fast_locking);
 
  private:
   static Handle find_callee_info(JavaThread* thread,
@@ -481,10 +486,17 @@ class SharedRuntime: AllStatic {
                                           int compile_id,
                                           BasicType* sig_bt,
                                           VMRegPair* regs,
-                                          BasicType ret_type);
+                                          BasicType ret_type,
+                                          address critical_entry);
 
   // Block before entering a JNI critical method
   static void block_for_jni_critical(JavaThread* thread);
+
+#if INCLUDE_SHENANDOAHGC
+  // Pin/Unpin object
+  static oopDesc* pin_object(JavaThread* thread, oopDesc* obj);
+  static void unpin_object(JavaThread* thread, oopDesc* obj);
+#endif
 
   // A compiled caller has just called the interpreter, but compiled code
   // exists.  Patch the caller so he no longer calls into the interpreter.
@@ -556,16 +568,16 @@ class SharedRuntime: AllStatic {
 
   // Statistics code
   // stats for "normal" compiled calls (non-interface)
-  static int     _nof_normal_calls;              // total # of calls
-  static int     _nof_optimized_calls;           // total # of statically-bound calls
-  static int     _nof_inlined_calls;             // total # of inlined normal calls
-  static int     _nof_static_calls;              // total # of calls to static methods or super methods (invokespecial)
-  static int     _nof_inlined_static_calls;      // total # of inlined static calls
+  static int64_t _nof_normal_calls;               // total # of calls
+  static int64_t _nof_optimized_calls;            // total # of statically-bound calls
+  static int64_t _nof_inlined_calls;              // total # of inlined normal calls
+  static int64_t _nof_static_calls;               // total # of calls to static methods or super methods (invokespecial)
+  static int64_t _nof_inlined_static_calls;       // total # of inlined static calls
   // stats for compiled interface calls
-  static int     _nof_interface_calls;           // total # of compiled calls
-  static int     _nof_optimized_interface_calls; // total # of statically-bound interface calls
-  static int     _nof_inlined_interface_calls;   // total # of inlined interface calls
-  static int     _nof_megamorphic_interface_calls;// total # of megamorphic interface calls
+  static int64_t _nof_interface_calls;            // total # of compiled calls
+  static int64_t _nof_optimized_interface_calls;  // total # of statically-bound interface calls
+  static int64_t _nof_inlined_interface_calls;    // total # of inlined interface calls
+  static int64_t _nof_megamorphic_interface_calls;// total # of megamorphic interface calls
   // stats for runtime exceptions
   static int     _nof_removable_exceptions;      // total # of exceptions that could be replaced by branches due to inlining
 
@@ -579,7 +591,7 @@ class SharedRuntime: AllStatic {
   static address nof_optimized_interface_calls_addr()   { return (address)&_nof_optimized_interface_calls; }
   static address nof_inlined_interface_calls_addr()     { return (address)&_nof_inlined_interface_calls; }
   static address nof_megamorphic_interface_calls_addr() { return (address)&_nof_megamorphic_interface_calls; }
-  static void print_call_statistics(int comp_total);
+  static void print_call_statistics(uint64_t comp_total);
   static void print_statistics();
   static void print_ic_miss_histogram();
 

@@ -39,6 +39,7 @@
 #include "interpreter/bytecode.hpp"
 #include "jfr/jfrEvents.hpp"
 #include "logging/log.hpp"
+#include "memory/heapShared.hpp"
 #include "memory/oopFactory.hpp"
 #include "memory/referenceType.hpp"
 #include "memory/resourceArea.hpp"
@@ -72,7 +73,7 @@
 #include "runtime/thread.inline.hpp"
 #include "runtime/threadSMR.hpp"
 #include "runtime/vframe.inline.hpp"
-#include "runtime/vm_operations.hpp"
+#include "runtime/vmOperations.hpp"
 #include "runtime/vm_version.hpp"
 #include "services/attachListener.hpp"
 #include "services/management.hpp"
@@ -89,6 +90,7 @@
 #endif
 
 #include <errno.h>
+#include <jfr/recorder/jfrRecorder.hpp>
 
 /*
   NOTE about use of any ctor or function call that can trigger a safepoint/GC:
@@ -503,7 +505,15 @@ JVM_ENTRY_NO_ENV(jint, JVM_ActiveProcessorCount(void))
   return os::active_processor_count();
 JVM_END
 
-
+JVM_ENTRY_NO_ENV(jboolean, JVM_IsUseContainerSupport(void))
+  JVMWrapper("JVM_IsUseContainerSupport");
+#ifdef LINUX
+  if (UseContainerSupport) {
+    return JNI_TRUE;
+  }
+#endif
+  return JNI_FALSE;
+JVM_END
 
 // java.lang.Throwable //////////////////////////////////////////////////////
 
@@ -844,10 +854,6 @@ JVM_ENTRY(jclass, JVM_FindClassFromClass(JNIEnv *env, const char *name,
   Handle h_prot  (THREAD, protection_domain);
   jclass result = find_class_from_class_loader(env, h_name, init, h_loader,
                                                h_prot, true, thread);
-  if (result != NULL) {
-    oop mirror = JNIHandles::resolve_non_null(result);
-    Klass* to_class = java_lang_Class::as_Klass(mirror);
-  }
 
   if (log_is_enabled(Debug, class, resolve) && result != NULL) {
     // this function is generally only used for class loading during verification.
@@ -1363,7 +1369,7 @@ JVM_ENTRY(jobject, JVM_GetStackAccessControlContext(JNIEnv *env, jclass cls))
       protection_domain = method->method_holder()->protection_domain();
     }
 
-    if ((!oopDesc::equals(previous_protection_domain, protection_domain)) && (protection_domain != NULL)) {
+    if ((previous_protection_domain != protection_domain) && (protection_domain != NULL)) {
       local_array->push(protection_domain);
       previous_protection_domain = protection_domain;
     }
@@ -2918,6 +2924,15 @@ JVM_ENTRY(void, JVM_StartThread(JNIEnv* env, jobject jthread))
               os::native_thread_creation_failed_msg());
   }
 
+#if INCLUDE_JFR
+  if (JfrRecorder::is_recording() && EventThreadStart::is_enabled() &&
+      EventThreadStart::is_stacktrace_enabled()) {
+    JfrThreadLocal* tl = native_thread->jfr_thread_local();
+    // skip Thread.start() and Thread.start0()
+    tl->set_cached_stack_trace_id(JfrStackTraceRepository::record(thread, 2));
+  }
+#endif
+
   Thread::start(native_thread);
 
 JVM_END
@@ -3588,6 +3603,13 @@ JVM_END
 JVM_LEAF(jboolean, JVM_SupportsCX8())
   JVMWrapper("JVM_SupportsCX8");
   return VM_Version::supports_cx8();
+JVM_END
+
+JVM_ENTRY(void, JVM_InitializeFromArchive(JNIEnv* env, jclass cls))
+  JVMWrapper("JVM_InitializeFromArchive");
+  Klass* k = java_lang_Class::as_Klass(JNIHandles::resolve(cls));
+  assert(k->is_klass(), "just checking");
+  HeapShared::initialize_from_archived_subgraph(k);
 JVM_END
 
 // Returns an array of all live Thread objects (VM internal JavaThreads,

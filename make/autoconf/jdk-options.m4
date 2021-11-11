@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2021, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -283,7 +283,7 @@ AC_DEFUN_ONCE([JDKOPT_DETECT_INTREE_EC],
 AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
 [
   #
-  # NATIVE_DEBUG_SYMBOLS
+  # Native debug symbols.
   # This must be done after the toolchain is setup, since we're looking at objcopy.
   #
   AC_MSG_CHECKING([what type of native debug symbols to use])
@@ -291,28 +291,43 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
       [AS_HELP_STRING([--with-native-debug-symbols],
       [set the native debug symbol configuration (none, internal, external, zipped) @<:@varying@:>@])],
       [
-        if test "x$OPENJDK_TARGET_OS" = xaix; then
-          if test "x$withval" = xexternal || test "x$withval" = xzipped; then
-            AC_MSG_ERROR([AIX only supports the parameters 'none' and 'internal' for --with-native-debug-symbols])
+        if test "x$OPENJDK_TARGET_OS" = xwindows; then
+          if test "x$withval" = xinternal; then
+            AC_MSG_ERROR([Windows does not support the parameter 'internal' for --with-native-debug-symbols])
           fi
         fi
       ],
       [
-        if test "x$OPENJDK_TARGET_OS" = xaix; then
-          # AIX doesn't support 'external' so use 'internal' as default
-          with_native_debug_symbols="internal"
+        if test "x$STATIC_BUILD" = xtrue; then
+          with_native_debug_symbols="none"
         else
-          if test "x$STATIC_BUILD" = xtrue; then
-            with_native_debug_symbols="none"
-          else
-            with_native_debug_symbols="external"
-          fi
+          with_native_debug_symbols="external"
         fi
       ])
-  NATIVE_DEBUG_SYMBOLS=$with_native_debug_symbols
-  AC_MSG_RESULT([$NATIVE_DEBUG_SYMBOLS])
+  AC_MSG_RESULT([$with_native_debug_symbols])
 
-  if test "x$NATIVE_DEBUG_SYMBOLS" = xzipped; then
+  if test "x$with_native_debug_symbols" = xnone; then
+    COMPILE_WITH_DEBUG_SYMBOLS=false
+    COPY_DEBUG_SYMBOLS=false
+    ZIP_EXTERNAL_DEBUG_SYMBOLS=false
+  elif test "x$with_native_debug_symbols" = xinternal; then
+    COMPILE_WITH_DEBUG_SYMBOLS=true
+    COPY_DEBUG_SYMBOLS=false
+    ZIP_EXTERNAL_DEBUG_SYMBOLS=false
+  elif test "x$with_native_debug_symbols" = xexternal; then
+
+    if test "x$OPENJDK_TARGET_OS" = xsolaris || test "x$OPENJDK_TARGET_OS" = xlinux; then
+      if test "x$OBJCOPY" = x; then
+        # enabling of enable-debug-symbols and can't find objcopy
+        # this is an error
+        AC_MSG_ERROR([Unable to find objcopy, cannot enable native debug symbols])
+      fi
+    fi
+
+    COMPILE_WITH_DEBUG_SYMBOLS=true
+    COPY_DEBUG_SYMBOLS=true
+    ZIP_EXTERNAL_DEBUG_SYMBOLS=false
+  elif test "x$with_native_debug_symbols" = xzipped; then
 
     if test "x$OPENJDK_TARGET_OS" = xsolaris || test "x$OPENJDK_TARGET_OS" = xlinux; then
       if test "x$OBJCOPY" = x; then
@@ -325,27 +340,6 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
     COMPILE_WITH_DEBUG_SYMBOLS=true
     COPY_DEBUG_SYMBOLS=true
     ZIP_EXTERNAL_DEBUG_SYMBOLS=true
-  elif test "x$NATIVE_DEBUG_SYMBOLS" = xnone; then
-    COMPILE_WITH_DEBUG_SYMBOLS=false
-    COPY_DEBUG_SYMBOLS=false
-    ZIP_EXTERNAL_DEBUG_SYMBOLS=false
-  elif test "x$NATIVE_DEBUG_SYMBOLS" = xinternal; then
-    COMPILE_WITH_DEBUG_SYMBOLS=true
-    COPY_DEBUG_SYMBOLS=false
-    ZIP_EXTERNAL_DEBUG_SYMBOLS=false
-  elif test "x$NATIVE_DEBUG_SYMBOLS" = xexternal; then
-
-    if test "x$OPENJDK_TARGET_OS" = xsolaris || test "x$OPENJDK_TARGET_OS" = xlinux; then
-      if test "x$OBJCOPY" = x; then
-        # enabling of enable-debug-symbols and can't find objcopy
-        # this is an error
-        AC_MSG_ERROR([Unable to find objcopy, cannot enable native debug symbols])
-      fi
-    fi
-
-    COMPILE_WITH_DEBUG_SYMBOLS=true
-    COPY_DEBUG_SYMBOLS=true
-    ZIP_EXTERNAL_DEBUG_SYMBOLS=false
   else
     AC_MSG_ERROR([Allowed native debug symbols are: none, internal, external, zipped])
   fi
@@ -363,6 +357,33 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
   AC_SUBST(COMPILE_WITH_DEBUG_SYMBOLS)
   AC_SUBST(COPY_DEBUG_SYMBOLS)
   AC_SUBST(ZIP_EXTERNAL_DEBUG_SYMBOLS)
+
+  # Should we add external native debug symbols to the shipped bundles?
+  AC_MSG_CHECKING([if we should add external native debug symbols to the shipped bundles])
+  AC_ARG_WITH([external-symbols-in-bundles],
+      [AS_HELP_STRING([--with-external-symbols-in-bundles],
+      [which type of external native debug symbol information shall be shipped in product bundles (none, public, full)
+      (e.g. ship full/stripped pdbs on Windows) @<:@none@:>@])])
+
+  if test "x$with_external_symbols_in_bundles" = x || test "x$with_external_symbols_in_bundles" = xnone ; then
+    AC_MSG_RESULT([no])
+  elif test "x$with_external_symbols_in_bundles" = xfull || test "x$with_external_symbols_in_bundles" = xpublic ; then
+    if test "x$OPENJDK_TARGET_OS" != xwindows ; then
+      AC_MSG_ERROR([--with-external-symbols-in-bundles currently only works on windows!])
+    elif test "x$COPY_DEBUG_SYMBOLS" != xtrue ; then
+      AC_MSG_ERROR([--with-external-symbols-in-bundles only works when --with-native-debug-symbols=external is used!])
+    elif test "x$with_external_symbols_in_bundles" = xfull ; then
+      AC_MSG_RESULT([full])
+      SHIP_DEBUG_SYMBOLS=full
+    else
+      AC_MSG_RESULT([public])
+      SHIP_DEBUG_SYMBOLS=public
+    fi
+  else
+    AC_MSG_ERROR([$with_external_symbols_in_bundles is an unknown value for --with-external-symbols-in-bundles])
+  fi
+
+  AC_SUBST(SHIP_DEBUG_SYMBOLS)
 ])
 
 ################################################################################
@@ -629,4 +650,36 @@ AC_DEFUN([JDKOPT_ENABLE_DISABLE_MANPAGES],
   fi
 
   AC_SUBST(BUILD_MANPAGES)
+])
+
+################################################################################
+#
+# Disallow any output from containing absolute paths from the build system.
+# This setting defaults to allowed on debug builds and not allowed on release
+# builds.
+#
+AC_DEFUN([JDKOPT_ALLOW_ABSOLUTE_PATHS_IN_OUTPUT],
+[
+  AC_ARG_ENABLE([absolute-paths-in-output],
+      [AS_HELP_STRING([--disable-absolute-paths-in-output],
+       [Set to disable to prevent any absolute paths from the build to end up in
+        any of the build output. @<:@disabled in release builds, otherwise enabled@:>@])
+      ])
+
+  AC_MSG_CHECKING([if absolute paths should be allowed in the build output])
+  if test "x$enable_absolute_paths_in_output" = "xno"; then
+    AC_MSG_RESULT([no, forced])
+    ALLOW_ABSOLUTE_PATHS_IN_OUTPUT="false"
+  elif test "x$enable_absolute_paths_in_output" = "xyes"; then
+    AC_MSG_RESULT([yes, forced])
+    ALLOW_ABSOLUTE_PATHS_IN_OUTPUT="true"
+  elif test "x$DEBUG_LEVEL" = "xrelease"; then
+    AC_MSG_RESULT([no, release build])
+    ALLOW_ABSOLUTE_PATHS_IN_OUTPUT="false"
+  else
+    AC_MSG_RESULT([yes, debug build])
+    ALLOW_ABSOLUTE_PATHS_IN_OUTPUT="true"
+  fi
+
+  AC_SUBST(ALLOW_ABSOLUTE_PATHS_IN_OUTPUT)
 ])

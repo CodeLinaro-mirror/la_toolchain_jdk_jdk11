@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,7 +28,6 @@
 #include "classfile/javaClasses.hpp"
 #include "code/codeCache.hpp"
 #include "compiler/compileBroker.hpp"
-#include "gc/g1/g1HeapRegionEventSender.hpp"
 #include "gc/shared/gcConfiguration.hpp"
 #include "gc/shared/gcTrace.hpp"
 #include "gc/shared/objectCountEventSender.hpp"
@@ -61,6 +60,12 @@
 #include "services/threadService.hpp"
 #include "utilities/exceptions.hpp"
 #include "utilities/globalDefinitions.hpp"
+#if INCLUDE_G1GC
+#include "gc/g1/g1HeapRegionEventSender.hpp"
+#endif
+#if INCLUDE_SHENANDOAHGC
+#include "gc/shenandoah/shenandoahJfrSupport.hpp"
+#endif
 
 /**
  *  JfrPeriodic class
@@ -88,6 +93,12 @@ TRACE_REQUEST_FUNC(OSInformation) {
   JfrOSInterface::os_version(&os_name);
   EventOSInformation event;
   event.set_osVersion(os_name);
+  event.commit();
+}
+
+TRACE_REQUEST_FUNC(VirtualizationInformation) {
+  EventVirtualizationInformation event;
+  event.set_name(JfrOSInterface::virtualization_name());
   event.commit();
 }
 
@@ -311,18 +322,8 @@ TRACE_REQUEST_FUNC(ObjectCount) {
   VMThread::execute(&op);
 }
 
-class VM_G1SendHeapRegionInfoEvents : public VM_Operation {
-  virtual void doit() {
-    G1HeapRegionEventSender::send_events();
-  }
-  virtual VMOp_Type type() const { return VMOp_HeapIterateOperation; }
-};
-
 TRACE_REQUEST_FUNC(G1HeapRegionInformation) {
-  if (UseG1GC) {
-    VM_G1SendHeapRegionInfoEvents op;
-    VMThread::execute(&op);
-  }
+  G1GC_ONLY(G1HeapRegionEventSender::send_events());
 }
 
 // Java Mission Control (JMC) uses (Java) Long.MIN_VALUE to describe that a
@@ -467,9 +468,9 @@ public:
 
   bool do_entry(oop const& key, ClassLoaderStats* const& cls) {
     const ClassLoaderData* this_cld = cls->_class_loader != NULL ?
-      java_lang_ClassLoader::loader_data(cls->_class_loader) : (ClassLoaderData*)NULL;
+      java_lang_ClassLoader::loader_data_acquire(cls->_class_loader) : (ClassLoaderData*)NULL;
     const ClassLoaderData* parent_cld = cls->_parent != NULL ?
-      java_lang_ClassLoader::loader_data(cls->_parent) : (ClassLoaderData*)NULL;
+      java_lang_ClassLoader::loader_data_acquire(cls->_parent) : (ClassLoaderData*)NULL;
     EventClassLoaderStatistics event;
     event.set_classLoader(this_cld);
     event.set_parentClassLoader(parent_cld);
@@ -514,8 +515,8 @@ TRACE_REQUEST_FUNC(CompilerStatistics) {
   event.set_standardCompileCount(CompileBroker::get_total_standard_compile_count());
   event.set_osrBytesCompiled(CompileBroker::get_sum_osr_bytes_compiled());
   event.set_standardBytesCompiled(CompileBroker::get_sum_standard_bytes_compiled());
-  event.set_nmetodsSize(CompileBroker::get_sum_nmethod_size());
-  event.set_nmetodCodeSize(CompileBroker::get_sum_nmethod_code_size());
+  event.set_nmethodsSize(CompileBroker::get_sum_nmethod_size());
+  event.set_nmethodCodeSize(CompileBroker::get_sum_nmethod_code_size());
   event.set_peakTimeSpent(CompileBroker::get_peak_compilation_time());
   event.set_totalTimeSpent(CompileBroker::get_total_compilation_time());
   event.commit();
@@ -575,4 +576,13 @@ TRACE_REQUEST_FUNC(CodeSweeperConfiguration) {
   event.set_sweeperEnabled(MethodFlushing);
   event.set_flushingEnabled(UseCodeCacheFlushing);
   event.commit();
+}
+
+TRACE_REQUEST_FUNC(ShenandoahHeapRegionInformation) {
+#if INCLUDE_SHENANDOAHGC
+  if (UseShenandoahGC) {
+    VM_ShenandoahSendHeapRegionInfoEvents op;
+    VMThread::execute(&op);
+  }
+#endif
 }

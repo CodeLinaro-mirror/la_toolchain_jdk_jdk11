@@ -41,12 +41,12 @@
 #include "interpreter/linkResolver.hpp"
 #include "interpreter/oopMapCache.hpp"
 #include "jfr/jfrEvents.hpp"
-#include "jfr/support/jfrThreadId.hpp"
 #include "jvmtifiles/jvmtiEnv.hpp"
 #include "logging/log.hpp"
 #include "logging/logConfiguration.hpp"
 #include "logging/logStream.hpp"
 #include "memory/allocation.inline.hpp"
+#include "memory/iterator.hpp"
 #include "memory/metaspaceShared.hpp"
 #include "memory/oopFactory.hpp"
 #include "memory/resourceArea.hpp"
@@ -65,6 +65,7 @@
 #include "runtime/arguments.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/biasedLocking.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/flags/jvmFlagConstraintList.hpp"
 #include "runtime/flags/jvmFlagRangeList.hpp"
 #include "runtime/flags/jvmFlagWriteableList.hpp"
@@ -85,6 +86,8 @@
 #include "runtime/prefetch.inline.hpp"
 #include "runtime/safepoint.hpp"
 #include "runtime/safepointMechanism.inline.hpp"
+#include "runtime/safepointVerifiers.hpp"
+#include "runtime/serviceThread.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/statSampler.hpp"
 #include "runtime/stubRoutines.hpp"
@@ -100,7 +103,7 @@
 #include "runtime/vframeArray.hpp"
 #include "runtime/vframe_hp.hpp"
 #include "runtime/vmThread.hpp"
-#include "runtime/vm_operations.hpp"
+#include "runtime/vmOperations.hpp"
 #include "runtime/vm_version.hpp"
 #include "services/attachListener.hpp"
 #include "services/management.hpp"
@@ -113,6 +116,7 @@
 #include "utilities/events.hpp"
 #include "utilities/macros.hpp"
 #include "utilities/preserveException.hpp"
+#include "utilities/singleWriterSynchronizer.hpp"
 #include "utilities/vmError.hpp"
 #if INCLUDE_JVMCI
 #include "jvmci/jvmciCompiler.hpp"
@@ -166,13 +170,6 @@ void universe_post_module_init();  // must happen after call_initPhase2
 // Current thread is maintained as a thread-local variable
 THREAD_LOCAL_DECL Thread* Thread::_thr_current = NULL;
 #endif
-// Class hierarchy
-// - Thread
-//   - VMThread
-//   - WatcherThread
-//   - ConcurrentMarkSweepThread
-//   - JavaThread
-//     - CompilerThread
 
 // ======= Thread ========
 // Support for forcing alignment of thread objects for biased locking
@@ -373,6 +370,8 @@ void Thread::call_run() {
 
   register_thread_stack_with_NMT();
 
+  JFR_ONLY(Jfr::on_thread_start(this);)
+
   log_debug(os, thread)("Thread " UINTX_FORMAT " stack dimensions: "
     PTR_FORMAT "-" PTR_FORMAT " (" SIZE_FORMAT "k).",
     os::current_thread_id(), p2i(stack_base() - stack_size()),
@@ -397,15 +396,12 @@ void Thread::call_run() {
 }
 
 Thread::~Thread() {
-  JFR_ONLY(Jfr::on_thread_destruct(this);)
-
   // Notify the barrier set that a thread is being destroyed. Note that a barrier
   // set might not be available if we encountered errors during bootstrapping.
   BarrierSet* const barrier_set = BarrierSet::barrier_set();
   if (barrier_set != NULL) {
     barrier_set->on_thread_destroy(this);
   }
-
 
   // stack_base can be NULL if the thread is never started or exited before
   // record_stack_base_and_size called. Although, we would like to ensure
@@ -873,7 +869,9 @@ bool Thread::claim_oops_do_par_case(int strong_roots_parity) {
 }
 
 void Thread::oops_do(OopClosure* f, CodeBlobClosure* cf) {
-  active_handles()->oops_do(f);
+  if (active_handles() != NULL) {
+    active_handles()->oops_do(f);
+  }
   // Do oop for ThreadShadow
   f->do_oop((oop*)&_pending_exception);
   handle_area()->oops_do(f);
@@ -1031,7 +1029,7 @@ bool Thread::is_in_stack(address adr) const {
   address end = os::current_stack_pointer();
   // Allow non Java threads to call this without stack_base
   if (_stack_base == NULL) return true;
-  if (stack_base() >= adr && adr >= end) return true;
+  if (stack_base() > adr && adr >= end) return true;
 
   return false;
 }
@@ -1111,6 +1109,8 @@ static oop create_initial_thread(Handle thread_group, JavaThread* thread,
 
 char java_runtime_name[128] = "";
 char java_runtime_version[128] = "";
+char java_runtime_vendor_version[128] = "";
+char java_runtime_vendor_vm_bug_url[128] = "";
 
 // extract the JRE name from java.lang.VersionProps.java_runtime_name
 static const char* get_java_runtime_name(TRAPS) {
@@ -1150,6 +1150,50 @@ static const char* get_java_runtime_version(TRAPS) {
     const char* name = java_lang_String::as_utf8_string(name_oop,
                                                         java_runtime_version,
                                                         sizeof(java_runtime_version));
+    return name;
+  } else {
+    return NULL;
+  }
+}
+
+// extract the JRE vendor version from java.lang.VersionProps.VENDOR_VERSION
+static const char* get_java_runtime_vendor_version(TRAPS) {
+  Klass* k = SystemDictionary::find(vmSymbols::java_lang_VersionProps(),
+                                    Handle(), Handle(), CHECK_AND_CLEAR_NULL);
+  fieldDescriptor fd;
+  bool found = k != NULL &&
+               InstanceKlass::cast(k)->find_local_field(vmSymbols::java_runtime_vendor_version_name(),
+                                                        vmSymbols::string_signature(), &fd);
+  if (found) {
+    oop name_oop = k->java_mirror()->obj_field(fd.offset());
+    if (name_oop == NULL) {
+      return NULL;
+    }
+    const char* name = java_lang_String::as_utf8_string(name_oop,
+                                                        java_runtime_vendor_version,
+                                                        sizeof(java_runtime_vendor_version));
+    return name;
+  } else {
+    return NULL;
+  }
+}
+
+// extract the JRE vendor VM bug URL from java.lang.VersionProps.VENDOR_URL_VM_BUG
+static const char* get_java_runtime_vendor_vm_bug_url(TRAPS) {
+  Klass* k = SystemDictionary::find(vmSymbols::java_lang_VersionProps(),
+                                    Handle(), Handle(), CHECK_AND_CLEAR_NULL);
+  fieldDescriptor fd;
+  bool found = k != NULL &&
+               InstanceKlass::cast(k)->find_local_field(vmSymbols::java_runtime_vendor_vm_bug_url_name(),
+                                                        vmSymbols::string_signature(), &fd);
+  if (found) {
+    oop name_oop = k->java_mirror()->obj_field(fd.offset());
+    if (name_oop == NULL) {
+      return NULL;
+    }
+    const char* name = java_lang_String::as_utf8_string(name_oop,
+                                                        java_runtime_vendor_vm_bug_url,
+                                                        sizeof(java_runtime_vendor_vm_bug_url));
     return name;
   } else {
     return NULL;
@@ -1230,13 +1274,62 @@ void JavaThread::allocate_threadObj(Handle thread_group, const char* thread_name
                           THREAD);
 }
 
+// List of all NonJavaThreads and safe iteration over that list.
+
+class NonJavaThread::List {
+public:
+  NonJavaThread* volatile _head;
+  SingleWriterSynchronizer _protect;
+
+  List() : _head(NULL), _protect() {}
+};
+
+NonJavaThread::List NonJavaThread::_the_list;
+
+NonJavaThread::Iterator::Iterator() :
+  _protect_enter(_the_list._protect.enter()),
+  _current(OrderAccess::load_acquire(&_the_list._head))
+{}
+
+NonJavaThread::Iterator::~Iterator() {
+  _the_list._protect.exit(_protect_enter);
+}
+
+void NonJavaThread::Iterator::step() {
+  assert(!end(), "precondition");
+  _current = OrderAccess::load_acquire(&_current->_next);
+}
+
+NonJavaThread::NonJavaThread() : Thread(), _next(NULL) {
+  // Add this thread to _the_list.
+  MutexLockerEx lock(NonJavaThreadsList_lock, Mutex::_no_safepoint_check_flag);
+  _next = _the_list._head;
+  OrderAccess::release_store(&_the_list._head, this);
+}
+
+NonJavaThread::~NonJavaThread() {
+  JFR_ONLY(Jfr::on_thread_exit(this);)
+  // Remove this thread from _the_list.
+  MutexLockerEx lock(NonJavaThreadsList_lock, Mutex::_no_safepoint_check_flag);
+  NonJavaThread* volatile* p = &_the_list._head;
+  for (NonJavaThread* t = *p; t != NULL; p = &t->_next, t = *p) {
+    if (t == this) {
+      *p = this->_next;
+      // Wait for any in-progress iterators.
+      _the_list._protect.synchronize();
+      break;
+    }
+  }
+}
+
 // NamedThread --  non-JavaThread subclasses with multiple
 // uniquely named instances should derive from this.
-NamedThread::NamedThread() : Thread() {
-  _name = NULL;
-  _processed_thread = NULL;
-  _gc_id = GCId::undefined();
-}
+NamedThread::NamedThread() :
+  NonJavaThread(),
+  _name(NULL),
+  _processed_thread(NULL),
+  _gc_id(GCId::undefined())
+{}
 
 NamedThread::~NamedThread() {
   if (_name != NULL) {
@@ -1276,7 +1369,7 @@ WatcherThread* WatcherThread::_watcher_thread   = NULL;
 bool WatcherThread::_startable = false;
 volatile bool  WatcherThread::_should_terminate = false;
 
-WatcherThread::WatcherThread() : Thread() {
+WatcherThread::WatcherThread() : NonJavaThread() {
   assert(watcher_thread() == NULL, "we can only allocate one WatcherThread");
   if (os::create_thread(this, os::watcher_thread)) {
     _watcher_thread = this;
@@ -1513,7 +1606,7 @@ void JavaThread::initialize() {
   set_monitor_chunks(NULL);
   set_next(NULL);
   _on_thread_list = false;
-  set_thread_state(_thread_new);
+  _thread_state = _thread_new;
   _terminated = _not_terminated;
   _privileged_stack_top = NULL;
   _array_for_gc = NULL;
@@ -1529,6 +1622,9 @@ void JavaThread::initialize() {
   _adjusting_comp_level = false;
   _jvmci._alternate_call_target = NULL;
   assert(_jvmci._implicit_exception_pc == NULL, "must be");
+  _jvmci_reserved0 = NULL;
+  _jvmci_reserved1 = NULL;
+  _jvmci_reserved_oop0 = NULL;
   if (JVMCICounterSize > 0) {
     _jvmci_counters = NEW_C_HEAP_ARRAY(jlong, JVMCICounterSize, mtInternal);
     memset(_jvmci_counters, 0, sizeof(jlong) * JVMCICounterSize);
@@ -1739,12 +1835,7 @@ void JavaThread::run() {
 
   if (JvmtiExport::should_post_thread_life()) {
     JvmtiExport::post_thread_start(this);
-  }
 
-  EventThreadStart event;
-  if (event.should_commit()) {
-    event.set_thread(JFR_THREAD_ID(this));
-    event.commit();
   }
 
   // We call another function to do the rest so we are sure that the stack addresses used
@@ -1848,17 +1939,7 @@ void JavaThread::exit(bool destroy_vm, ExitType exit_type) {
         CLEAR_PENDING_EXCEPTION;
       }
     }
-
-    // Called before the java thread exit since we want to read info
-    // from java_lang_Thread object
-    EventThreadEnd event;
-    if (event.should_commit()) {
-      event.set_thread(JFR_THREAD_ID(this));
-      event.commit();
-    }
-
-    // Call after last event on thread
-    JFR_ONLY(Jfr::on_thread_exit(this);)
+    JFR_ONLY(Jfr::on_java_thread_dismantle(this);)
 
     // Call Thread.exit(). We try 3 times in case we got another Thread.stop during
     // the execution of the method. If that is not enough, then we don't really care. Thread.stop
@@ -1952,6 +2033,7 @@ void JavaThread::exit(bool destroy_vm, ExitType exit_type) {
   // These things needs to be done while we are still a Java Thread. Make sure that thread
   // is in a consistent state, in case GC happens
   assert(_privileged_stack_top == NULL, "must be NULL when we get here");
+  JFR_ONLY(Jfr::on_thread_exit(this);)
 
   if (active_handles() != NULL) {
     JNIHandleBlock* block = active_handles();
@@ -2080,7 +2162,8 @@ void JavaThread::remove_monitor_chunk(MonitorChunk* chunk) {
 // _thread_in_native_trans state (such as from
 // check_special_condition_for_native_trans()).
 void JavaThread::check_and_handle_async_exceptions(bool check_unsafe_error) {
-
+  // May be we are at method entry and requires to save do not unlock flag.
+  UnlockFlagSaver fs(this);
   if (has_last_Java_frame() && has_async_condition()) {
     // If we are at a polling page safepoint (not a poll return)
     // then we must defer async exception because live registers
@@ -2577,8 +2660,7 @@ void JavaThread::remove_stack_guard_pages() {
 }
 
 void JavaThread::enable_stack_reserved_zone() {
-  assert(_stack_guard_state != stack_guard_unused, "must be using guard pages.");
-  assert(_stack_guard_state != stack_guard_enabled, "already enabled");
+  assert(_stack_guard_state == stack_guard_reserved_disabled, "inconsistent state");
 
   // The base notation is from the stack's point of view, growing downward.
   // We need to adjust it to work correctly with guard_memory()
@@ -2596,11 +2678,10 @@ void JavaThread::enable_stack_reserved_zone() {
 }
 
 void JavaThread::disable_stack_reserved_zone() {
-  assert(_stack_guard_state != stack_guard_unused, "must be using guard pages.");
-  assert(_stack_guard_state != stack_guard_reserved_disabled, "already disabled");
+  assert(_stack_guard_state == stack_guard_enabled, "inconsistent state");
 
   // Simply return if called for a thread that does not use guard pages.
-  if (_stack_guard_state == stack_guard_unused) return;
+  if (_stack_guard_state != stack_guard_enabled) return;
 
   // The base notation is from the stack's point of view, growing downward.
   // We need to adjust it to work correctly with guard_memory()
@@ -2845,9 +2926,12 @@ void JavaThread::oops_do(OopClosure* f, CodeBlobClosure* cf) {
   f->do_oop((oop*) &_vm_result);
   f->do_oop((oop*) &_exception_oop);
   f->do_oop((oop*) &_pending_async_exception);
+#if INCLUDE_JVMCI
+  f->do_oop((oop*) &_jvmci_reserved_oop0);
+#endif
 
   if (jvmti_thread_state() != NULL) {
-    jvmti_thread_state()->oops_do(f);
+    jvmti_thread_state()->oops_do(f, cf);
   }
 }
 
@@ -2860,6 +2944,10 @@ void JavaThread::nmethods_do(CodeBlobClosure* cf) {
     for (StackFrameStream fst(this); !fst.is_done(); fst.next()) {
       fst.current()->nmethods_do(cf);
     }
+  }
+
+  if (jvmti_thread_state() != NULL) {
+    jvmti_thread_state()->nmethods_do(cf);
   }
 }
 
@@ -3403,35 +3491,12 @@ static inline void *prefetch_and_load_ptr(void **addr, intx prefetch_interval) {
 // All JavaThreads
 #define ALL_JAVA_THREADS(X) DO_JAVA_THREADS(ThreadsSMRSupport::get_java_thread_list(), X)
 
-// All non-JavaThreads (i.e., every non-JavaThread in the system).
+// All NonJavaThreads (i.e., every non-JavaThread in the system).
 void Threads::non_java_threads_do(ThreadClosure* tc) {
-  // Someday we could have a table or list of all non-JavaThreads.
-  // For now, just manually iterate through them.
-  tc->do_thread(VMThread::vm_thread());
-  if (Universe::heap() != NULL) {
-    Universe::heap()->gc_threads_do(tc);
+  NoSafepointVerifier nsv(!SafepointSynchronize::is_at_safepoint(), false);
+  for (NonJavaThread::Iterator njti; !njti.end(); njti.step()) {
+    tc->do_thread(njti.current());
   }
-  WatcherThread *wt = WatcherThread::watcher_thread();
-  // Strictly speaking, the following NULL check isn't sufficient to make sure
-  // the data for WatcherThread is still valid upon being examined. However,
-  // considering that WatchThread terminates when the VM is on the way to
-  // exit at safepoint, the chance of the above is extremely small. The right
-  // way to prevent termination of WatcherThread would be to acquire
-  // Terminator_lock, but we can't do that without violating the lock rank
-  // checking in some cases.
-  if (wt != NULL) {
-    tc->do_thread(wt);
-  }
-
-#if INCLUDE_JFR
-  Thread* sampler_thread = Jfr::sampler_thread();
-  if (sampler_thread != NULL) {
-    tc->do_thread(sampler_thread);
-  }
-
-#endif
-
-  // If CompilerThreads ever become non-JavaThreads, add them here
 }
 
 // All JavaThreads
@@ -3566,9 +3631,11 @@ void Threads::initialize_java_lang_classes(JavaThread* main_thread, TRAPS) {
   // Phase 1 of the system initialization in the library, java.lang.System class initialization
   call_initPhase1(CHECK);
 
-  // get the Java runtime name after java.lang.System is initialized
+  // get the Java runtime name, version, and vendor info after java.lang.System is initialized
   JDK_Version::set_runtime_name(get_java_runtime_name(THREAD));
   JDK_Version::set_runtime_version(get_java_runtime_version(THREAD));
+  JDK_Version::set_runtime_vendor_version(get_java_runtime_vendor_version(THREAD));
+  JDK_Version::set_runtime_vendor_vm_bug_url(get_java_runtime_vendor_vm_bug_url(THREAD));
 
   // an instance of OutOfMemory exception has been allocated earlier
   initialize_class(vmSymbols::java_lang_OutOfMemoryError(), CHECK);
@@ -3738,7 +3805,7 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
     return status;
   }
 
-  JFR_ONLY(Jfr::on_vm_init();)
+  JFR_ONLY(Jfr::on_create_vm_1();)
 
   // Should be done after the heap is fully created
   main_thread->cache_global_variables();
@@ -3842,6 +3909,11 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
     Chunk::start_chunk_pool_cleaner_task();
   }
 
+  // Start the service thread
+  // The service thread enqueues JVMTI deferred events and does various hashtable
+  // and other cleanups.  Needs to start before the compilers start posting events.
+  ServiceThread::initialize();
+
   // initialize compiler(s)
 #if defined(COMPILER1) || COMPILER2_OR_JVMCI
 #if INCLUDE_JVMCI
@@ -3878,6 +3950,8 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
   // loaded until phase 2 completes
   call_initPhase2(CHECK_JNI_ERR);
 
+  JFR_ONLY(Jfr::on_create_vm_2();)
+
   // Always call even when there are not JVMTI environments yet, since environments
   // may be attached late and JVMTI must track phases of VM execution
   JvmtiExport::enter_start_phase();
@@ -3912,7 +3986,7 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
   // Notify JVMTI agents that VM initialization is complete - nop if no agents.
   JvmtiExport::post_vm_initialized();
 
-  JFR_ONLY(Jfr::on_vm_start();)
+  JFR_ONLY(Jfr::on_create_vm_3();)
 
 #if INCLUDE_MANAGEMENT
   Management::initialize(THREAD);
@@ -4161,7 +4235,6 @@ void Threads::create_vm_init_libraries() {
   }
 }
 
-
 // Last thread running calls java.lang.Shutdown.shutdown()
 void JavaThread::invoke_shutdown_hooks() {
   HandleMark hm(this);
@@ -4259,9 +4332,6 @@ bool Threads::destroy_vm() {
   before_exit(thread);
 
   thread->exit(true);
-  // thread will never call smr_delete, instead of implicit cancel
-  // in wait_for_vm_thread_exit we do it explicit.
-  thread->cancel_handshake();
 
   // Stop VM thread.
   {
@@ -4673,8 +4743,10 @@ void Threads::print_on_error(outputStream* st, Thread* current, char* buf,
   print_on_error(VMThread::vm_thread(), st, current, buf, buflen, &found_current);
   print_on_error(WatcherThread::watcher_thread(), st, current, buf, buflen, &found_current);
 
-  PrintOnErrorClosure print_closure(st, current, buf, buflen, &found_current);
-  Universe::heap()->gc_threads_do(&print_closure);
+  if (Universe::heap() != NULL) {
+    PrintOnErrorClosure print_closure(st, current, buf, buflen, &found_current);
+    Universe::heap()->gc_threads_do(&print_closure);
+  }
 
   if (!found_current) {
     st->cr();
@@ -4688,7 +4760,7 @@ void Threads::print_on_error(outputStream* st, Thread* current, char* buf,
   print_threads_compiling(st, buf, buflen);
 }
 
-void Threads::print_threads_compiling(outputStream* st, char* buf, int buflen) {
+void Threads::print_threads_compiling(outputStream* st, char* buf, int buflen, bool short_form) {
   ALL_JAVA_THREADS(thread) {
     if (thread->is_Compiler_thread()) {
       CompilerThread* ct = (CompilerThread*) thread;
@@ -4700,7 +4772,7 @@ void Threads::print_threads_compiling(outputStream* st, char* buf, int buflen) {
       CompileTask* task = ct->task();
       if (task != NULL) {
         thread->print_name_on_error(st, buf, buflen);
-        task->print(st, NULL, true, true);
+        task->print(st, NULL, short_form, true);
       }
     }
   }

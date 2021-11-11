@@ -21,17 +21,9 @@
  * under the License.
  */
 /*
- * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
- */
-/*
- * $Id: DOMKeyValue.java 1788465 2017-03-24 15:10:51Z coheigea $
+ * Copyright (c) 2005, Oracle and/or its affiliates. All rights reserved.
  */
 package org.jcp.xml.dsig.internal.dom;
-
-import javax.xml.crypto.*;
-import javax.xml.crypto.dom.DOMCryptoContext;
-import javax.xml.crypto.dsig.*;
-import javax.xml.crypto.dsig.keyinfo.KeyValue;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -54,6 +46,11 @@ import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
 import java.security.spec.RSAPublicKeySpec;
 import java.util.Arrays;
+
+import javax.xml.crypto.MarshalException;
+import javax.xml.crypto.dom.DOMCryptoContext;
+import javax.xml.crypto.dsig.XMLSignature;
+import javax.xml.crypto.dsig.keyinfo.KeyValue;
 
 import com.sun.org.apache.xml.internal.security.utils.XMLUtils;
 import org.w3c.dom.Document;
@@ -93,11 +90,11 @@ public abstract class DOMKeyValue<K extends PublicKey> extends DOMStructure impl
         }
 
         String namespace = kvtElem.getNamespaceURI();
-        if (kvtElem.getLocalName().equals("DSAKeyValue") && XMLSignature.XMLNS.equals(namespace)) {
+        if ("DSAKeyValue".equals(kvtElem.getLocalName()) && XMLSignature.XMLNS.equals(namespace)) {
             return new DSA(kvtElem);
-        } else if (kvtElem.getLocalName().equals("RSAKeyValue") && XMLSignature.XMLNS.equals(namespace)) {
+        } else if ("RSAKeyValue".equals(kvtElem.getLocalName()) && XMLSignature.XMLNS.equals(namespace)) {
             return new RSA(kvtElem);
-        } else if (kvtElem.getLocalName().equals("ECKeyValue") && XMLDSIG_11_XMLNS.equals(namespace)) {
+        } else if ("ECKeyValue".equals(kvtElem.getLocalName()) && XMLDSIG_11_XMLNS.equals(namespace)) {
             return new EC(kvtElem);
         } else {
             return new Unknown(kvtElem);
@@ -310,7 +307,7 @@ public abstract class DOMKeyValue<K extends PublicKey> extends DOMStructure impl
             // check for P and Q
             BigInteger p = null;
             BigInteger q = null;
-            if (curElem.getLocalName().equals("P") && XMLSignature.XMLNS.equals(curElem.getNamespaceURI())) {
+            if ("P".equals(curElem.getLocalName()) && XMLSignature.XMLNS.equals(curElem.getNamespaceURI())) {
                 p = decode(curElem);
                 curElem = DOMUtils.getNextSiblingElement(curElem, "Q", XMLSignature.XMLNS);
                 q = decode(curElem);
@@ -318,7 +315,7 @@ public abstract class DOMKeyValue<K extends PublicKey> extends DOMStructure impl
             }
             BigInteger g = null;
             if (curElem != null
-                && curElem.getLocalName().equals("G") && XMLSignature.XMLNS.equals(curElem.getNamespaceURI())) {
+                && "G".equals(curElem.getLocalName()) && XMLSignature.XMLNS.equals(curElem.getNamespaceURI())) {
                 g = decode(curElem);
                 curElem = DOMUtils.getNextSiblingElement(curElem, "Y", XMLSignature.XMLNS);
             }
@@ -327,7 +324,7 @@ public abstract class DOMKeyValue<K extends PublicKey> extends DOMStructure impl
                 y = decode(curElem);
                 curElem = DOMUtils.getNextSiblingElement(curElem);
             }
-            //if (curElem != null && curElem.getLocalName().equals("J")) {
+            //if (curElem != null && "J".equals(curElem.getLocalName())) {
                 //j = new DOMCryptoBinary(curElem.getFirstChild());
                 // curElem = DOMUtils.getNextSiblingElement(curElem);
             //}
@@ -469,15 +466,11 @@ public abstract class DOMKeyValue<K extends PublicKey> extends DOMStructure impl
 
         private static boolean matchCurve(ECParameterSpec params, Curve curve) {
             int fieldSize = params.getCurve().getField().getFieldSize();
-            if (curve.getCurve().getField().getFieldSize() == fieldSize
+            return curve.getCurve().getField().getFieldSize() == fieldSize
                 && curve.getCurve().equals(params.getCurve())
                 && curve.getGenerator().equals(params.getGenerator())
                 && curve.getOrder().equals(params.getOrder())
-                && curve.getCofactor() == params.getCofactor()) {
-                return true;
-            } else {
-                return false;
-            }
+                && curve.getCofactor() == params.getCofactor();
         }
 
         @Override
@@ -530,11 +523,11 @@ public abstract class DOMKeyValue<K extends PublicKey> extends DOMStructure impl
                 throw new MarshalException("KeyValue must contain at least one type");
             }
 
-            if (curElem.getLocalName().equals("ECParameters")
+            if ("ECParameters".equals(curElem.getLocalName())
                 && XMLDSIG_11_XMLNS.equals(curElem.getNamespaceURI())) {
                 throw new UnsupportedOperationException
                     ("ECParameters not supported");
-            } else if (curElem.getLocalName().equals("NamedCurve")
+            } else if ("NamedCurve".equals(curElem.getLocalName())
                 && XMLDSIG_11_XMLNS.equals(curElem.getNamespaceURI())) {
                 String uri = DOMUtils.getAttributeValue(curElem, "URI");
                 // strip off "urn:oid"
@@ -554,7 +547,7 @@ public abstract class DOMKeyValue<K extends PublicKey> extends DOMStructure impl
             ECPoint ecPoint = null;
 
             try {
-                String content = XMLUtils.getFullTextChildrenFromElement(curElem);
+                String content = XMLUtils.getFullTextChildrenFromNode(curElem);
                 ecPoint = decodePoint(XMLUtils.decode(content),
                                       ecParams.getCurve());
             } catch (IOException ioe) {

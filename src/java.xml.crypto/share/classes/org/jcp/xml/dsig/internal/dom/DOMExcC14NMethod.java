@@ -21,10 +21,7 @@
  * under the License.
  */
 /*
- * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
- */
-/*
- * $Id: DOMExcC14NMethod.java 1788465 2017-03-24 15:10:51Z coheigea $
+ * Copyright (c) 2005, Oracle and/or its affiliates. All rights reserved.
  */
 package org.jcp.xml.dsig.internal.dom;
 
@@ -128,7 +125,7 @@ public final class DOMExcC14NMethod extends ApacheCanonicalizer {
         for (int i = 0, size = prefixList.size(); i < size; i++) {
             prefixListAttr.append(prefixList.get(i));
             if (i < size - 1) {
-                prefixListAttr.append(" ");
+                prefixListAttr.append(' ');
             }
         }
         DOMUtils.setAttribute(eElem, "PrefixList", prefixListAttr.toString());
@@ -150,10 +147,8 @@ public final class DOMExcC14NMethod extends ApacheCanonicalizer {
             DOMSubTreeData subTree = (DOMSubTreeData)data;
             if (subTree.excludeComments()) {
                 try {
-                    apacheCanonicalizer = Canonicalizer.getInstance
+                    canonicalizer = Canonicalizer.getInstance
                         (CanonicalizationMethod.EXCLUSIVE);
-                    boolean secVal = Utils.secureValidation(xc);
-                    apacheCanonicalizer.setSecureValidation(secVal);
                 } catch (InvalidCanonicalizerException ice) {
                     throw new TransformException
                         ("Couldn't find Canonicalizer for: " +

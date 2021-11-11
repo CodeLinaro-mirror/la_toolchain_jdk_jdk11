@@ -24,18 +24,13 @@
 /**
  * @test
  * @bug 8031320
- * @summary Verify PrintPreciseRTMLockingStatistics on CPUs with
+ * @summary Verify PrintPreciseRTMLockingStatistics on CPUs and OSs with
  *          rtm support and on VM with rtm locking support,
  * @library /test/lib /
  * @modules java.base/jdk.internal.misc
  *          java.management
- * @requires vm.flavor == "server" & !vm.emulatedClient & vm.rtm.cpu & vm.rtm.os
- * @build sun.hotspot.WhiteBox
- * @run driver ClassFileInstaller sun.hotspot.WhiteBox
- *                                sun.hotspot.WhiteBox$WhiteBoxPermission
- * @run main/othervm -Xbootclasspath/a:. -XX:+UnlockDiagnosticVMOptions
- *                   -XX:+WhiteBoxAPI
- *                   compiler.rtm.cli.TestPrintPreciseRTMLockingStatisticsOptionOnSupportedConfig
+ * @requires vm.rtm.cpu & vm.rtm.compiler
+ * @run driver compiler.rtm.cli.TestPrintPreciseRTMLockingStatisticsOptionOnSupportedConfig
  */
 
 package compiler.rtm.cli;

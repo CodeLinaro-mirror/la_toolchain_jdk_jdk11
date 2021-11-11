@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,9 +24,13 @@
 /*
  * @test
  * @bug 8136421
- * @requires vm.jvmci
- *         & (vm.compMode != "Xcomp" | vm.opt.TieredCompilation == null | vm.opt.TieredCompilation == true)
- * @summary no "-Xcomp -XX:-TieredCompilation" combination allowed until JDK-8140018 is resolved
+ *
+ * @requires vm.jvmci & vm.compMode == "Xmixed"
+ * @requires vm.opt.final.EliminateAllocations == true
+ *
+ * @comment no "-Xcomp -XX:-TieredCompilation" combination allowed until JDK-8140018 is resolved
+ * @requires vm.opt.TieredCompilation == null | vm.opt.TieredCompilation == true
+ *
  * @library / /test/lib
  * @library ../common/patches
  * @modules java.base/jdk.internal.misc
@@ -40,7 +44,7 @@
  * @build jdk.internal.vm.ci/jdk.vm.ci.hotspot.CompilerToVMHelper sun.hotspot.WhiteBox
  * @run driver ClassFileInstaller sun.hotspot.WhiteBox
  *                                sun.hotspot.WhiteBox$WhiteBoxPermission
- * @run main/othervm -Xmixed -Xbatch -Xbootclasspath/a:.
+ * @run main/othervm -Xbatch -Xbootclasspath/a:.
  *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
  *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
  *                   -XX:CompileCommand=exclude,compiler.jvmci.compilerToVM.MaterializeVirtualObjectTest::check
@@ -51,7 +55,7 @@
  *                   -Dcompiler.jvmci.compilerToVM.MaterializeVirtualObjectTest.materializeFirst=true
  *                   -Dcompiler.jvmci.compilerToVM.MaterializeVirtualObjectTest.invalidate=false
  *                   compiler.jvmci.compilerToVM.MaterializeVirtualObjectTest
- * @run main/othervm -Xmixed -Xbatch -Xbootclasspath/a:.
+ * @run main/othervm -Xbatch -Xbootclasspath/a:.
  *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
  *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
  *                   -XX:CompileCommand=exclude,compiler.jvmci.compilerToVM.MaterializeVirtualObjectTest::check
@@ -62,7 +66,7 @@
  *                   -Dcompiler.jvmci.compilerToVM.MaterializeVirtualObjectTest.materializeFirst=false
  *                   -Dcompiler.jvmci.compilerToVM.MaterializeVirtualObjectTest.invalidate=false
  *                   compiler.jvmci.compilerToVM.MaterializeVirtualObjectTest
- * @run main/othervm -Xmixed -Xbatch -Xbootclasspath/a:.
+ * @run main/othervm -Xbatch -Xbootclasspath/a:.
  *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
  *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
  *                   -XX:CompileCommand=exclude,compiler.jvmci.compilerToVM.MaterializeVirtualObjectTest::check
@@ -73,7 +77,7 @@
  *                   -Dcompiler.jvmci.compilerToVM.MaterializeVirtualObjectTest.materializeFirst=true
  *                   -Dcompiler.jvmci.compilerToVM.MaterializeVirtualObjectTest.invalidate=true
  *                   compiler.jvmci.compilerToVM.MaterializeVirtualObjectTest
- * @run main/othervm -Xmixed -Xbatch -Xbootclasspath/a:.
+ * @run main/othervm -Xbatch -Xbootclasspath/a:.
  *                   -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI
  *                   -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI
  *                   -XX:CompileCommand=exclude,compiler.jvmci.compilerToVM.MaterializeVirtualObjectTest::check
@@ -96,6 +100,7 @@ import jdk.vm.ci.code.stack.InspectedFrame;
 import jdk.vm.ci.hotspot.CompilerToVMHelper;
 import jdk.vm.ci.hotspot.HotSpotStackFrameReference;
 import jdk.vm.ci.meta.ResolvedJavaMethod;
+import jtreg.SkippedException;
 import sun.hotspot.WhiteBox;
 
 import java.lang.reflect.Method;
@@ -143,11 +148,10 @@ public class MaterializeVirtualObjectTest {
         int levels[] = CompilerUtils.getAvailableCompilationLevels();
         // we need compilation level 4 to use EscapeAnalysis
         if (levels.length < 1 || levels[levels.length - 1] != 4) {
-            System.out.println("INFO: Test needs compilation level 4 to"
-                    + " be available. Skipping.");
-        } else {
-            new MaterializeVirtualObjectTest().test();
+            throw new SkippedException("Test needs compilation level 4");
         }
+
+        new MaterializeVirtualObjectTest().test();
     }
 
     private static String getName() {

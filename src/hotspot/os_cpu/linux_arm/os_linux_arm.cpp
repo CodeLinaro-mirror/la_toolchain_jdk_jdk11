@@ -310,8 +310,9 @@ extern "C" int JVM_handle_linux_signal(int sig, siginfo_t* info,
 
 #ifdef CAN_SHOW_REGISTERS_ON_ASSERT
   if ((sig == SIGSEGV || sig == SIGBUS) && info != NULL && info->si_addr == g_assert_poison) {
-    handle_assert_poison_fault(ucVoid, info->si_addr);
-    return 1;
+    if (handle_assert_poison_fault(ucVoid, info->si_addr)) {
+      return 1;
+    }
   }
 #endif
 
@@ -328,6 +329,15 @@ extern "C" int JVM_handle_linux_signal(int sig, siginfo_t* info,
     }
   }
 
+  // Handle SafeFetch faults:
+  if (uc != NULL) {
+    address const pc = (address) os::Linux::ucontext_get_pc(uc);
+    if (pc && StubRoutines::is_safefetch_fault(pc)) {
+      os::Linux::ucontext_set_pc(uc, StubRoutines::continuation_for_safefetch_fault(pc));
+      return 1;
+    }
+  }
+
   address stub = NULL;
   address pc = NULL;
   bool unsafe_access = false;
@@ -339,10 +349,6 @@ extern "C" int JVM_handle_linux_signal(int sig, siginfo_t* info,
     if (sig == SIGSEGV) {
       address addr = (address) info->si_addr;
 
-      if (StubRoutines::is_safefetch_fault(pc)) {
-        os::Linux::ucontext_set_pc(uc, StubRoutines::continuation_for_safefetch_fault(pc));
-        return 1;
-      }
       // check if fault address is within thread stack
       if (addr < thread->stack_base() &&
           addr >= thread->stack_base() - thread->stack_size()) {

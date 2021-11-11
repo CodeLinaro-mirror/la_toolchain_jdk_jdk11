@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -132,9 +132,13 @@ module java.base {
     // additional qualified exports may be inserted at build time
     // see make/gensrc/GenModuleInfo.gmk
 
+    exports com.sun.crypto.provider to
+        jdk.crypto.cryptoki;
     exports com.sun.security.ntlm to
         java.security.sasl;
     exports jdk.internal to
+        jdk.jfr;
+    exports jdk.internal.event to
         jdk.jfr;
     exports jdk.internal.jimage to
         jdk.jlink;
@@ -142,7 +146,8 @@ module java.base {
         jdk.jlink;
     exports jdk.internal.loader to
         java.instrument,
-        java.logging;
+        java.logging,
+        java.naming;
     exports jdk.internal.jmod to
         jdk.compiler,
         jdk.jlink;
@@ -177,6 +182,7 @@ module java.base {
         java.security.jgss,
         java.sql,
         java.xml,
+        jdk.jartool,
         jdk.attach,
         jdk.charsets,
         jdk.compiler,
@@ -199,6 +205,8 @@ module java.base {
         java.management,
         jdk.management.agent,
         jdk.internal.jvmstat;
+    exports jdk.internal.platform to
+        jdk.management;
     exports jdk.internal.ref to
         java.desktop,
         jdk.unsupported;
@@ -301,6 +309,7 @@ module java.base {
         jdk.crypto.ec,
         jdk.crypto.cryptoki,
         jdk.jartool,
+        jdk.naming.ldap,
         jdk.security.auth,
         jdk.security.jgss;
     exports sun.security.util.math to

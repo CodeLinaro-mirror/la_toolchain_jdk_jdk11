@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,6 +24,8 @@
 
 #include "precompiled.hpp"
 #include "compiler/compileLog.hpp"
+#include "gc/shared/barrierSet.hpp"
+#include "gc/shared/c2/barrierSetC2.hpp"
 #include "memory/allocation.inline.hpp"
 #include "opto/addnode.hpp"
 #include "opto/callnode.hpp"
@@ -244,6 +246,18 @@ Node *SubINode::Ideal(PhaseGVN *phase, bool can_reshape){
     return new SubINode( add1, in2->in(1) );
   }
 
+  // Convert "0-(A>>31)" into "(A>>>31)"
+  if ( op2 == Op_RShiftI ) {
+    Node *in21 = in2->in(1);
+    Node *in22 = in2->in(2);
+    const TypeInt *zero = phase->type(in1)->isa_int();
+    const TypeInt *t21 = phase->type(in21)->isa_int();
+    const TypeInt *t22 = phase->type(in22)->isa_int();
+    if ( t21 && t22 && zero == TypeInt::ZERO && t22->is_con(31) ) {
+      return new URShiftINode(in21, in22);
+    }
+  }
+
   return NULL;
 }
 
@@ -351,6 +365,18 @@ Node *SubLNode::Ideal(PhaseGVN *phase, bool can_reshape) {
   if( op2 == Op_SubL && in2->outcnt() == 1) {
     Node *add1 = phase->transform( new AddLNode( in1, in2->in(2) ) );
     return new SubLNode( add1, in2->in(1) );
+  }
+
+  // Convert "0L-(A>>63)" into "(A>>>63)"
+  if ( op2 == Op_RShiftL ) {
+    Node *in21 = in2->in(1);
+    Node *in22 = in2->in(2);
+    const TypeLong *zero = phase->type(in1)->isa_long();
+    const TypeLong *t21 = phase->type(in21)->isa_long();
+    const TypeInt *t22 = phase->type(in22)->isa_int();
+    if ( t21 && t22 && zero == TypeLong::ZERO && t22->is_con(63) ) {
+      return new URShiftLNode(in21, in22);
+    }
   }
 
   return NULL;
@@ -715,6 +741,16 @@ Node *CmpINode::Ideal( PhaseGVN *phase, bool can_reshape ) {
   return NULL;                  // No change
 }
 
+Node *CmpLNode::Ideal( PhaseGVN *phase, bool can_reshape ) {
+  const TypeLong *t2 = phase->type(in(2))->isa_long();
+  if (Opcode() == Op_CmpL && in(1)->Opcode() == Op_ConvI2L && t2 && t2->is_con()) {
+    const jlong con = t2->get_con();
+    if (con >= min_jint && con <= max_jint) {
+      return new CmpINode(in(1)->in(1), phase->intcon((jint)con));
+    }
+  }
+  return NULL;
+}
 
 //=============================================================================
 // Simplify a CmpL (compare 2 longs ) node, based on local information.
@@ -878,8 +914,13 @@ const Type *CmpPNode::sub( const Type *t1, const Type *t2 ) const {
 
 static inline Node* isa_java_mirror_load(PhaseGVN* phase, Node* n) {
   // Return the klass node for (indirect load from OopHandle)
-  //   LoadP(LoadP(AddP(foo:Klass, #java_mirror)))
+  //   LoadBarrier?(LoadP(LoadP(AddP(foo:Klass, #java_mirror))))
   //   or NULL if not matching.
+  BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+  if (bs->is_gc_barrier_node(n)) {
+    n = bs->step_over_gc_barrier(n);
+  }
+
   if (n->Opcode() != Op_LoadP) return NULL;
 
   const TypeInstPtr* tp = phase->type(n)->isa_instptr();
@@ -952,8 +993,17 @@ Node *CmpPNode::Ideal( PhaseGVN *phase, bool can_reshape ) {
     if (k1 && (k2 || conk2)) {
       Node* lhs = k1;
       Node* rhs = (k2 != NULL) ? k2 : conk2;
-      this->set_req(1, lhs);
-      this->set_req(2, rhs);
+#if INCLUDE_SHENANDOAHGC
+      PhaseIterGVN* igvn = phase->is_IterGVN();
+      if (UseShenandoahGC && igvn != NULL) {
+        set_req_X(1, lhs, igvn);
+        set_req_X(2, rhs, igvn);
+      } else
+#endif
+      {
+        set_req(1, lhs);
+        set_req(2, rhs);
+      }
       return this;
     }
   }
@@ -1385,6 +1435,34 @@ Node *BoolNode::Ideal(PhaseGVN *phase, bool can_reshape) {
     cmp->swap_edges(1, 2);
     cmp = phase->transform( cmp );
     return new BoolNode( cmp, _test.commute() );
+  }
+
+  // Change "bool eq/ne (cmp (and X 16) 16)" into "bool ne/eq (cmp (and X 16) 0)".
+  if (cop == Op_CmpI &&
+      (_test._test == BoolTest::eq || _test._test == BoolTest::ne) &&
+      cmp1->Opcode() == Op_AndI && cmp2->Opcode() == Op_ConI &&
+      cmp1->in(2)->Opcode() == Op_ConI) {
+    const TypeInt *t12 = phase->type(cmp2)->isa_int();
+    const TypeInt *t112 = phase->type(cmp1->in(2))->isa_int();
+    if (t12 && t12->is_con() && t112 && t112->is_con() &&
+        t12->get_con() == t112->get_con() && is_power_of_2(t12->get_con())) {
+      Node *ncmp = phase->transform(new CmpINode(cmp1, phase->intcon(0)));
+      return new BoolNode(ncmp, _test.negate());
+    }
+  }
+
+  // Same for long type: change "bool eq/ne (cmp (and X 16) 16)" into "bool ne/eq (cmp (and X 16) 0)".
+  if (cop == Op_CmpL &&
+      (_test._test == BoolTest::eq || _test._test == BoolTest::ne) &&
+      cmp1->Opcode() == Op_AndL && cmp2->Opcode() == Op_ConL &&
+      cmp1->in(2)->Opcode() == Op_ConL) {
+    const TypeLong *t12 = phase->type(cmp2)->isa_long();
+    const TypeLong *t112 = phase->type(cmp1->in(2))->isa_long();
+    if (t12 && t12->is_con() && t112 && t112->is_con() &&
+        t12->get_con() == t112->get_con() && is_power_of_2(t12->get_con())) {
+      Node *ncmp = phase->transform(new CmpLNode(cmp1, phase->longcon(0)));
+      return new BoolNode(ncmp, _test.negate());
+    }
   }
 
   // Change "bool eq/ne (cmp (xor X 1) 0)" into "bool ne/eq (cmp X 0)".

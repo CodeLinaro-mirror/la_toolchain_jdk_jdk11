@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -347,8 +347,10 @@ GtkApi* gtk3_load(JNIEnv *env, const char* lib_name)
 
         fp_cairo_image_surface_create = dl_symbol("cairo_image_surface_create");
         fp_cairo_surface_destroy = dl_symbol("cairo_surface_destroy");
+        fp_cairo_surface_status = dl_symbol("cairo_surface_status");
         fp_cairo_create = dl_symbol("cairo_create");
         fp_cairo_destroy = dl_symbol("cairo_destroy");
+        fp_cairo_status = dl_symbol("cairo_status");
         fp_cairo_fill = dl_symbol("cairo_fill");
         fp_cairo_rectangle = dl_symbol("cairo_rectangle");
         fp_cairo_set_source_rgb = dl_symbol("cairo_set_source_rgb");
@@ -477,8 +479,7 @@ GtkApi* gtk3_load(JNIEnv *env, const char* lib_name)
         fp_gtk_fixed_new = dl_symbol("gtk_fixed_new");
         fp_gtk_handle_box_new = dl_symbol("gtk_handle_box_new");
         fp_gtk_image_new = dl_symbol("gtk_image_new");
-        fp_gtk_hpaned_new = dl_symbol("gtk_hpaned_new");
-        fp_gtk_vpaned_new = dl_symbol("gtk_vpaned_new");
+        fp_gtk_paned_new = dl_symbol("gtk_paned_new");
         fp_gtk_scale_new = dl_symbol("gtk_scale_new");
         fp_gtk_hscrollbar_new = dl_symbol("gtk_hscrollbar_new");
         fp_gtk_vscrollbar_new = dl_symbol("gtk_vscrollbar_new");
@@ -700,7 +701,7 @@ static int gtk3_unload()
  */
 static void flush_gtk_event_loop()
 {
-    while((*fp_g_main_context_iteration)(NULL));
+    while((*fp_g_main_context_iteration)(NULL, FALSE));
 }
 
 /*
@@ -776,6 +777,9 @@ static void gtk3_init_painting(JNIEnv *env, gint width, gint height)
     }
 
     cr = fp_cairo_create(surface);
+    if (fp_cairo_surface_status(surface) || fp_cairo_status(cr)) {
+        JNU_ThrowOutOfMemoryError(env, "The surface size is too big");
+    }
 }
 
 /*
@@ -798,16 +802,17 @@ static gint gtk3_copy_image(gint *dst, gint width, gint height)
     data = (*fp_cairo_image_surface_get_data)(surface);
     stride = (*fp_cairo_image_surface_get_stride)(surface);
     padding = stride - width * 4;
-
-    for (i = 0; i < height; i++) {
-        for (j = 0; j < width; j++) {
-            int r = *data++;
-            int g = *data++;
-            int b = *data++;
-            int a = *data++;
-            *dst++ = (a << 24 | b << 16 | g << 8 | r);
+    if (stride > 0 && padding >= 0) {
+        for (i = 0; i < height; i++) {
+            for (j = 0; j < width; j++) {
+                int r = *data++;
+                int g = *data++;
+                int b = *data++;
+                int a = *data++;
+                *dst++ = (a << 24 | b << 16 | g << 8 | r);
+            }
+            data += padding;
         }
-        data += padding;
     }
     return java_awt_Transparency_TRANSLUCENT;
 }
@@ -1081,7 +1086,7 @@ static GtkWidget *gtk3_get_widget(WidgetType widget_type)
         case SPLIT_PANE:
             if (init_result = (NULL == gtk3_widgets[_GTK_HPANED_TYPE]))
             {
-                gtk3_widgets[_GTK_HPANED_TYPE] = (*fp_gtk_hpaned_new)();
+                gtk3_widgets[_GTK_HPANED_TYPE] = (*fp_gtk_paned_new)(GTK_ORIENTATION_HORIZONTAL);
             }
             result = gtk3_widgets[_GTK_HPANED_TYPE];
             break;
@@ -1314,7 +1319,7 @@ static GtkWidget *gtk3_get_widget(WidgetType widget_type)
         case VSPLIT_PANE_DIVIDER:
             if (init_result = (NULL == gtk3_widgets[_GTK_VPANED_TYPE]))
             {
-                gtk3_widgets[_GTK_VPANED_TYPE] = (*fp_gtk_vpaned_new)();
+                gtk3_widgets[_GTK_VPANED_TYPE] = (*fp_gtk_paned_new)(GTK_ORIENTATION_VERTICAL);
             }
             result = gtk3_widgets[_GTK_VPANED_TYPE];
             break;
@@ -1434,6 +1439,10 @@ static GtkStyleContext* get_style(WidgetType widget_type, const gchar *detail)
             } else if (strcmp(detail, "option") == 0) {
                 path = createWidgetPath (NULL);
                 append_element(path, "radio");
+            } else if (strcmp(detail, "paned") == 0) {
+                path = createWidgetPath (fp_gtk_style_context_get_path (widget_context));
+                append_element(path, "paned");
+                append_element(path, "separator");
             } else {
                 path = createWidgetPath (fp_gtk_style_context_get_path (widget_context));
                 append_element(path, detail);
@@ -1832,22 +1841,30 @@ static void gtk3_paint_handle(WidgetType widget_type, GtkStateType state_type,
 {
     gtk3_widget = gtk3_get_widget(widget_type);
 
-    GtkStyleContext* context = fp_gtk_widget_get_style_context (gtk3_widget);
-
-    fp_gtk_style_context_save (context);
+    GtkStyleContext* context = get_style(widget_type, detail);
 
     GtkStateFlags flags = get_gtk_flags(state_type);
     fp_gtk_style_context_set_state(context, GTK_STATE_FLAG_PRELIGHT);
 
-    if (detail != 0) {
+    if (detail != 0 && !(strcmp(detail, "paned") == 0)) {
         transform_detail_string(detail, context);
         fp_gtk_style_context_add_class (context, "handlebox_bin");
     }
 
-    fp_gtk_render_handle(context, cr, x, y, width, height);
-    fp_gtk_render_background(context, cr, x, y, width, height);
+    if (!(strcmp(detail, "paned") == 0)) {
+        fp_gtk_render_handle(context, cr, x, y, width, height);
+        fp_gtk_render_background(context, cr, x, y, width, height);
+    } else {
+        if (orientation == GTK_ORIENTATION_VERTICAL) {
+            fp_gtk_render_handle(context, cr, x+width/2, y, 2, height);
+            fp_gtk_render_background(context, cr, x+width/2, y, 2, height);
+        } else {
+            fp_gtk_render_handle(context, cr, x, y+height/2, width, 2);
+            fp_gtk_render_background(context, cr, x, y+height/2, width, 2);
+        }
+    }
 
-    fp_gtk_style_context_restore (context);
+    disposeOrRestoreContext(context);
 }
 
 static void gtk3_paint_hline(WidgetType widget_type, GtkStateType state_type,
@@ -2919,7 +2936,7 @@ static gboolean gtk3_get_drawable_data(JNIEnv *env, jintArray pixelArray,
                 int index;
                 for (_y = 0; _y < height; _y++) {
                     for (_x = 0; _x < width; _x++) {
-                        p = pix + _y * stride + _x * nchan;
+                        p = pix + (intptr_t) _y * stride + _x * nchan;
 
                         index = (_y + dy) * jwidth + (_x + dx);
                         ary[index] = 0xff000000

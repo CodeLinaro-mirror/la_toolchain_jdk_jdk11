@@ -114,6 +114,10 @@ class VMError : public AllStatic {
     return (id != OOM_MALLOC_ERROR) && (id != OOM_MMAP_ERROR);
   }
 
+  static bool should_submit_bug_report(unsigned int id) {
+    return should_report_bug(id) && (id != OOM_JAVA_HEAP_FATAL);
+  }
+
   // Write a hint to the stream in case siginfo relates to a segv/bus error
   // and the offending address points into CDS store.
   static void check_failing_cds_access(outputStream* st, const void* siginfo);
@@ -121,9 +125,6 @@ class VMError : public AllStatic {
   static void report_and_die(Thread* thread, unsigned int sig, address pc, void* siginfo,
                              void* context, const char* detail_fmt, ...) ATTRIBUTE_PRINTF(6, 7);
   static void report_and_die(const char* message, const char* detail_fmt, ...) ATTRIBUTE_PRINTF(2, 3);
-
-  static fdStream out;
-  static fdStream log; // error log used by VMError::report_and_die()
 
   // Timeout handling.
   // Hook functions for platform dependend functionality:

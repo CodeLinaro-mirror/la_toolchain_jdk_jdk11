@@ -54,7 +54,7 @@ extern int explicit_null_checks_inserted,
 void Parse::array_load(BasicType bt) {
   const Type* elemtype = Type::TOP;
   bool big_val = bt == T_DOUBLE || bt == T_LONG;
-  Node* adr = array_addressing(bt, 0, &elemtype);
+  Node* adr = array_addressing(bt, 0, elemtype);
   if (stopped())  return;     // guaranteed null or range check
 
   pop();                      // index (already used)
@@ -62,10 +62,7 @@ void Parse::array_load(BasicType bt) {
 
   if (elemtype == TypeInt::BOOL) {
     bt = T_BOOLEAN;
-  } else if (bt == T_OBJECT) {
-    elemtype = _gvn.type(array)->is_aryptr()->elem()->make_oopptr();
   }
-
   const TypeAryPtr* adr_type = TypeAryPtr::get_array_body_type(bt);
 
   Node* ld = access_load_at(array, adr, adr_type, elemtype, bt,
@@ -82,10 +79,13 @@ void Parse::array_load(BasicType bt) {
 void Parse::array_store(BasicType bt) {
   const Type* elemtype = Type::TOP;
   bool big_val = bt == T_DOUBLE || bt == T_LONG;
-  Node* adr = array_addressing(bt, big_val ? 2 : 1, &elemtype);
+  Node* adr = array_addressing(bt, big_val ? 2 : 1, elemtype);
   if (stopped())  return;     // guaranteed null or range check
   if (bt == T_OBJECT) {
     array_store_check();
+    if (stopped()) {
+      return;
+    }
   }
   Node* val;                  // Oop to store
   if (big_val) {
@@ -98,10 +98,7 @@ void Parse::array_store(BasicType bt) {
 
   if (elemtype == TypeInt::BOOL) {
     bt = T_BOOLEAN;
-  } else if (bt == T_OBJECT) {
-    elemtype = _gvn.type(array)->is_aryptr()->elem()->make_oopptr();
   }
-
   const TypeAryPtr* adr_type = TypeAryPtr::get_array_body_type(bt);
 
   access_store_at(control(), array, adr, adr_type, val, elemtype, bt, MO_UNORDERED | IN_HEAP | IS_ARRAY);
@@ -110,7 +107,7 @@ void Parse::array_store(BasicType bt) {
 
 //------------------------------array_addressing-------------------------------
 // Pull array and index from the stack.  Compute pointer-to-element.
-Node* Parse::array_addressing(BasicType type, int vals, const Type* *result2) {
+Node* Parse::array_addressing(BasicType type, int vals, const Type*& elemtype) {
   Node *idx   = peek(0+vals);   // Get from stack without popping
   Node *ary   = peek(1+vals);   // in case of exception
 
@@ -121,9 +118,9 @@ Node* Parse::array_addressing(BasicType type, int vals, const Type* *result2) {
 
   const TypeAryPtr* arytype  = _gvn.type(ary)->is_aryptr();
   const TypeInt*    sizetype = arytype->size();
-  const Type*       elemtype = arytype->elem();
+  elemtype = arytype->elem();
 
-  if (UseUniqueSubclasses && result2 != NULL) {
+  if (UseUniqueSubclasses) {
     const Type* el = elemtype->make_ptr();
     if (el && el->isa_instptr()) {
       const TypeInstPtr* toop = el->is_instptr();
@@ -207,9 +204,6 @@ Node* Parse::array_addressing(BasicType type, int vals, const Type* *result2) {
   // Make array address computation control dependent to prevent it
   // from floating above the range check during loop optimizations.
   Node* ptr = array_element_address(ary, idx, type, sizetype, control());
-
-  if (result2 != NULL)  *result2 = elemtype;
-
   assert(ptr != top(), "top should go hand-in-hand with stopped");
 
   return ptr;
@@ -434,7 +428,6 @@ static void merge_ranges(SwitchRange* ranges, int& rp) {
 
 //-------------------------------do_tableswitch--------------------------------
 void Parse::do_tableswitch() {
-  Node* lookup = pop();
   // Get information about tableswitch
   int default_dest = iter().get_dest_table(0);
   int lo_index     = iter().get_int_table(1);
@@ -444,6 +437,7 @@ void Parse::do_tableswitch() {
   if (len < 1) {
     // If this is a backward branch, add safepoint
     maybe_add_safepoint(default_dest);
+    pop(); // the effect of the instruction execution on the operand stack
     merge(default_dest);
     return;
   }
@@ -501,22 +495,24 @@ void Parse::do_tableswitch() {
   }
 
   // Safepoint in case if backward branch observed
-  if( makes_backward_branch && UseLoopSafepoints )
+  if (makes_backward_branch && UseLoopSafepoints) {
     add_safepoint();
+  }
 
+  Node* lookup = pop(); // lookup value
   jump_switch_ranges(lookup, &ranges[0], &ranges[rp]);
 }
 
 
 //------------------------------do_lookupswitch--------------------------------
 void Parse::do_lookupswitch() {
-  Node *lookup = pop();         // lookup value
   // Get information about lookupswitch
   int default_dest = iter().get_dest_table(0);
   int len          = iter().get_int_table(1);
 
   if (len < 1) {    // If this is a backward branch, add safepoint
     maybe_add_safepoint(default_dest);
+    pop(); // the effect of the instruction execution on the operand stack
     merge(default_dest);
     return;
   }
@@ -537,7 +533,8 @@ void Parse::do_lookupswitch() {
     for (int j = 0; j < len; j++) {
       table[3*j+0] = iter().get_int_table(2+2*j);
       table[3*j+1] = iter().get_dest_table(2+2*j+1);
-      table[3*j+2] = profile == NULL ? 1 : profile->count_at(j);
+      // Handle overflow when converting from uint to jint
+      table[3*j+2] = (profile == NULL) ? 1 : MIN2<uint>(max_jint, profile->count_at(j));
     }
     qsort(table, len, 3*sizeof(table[0]), jint_cmp);
   }
@@ -593,9 +590,11 @@ void Parse::do_lookupswitch() {
   }
 
   // Safepoint in case backward branch observed
-  if (makes_backward_branch && UseLoopSafepoints)
+  if (makes_backward_branch && UseLoopSafepoints) {
     add_safepoint();
+  }
 
+  Node *lookup = pop(); // lookup value
   jump_switch_ranges(lookup, &ranges[0], &ranges[rp]);
 }
 
@@ -878,10 +877,16 @@ bool Parse::create_jump_tables(Node* key_val, SwitchRange* lo, SwitchRange* hi) 
 
   // Clean the 32-bit int into a real 64-bit offset.
   // Otherwise, the jint value 0 might turn into an offset of 0x0800000000.
-  const TypeInt* ikeytype = TypeInt::make(0, num_cases, Type::WidenMin);
   // Make I2L conversion control dependent to prevent it from
   // floating above the range check during loop optimizations.
-  key_val = C->conv_I2X_index(&_gvn, key_val, ikeytype, control());
+  // Do not use a narrow int type here to prevent the data path from dying
+  // while the control path is not removed. This can happen if the type of key_val
+  // is later known to be out of bounds of [0, num_cases] and therefore a narrow cast
+  // would be replaced by TOP while C2 is not able to fold the corresponding range checks.
+  // Set _carry_dependency for the cast to avoid being removed by IGVN.
+#ifdef _LP64
+  key_val = C->constrained_convI2L(&_gvn, key_val, TypeInt::INT, control(), true /* carry_dependency */);
+#endif
 
   // Shift the value by wordsize so we have an index into the table, rather
   // than a switch value
@@ -1048,11 +1053,11 @@ void Parse::jump_switch_ranges(Node* key_val, SwitchRange *lo, SwitchRange *hi, 
       // if there is a higher range, test for it and process it:
       if (mid < hi && !eq_test_only) {
         // two comparisons of same values--should enable 1 test for 2 branches
-        // Use BoolTest::le instead of BoolTest::gt
+        // Use BoolTest::lt instead of BoolTest::gt
         float cnt = sum_of_cnts(lo, mid-1);
-        IfNode *iff_le  = jump_if_fork_int(key_val, test_val, BoolTest::le, if_prob(cnt, total_cnt), if_cnt(cnt));
-        Node   *iftrue  = _gvn.transform( new IfTrueNode(iff_le) );
-        Node   *iffalse = _gvn.transform( new IfFalseNode(iff_le) );
+        IfNode *iff_lt  = jump_if_fork_int(key_val, test_val, BoolTest::lt, if_prob(cnt, total_cnt), if_cnt(cnt));
+        Node   *iftrue  = _gvn.transform( new IfTrueNode(iff_lt) );
+        Node   *iffalse = _gvn.transform( new IfFalseNode(iff_lt) );
         { PreserveJVMState pjvms(this);
           set_control(iffalse);
           jump_switch_ranges(key_val, mid+1, hi, switch_depth+1);
@@ -1654,7 +1659,7 @@ void Parse::maybe_add_predicate_after_if(Block* path) {
     // Add predicates at bci of if dominating the loop so traps can be
     // recorded on the if's profile data
     int bc_depth = repush_if_args();
-    add_predicate();
+    add_empty_predicates();
     dec_sp(bc_depth);
     path->set_has_predicates();
   }
@@ -2623,19 +2628,18 @@ void Parse::do_one_bytecode() {
   case Bytecodes::_i2b:
     // Sign extend
     a = pop();
-    a = _gvn.transform( new LShiftINode(a,_gvn.intcon(24)) );
-    a = _gvn.transform( new RShiftINode(a,_gvn.intcon(24)) );
-    push( a );
+    a = Compile::narrow_value(T_BYTE, a, NULL, &_gvn, true);
+    push(a);
     break;
   case Bytecodes::_i2s:
     a = pop();
-    a = _gvn.transform( new LShiftINode(a,_gvn.intcon(16)) );
-    a = _gvn.transform( new RShiftINode(a,_gvn.intcon(16)) );
-    push( a );
+    a = Compile::narrow_value(T_SHORT, a, NULL, &_gvn, true);
+    push(a);
     break;
   case Bytecodes::_i2c:
     a = pop();
-    push( _gvn.transform( new AndINode(a,_gvn.intcon(0xFFFF)) ) );
+    a = Compile::narrow_value(T_CHAR, a, NULL, &_gvn, true);
+    push(a);
     break;
 
   case Bytecodes::_i2f:

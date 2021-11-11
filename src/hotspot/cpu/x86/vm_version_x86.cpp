@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,7 +32,8 @@
 #include "runtime/java.hpp"
 #include "runtime/os.hpp"
 #include "runtime/stubCodeGenerator.hpp"
-#include "vm_version_x86.hpp"
+#include "runtime/vm_version.hpp"
+#include "utilities/virtualizationSupport.hpp"
 
 
 int VM_Version::_cpu;
@@ -46,12 +47,14 @@ address VM_Version::_cpuinfo_segv_addr = 0;
 address VM_Version::_cpuinfo_cont_addr = 0;
 
 static BufferBlob* stub_blob;
-static const int stub_size = 1100;
+static const int stub_size = 2000;
 
 extern "C" {
   typedef void (*get_cpu_info_stub_t)(void*);
+  typedef void (*detect_virt_stub_t)(uint32_t, uint32_t*);
 }
 static get_cpu_info_stub_t get_cpu_info_stub = NULL;
+static detect_virt_stub_t detect_virt_stub = NULL;
 
 
 class VM_Version_StubGenerator: public StubCodeGenerator {
@@ -365,22 +368,29 @@ class VM_Version_StubGenerator: public StubCodeGenerator {
     //
     intx saved_useavx = UseAVX;
     intx saved_usesse = UseSSE;
-    // check _cpuid_info.sef_cpuid7_ebx.bits.avx512f
-    __ lea(rsi, Address(rbp, in_bytes(VM_Version::sef_cpuid7_offset())));
-    __ movl(rax, 0x10000);
-    __ andl(rax, Address(rsi, 4)); // xcr0 bits sse | ymm
-    __ cmpl(rax, 0x10000);
-    __ jccb(Assembler::notEqual, legacy_setup); // jump if EVEX is not supported
-    // check _cpuid_info.xem_xcr0_eax.bits.opmask
-    // check _cpuid_info.xem_xcr0_eax.bits.zmm512
-    // check _cpuid_info.xem_xcr0_eax.bits.zmm32
-    __ movl(rax, 0xE0);
-    __ andl(rax, Address(rbp, in_bytes(VM_Version::xem_xcr0_offset()))); // xcr0 bits sse | ymm
-    __ cmpl(rax, 0xE0);
-    __ jccb(Assembler::notEqual, legacy_setup); // jump if EVEX is not supported
 
     // If UseAVX is unitialized or is set by the user to include EVEX
     if (use_evex) {
+      // check _cpuid_info.sef_cpuid7_ebx.bits.avx512f
+      __ lea(rsi, Address(rbp, in_bytes(VM_Version::sef_cpuid7_offset())));
+      __ movl(rax, 0x10000);
+      __ andl(rax, Address(rsi, 4)); // xcr0 bits sse | ymm
+      __ cmpl(rax, 0x10000);
+      __ jccb(Assembler::notEqual, legacy_setup); // jump if EVEX is not supported
+      // check _cpuid_info.xem_xcr0_eax.bits.opmask
+      // check _cpuid_info.xem_xcr0_eax.bits.zmm512
+      // check _cpuid_info.xem_xcr0_eax.bits.zmm32
+      __ movl(rax, 0xE0);
+      __ andl(rax, Address(rbp, in_bytes(VM_Version::xem_xcr0_offset()))); // xcr0 bits sse | ymm
+      __ cmpl(rax, 0xE0);
+      __ jccb(Assembler::notEqual, legacy_setup); // jump if EVEX is not supported
+
+      if (FLAG_IS_DEFAULT(UseAVX)) {
+        __ lea(rsi, Address(rbp, in_bytes(VM_Version::std_cpuid1_offset())));
+        __ movl(rax, Address(rsi, 0));
+        __ cmpl(rax, 0x50654);              // If it is Skylake
+        __ jcc(Assembler::equal, legacy_setup);
+      }
       // EVEX setup: run in lowest evex mode
       VM_Version::set_evex_cpuFeatures(); // Enable temporary to pass asserts
       UseAVX = 3;
@@ -449,22 +459,28 @@ class VM_Version_StubGenerator: public StubCodeGenerator {
     VM_Version::set_cpuinfo_cont_addr(__ pc());
     // Returns here after signal. Save xmm0 to check it later.
 
-    // check _cpuid_info.sef_cpuid7_ebx.bits.avx512f
-    __ lea(rsi, Address(rbp, in_bytes(VM_Version::sef_cpuid7_offset())));
-    __ movl(rax, 0x10000);
-    __ andl(rax, Address(rsi, 4));
-    __ cmpl(rax, 0x10000);
-    __ jcc(Assembler::notEqual, legacy_save_restore);
-    // check _cpuid_info.xem_xcr0_eax.bits.opmask
-    // check _cpuid_info.xem_xcr0_eax.bits.zmm512
-    // check _cpuid_info.xem_xcr0_eax.bits.zmm32
-    __ movl(rax, 0xE0);
-    __ andl(rax, Address(rbp, in_bytes(VM_Version::xem_xcr0_offset()))); // xcr0 bits sse | ymm
-    __ cmpl(rax, 0xE0);
-    __ jcc(Assembler::notEqual, legacy_save_restore);
-
     // If UseAVX is unitialized or is set by the user to include EVEX
     if (use_evex) {
+      // check _cpuid_info.sef_cpuid7_ebx.bits.avx512f
+      __ lea(rsi, Address(rbp, in_bytes(VM_Version::sef_cpuid7_offset())));
+      __ movl(rax, 0x10000);
+      __ andl(rax, Address(rsi, 4));
+      __ cmpl(rax, 0x10000);
+      __ jcc(Assembler::notEqual, legacy_save_restore);
+      // check _cpuid_info.xem_xcr0_eax.bits.opmask
+      // check _cpuid_info.xem_xcr0_eax.bits.zmm512
+      // check _cpuid_info.xem_xcr0_eax.bits.zmm32
+      __ movl(rax, 0xE0);
+      __ andl(rax, Address(rbp, in_bytes(VM_Version::xem_xcr0_offset()))); // xcr0 bits sse | ymm
+      __ cmpl(rax, 0xE0);
+      __ jcc(Assembler::notEqual, legacy_save_restore);
+
+      if (FLAG_IS_DEFAULT(UseAVX)) {
+        __ lea(rsi, Address(rbp, in_bytes(VM_Version::std_cpuid1_offset())));
+        __ movl(rax, Address(rsi, 0));
+        __ cmpl(rax, 0x50654);              // If it is Skylake
+        __ jcc(Assembler::equal, legacy_save_restore);
+      }
       // EVEX check: run in lowest evex mode
       VM_Version::set_evex_cpuFeatures(); // Enable temporary to pass asserts
       UseAVX = 3;
@@ -548,6 +564,43 @@ class VM_Version_StubGenerator: public StubCodeGenerator {
     __ vzeroupper();
 #   undef __
   }
+  address generate_detect_virt() {
+    StubCodeMark mark(this, "VM_Version", "detect_virt_stub");
+#   define __ _masm->
+
+    address start = __ pc();
+
+    // Evacuate callee-saved registers
+    __ push(rbp);
+    __ push(rbx);
+    __ push(rsi); // for Windows
+
+#ifdef _LP64
+    __ mov(rax, c_rarg0); // CPUID leaf
+    __ mov(rsi, c_rarg1); // register array address (eax, ebx, ecx, edx)
+#else
+    __ movptr(rax, Address(rsp, 16)); // CPUID leaf
+    __ movptr(rsi, Address(rsp, 20)); // register array address
+#endif
+
+    __ cpuid();
+
+    // Store result to register array
+    __ movl(Address(rsi,  0), rax);
+    __ movl(Address(rsi,  4), rbx);
+    __ movl(Address(rsi,  8), rcx);
+    __ movl(Address(rsi, 12), rdx);
+
+    // Epilogue
+    __ pop(rsi);
+    __ pop(rbx);
+    __ pop(rbp);
+    __ ret(0);
+
+#   undef __
+
+    return start;
+  };
 };
 
 void VM_Version::get_processor_features() {
@@ -647,8 +700,14 @@ void VM_Version::get_processor_features() {
     }
   }
   if (FLAG_IS_DEFAULT(UseAVX)) {
-    FLAG_SET_DEFAULT(UseAVX, use_avx_limit);
-  } else if (UseAVX > use_avx_limit) {
+    // Don't use AVX-512 on older Skylakes unless explicitly requested.
+    if (use_avx_limit > 2 && is_intel_skylake() && _stepping < 5) {
+      FLAG_SET_DEFAULT(UseAVX, 2);
+    } else {
+      FLAG_SET_DEFAULT(UseAVX, use_avx_limit);
+    }
+  }
+  if (UseAVX > use_avx_limit) {
     warning("UseAVX=%d is not supported on this CPU, setting it to UseAVX=%d", (int) UseAVX, use_avx_limit);
     FLAG_SET_DEFAULT(UseAVX, use_avx_limit);
   } else if (UseAVX < 0) {
@@ -663,7 +722,7 @@ void VM_Version::get_processor_features() {
     _features &= ~CPU_AVX512BW;
     _features &= ~CPU_AVX512VL;
     _features &= ~CPU_AVX512_VPOPCNTDQ;
-    _features &= ~CPU_VPCLMULQDQ;
+    _features &= ~CPU_AVX512_VPCLMULQDQ;
     _features &= ~CPU_VAES;
   }
 
@@ -686,10 +745,12 @@ void VM_Version::get_processor_features() {
     }
   }
 
-  char buf[256];
-  jio_snprintf(buf, sizeof(buf), "(%u cores per cpu, %u threads per core) family %d model %d stepping %d%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+  char buf[512];
+  jio_snprintf(buf, sizeof(buf),
+               "(%u cores per cpu, %u threads per core) family %d model %d stepping %d microcode 0x%x"
+               "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
                cores_per_cpu(), threads_per_core(),
-               cpu_family(), _model, _stepping,
+               cpu_family(), _model, _stepping, os::cpu_microcode_revision(),
                (supports_cmov() ? ", cmov" : ""),
                (supports_cmpxchg8() ? ", cx8" : ""),
                (supports_fxsr() ? ", fxsr" : ""),
@@ -899,6 +960,13 @@ void VM_Version::get_processor_features() {
   } else if (UseSHA256Intrinsics) {
     warning("Intrinsics for SHA-224 and SHA-256 crypto hash functions not available on this CPU.");
     FLAG_SET_DEFAULT(UseSHA256Intrinsics, false);
+  }
+
+  if (!FLAG_IS_DEFAULT(AVX3Threshold)) {
+    if (!is_power_of_2(AVX3Threshold)) {
+      warning("AVX3Threshold must be a power of 2");
+      FLAG_SET_DEFAULT(AVX3Threshold, 4096);
+    }
   }
 
 #ifdef _LP64
@@ -1569,6 +1637,22 @@ void VM_Version::get_processor_features() {
 #endif // !PRODUCT
 }
 
+void VM_Version::print_platform_virtualization_info(outputStream* st) {
+  VirtualizationType vrt = VM_Version::get_detected_virtualization();
+  if (vrt == XenHVM) {
+    st->print_cr("Xen hardware-assisted virtualization detected");
+  } else if (vrt == KVM) {
+    st->print_cr("KVM virtualization detected");
+  } else if (vrt == VMWare) {
+    st->print_cr("VMWare virtualization detected");
+    VirtualizationSupport::print_virtualization_info(st);
+  } else if (vrt == HyperV) {
+    st->print_cr("Hyper-V virtualization detected");
+  } else if (vrt == HyperVRole) {
+    st->print_cr("Hyper-V role detected");
+  }
+}
+
 bool VM_Version::use_biased_locking() {
 #if INCLUDE_RTM_OPT
   // RTM locking is most useful when there is high lock contention and
@@ -1590,18 +1674,74 @@ bool VM_Version::use_biased_locking() {
   return UseBiasedLocking;
 }
 
+// On Xen, the cpuid instruction returns
+//  eax / registers[0]: Version of Xen
+//  ebx / registers[1]: chars 'XenV'
+//  ecx / registers[2]: chars 'MMXe'
+//  edx / registers[3]: chars 'nVMM'
+//
+// On KVM / VMWare / MS Hyper-V, the cpuid instruction returns
+//  ebx / registers[1]: chars 'KVMK' / 'VMwa' / 'Micr'
+//  ecx / registers[2]: chars 'VMKV' / 'reVM' / 'osof'
+//  edx / registers[3]: chars 'M'    / 'ware' / 't Hv'
+//
+// more information :
+// https://kb.vmware.com/s/article/1009458
+//
+void VM_Version::check_virtualizations() {
+  uint32_t registers[4] = {0};
+  char signature[13] = {0};
+
+  // Xen cpuid leaves can be found 0x100 aligned boundary starting
+  // from 0x40000000 until 0x40010000.
+  //   https://lists.linuxfoundation.org/pipermail/virtualization/2012-May/019974.html
+  for (int leaf = 0x40000000; leaf < 0x40010000; leaf += 0x100) {
+    detect_virt_stub(leaf, registers);
+    memcpy(signature, &registers[1], 12);
+
+    if (strncmp("VMwareVMware", signature, 12) == 0) {
+      Abstract_VM_Version::_detected_virtualization = VMWare;
+      // check for extended metrics from guestlib
+      VirtualizationSupport::initialize();
+    } else if (strncmp("Microsoft Hv", signature, 12) == 0) {
+      Abstract_VM_Version::_detected_virtualization = HyperV;
+#ifdef _WINDOWS
+      // CPUID leaf 0x40000007 is available to the root partition only.
+      // See Hypervisor Top Level Functional Specification section 2.4.8 for more details.
+      //   https://github.com/MicrosoftDocs/Virtualization-Documentation/raw/master/tlfs/Hypervisor%20Top%20Level%20Functional%20Specification%20v6.0b.pdf
+      detect_virt_stub(0x40000007, registers);
+      if ((registers[0] != 0x0) ||
+          (registers[1] != 0x0) ||
+          (registers[2] != 0x0) ||
+          (registers[3] != 0x0)) {
+        Abstract_VM_Version::_detected_virtualization = HyperVRole;
+      }
+#endif
+    } else if (strncmp("KVMKVMKVM", signature, 9) == 0) {
+      Abstract_VM_Version::_detected_virtualization = KVM;
+    } else if (strncmp("XenVMMXenVMM", signature, 12) == 0) {
+      Abstract_VM_Version::_detected_virtualization = XenHVM;
+    }
+  }
+}
+
 void VM_Version::initialize() {
   ResourceMark rm;
   // Making this stub must be FIRST use of assembler
 
-  stub_blob = BufferBlob::create("get_cpu_info_stub", stub_size);
+  stub_blob = BufferBlob::create("VM_Version stub", stub_size);
   if (stub_blob == NULL) {
-    vm_exit_during_initialization("Unable to allocate get_cpu_info_stub");
+    vm_exit_during_initialization("Unable to allocate stub for VM_Version");
   }
   CodeBuffer c(stub_blob);
   VM_Version_StubGenerator g(&c);
   get_cpu_info_stub = CAST_TO_FN_PTR(get_cpu_info_stub_t,
                                      g.generate_get_cpu_info());
+  detect_virt_stub = CAST_TO_FN_PTR(detect_virt_stub_t,
+                                    g.generate_detect_virt());
 
   get_processor_features();
+  if (VM_Version::supports_hv()) { // Supports hypervisor
+    check_virtualizations();
+  }
 }

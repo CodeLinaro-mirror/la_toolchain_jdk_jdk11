@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -160,13 +160,13 @@ bool Dictionary::resize_if_needed() {
 
 bool DictionaryEntry::contains_protection_domain(oop protection_domain) const {
 #ifdef ASSERT
-  if (oopDesc::equals(protection_domain, instance_klass()->protection_domain())) {
+  if (protection_domain == instance_klass()->protection_domain()) {
     // Ensure this doesn't show up in the pd_set (invariant)
     bool in_pd_set = false;
     for (ProtectionDomainEntry* current = pd_set_acquire();
                                 current != NULL;
                                 current = current->next()) {
-      if (oopDesc::equals(current->object_no_keepalive(), protection_domain)) {
+      if (current->object_no_keepalive() == protection_domain) {
         in_pd_set = true;
         break;
       }
@@ -178,7 +178,7 @@ bool DictionaryEntry::contains_protection_domain(oop protection_domain) const {
   }
 #endif /* ASSERT */
 
-  if (oopDesc::equals(protection_domain, instance_klass()->protection_domain())) {
+  if (protection_domain == instance_klass()->protection_domain()) {
     // Succeeds trivially
     return true;
   }
@@ -186,7 +186,7 @@ bool DictionaryEntry::contains_protection_domain(oop protection_domain) const {
   for (ProtectionDomainEntry* current = pd_set_acquire();
                               current != NULL;
                               current = current->next()) {
-    if (oopDesc::equals(current->object_no_keepalive(), protection_domain)) return true;
+    if (current->object_no_keepalive() == protection_domain) return true;
   }
   return false;
 }
@@ -208,41 +208,6 @@ void DictionaryEntry::add_protection_domain(Dictionary* dict, Handle protection_
   if (lt.is_enabled()) {
     LogStream ls(lt);
     print_count(&ls);
-  }
-}
-
-// During class loading we may have cached a protection domain that has
-// since been unreferenced, so this entry should be cleared.
-void Dictionary::clean_cached_protection_domains(DictionaryEntry* probe) {
-  assert_locked_or_safepoint(SystemDictionary_lock);
-
-  ProtectionDomainEntry* current = probe->pd_set();
-  ProtectionDomainEntry* prev = NULL;
-  while (current != NULL) {
-    if (current->object_no_keepalive() == NULL) {
-      LogTarget(Debug, protectiondomain) lt;
-      if (lt.is_enabled()) {
-        ResourceMark rm;
-        // Print out trace information
-        LogStream ls(lt);
-        ls.print_cr("PD in set is not alive:");
-        ls.print("class loader: "); loader_data()->class_loader()->print_value_on(&ls);
-        ls.print(" loading: "); probe->instance_klass()->print_value_on(&ls);
-        ls.cr();
-      }
-      if (probe->pd_set() == current) {
-        probe->set_pd_set(current->next());
-      } else {
-        assert(prev != NULL, "should be set by alive entry");
-        prev->set_next(current->next());
-      }
-      ProtectionDomainEntry* to_delete = current;
-      current = current->next();
-      delete to_delete;
-    } else {
-      prev = current;
-      current = current->next();
-    }
   }
 }
 
@@ -431,10 +396,58 @@ bool Dictionary::is_valid_protection_domain(unsigned int hash,
   return entry->is_valid_protection_domain(protection_domain);
 }
 
+// During class loading we may have cached a protection domain that has
+// since been unreferenced, so this entry should be cleared.
+void Dictionary::clean_cached_protection_domains() {
+  assert_locked_or_safepoint(SystemDictionary_lock);
+
+  if (loader_data()->is_the_null_class_loader_data()) {
+    // Classes in the boot loader are not loaded with protection domains
+    return;
+  }
+
+  for (int index = 0; index < table_size(); index++) {
+    for (DictionaryEntry* probe = bucket(index);
+                          probe != NULL;
+                          probe = probe->next()) {
+      Klass* e = probe->instance_klass();
+
+      ProtectionDomainEntry* current = probe->pd_set();
+      ProtectionDomainEntry* prev = NULL;
+      while (current != NULL) {
+        if (current->object_no_keepalive() == NULL) {
+          LogTarget(Debug, protectiondomain) lt;
+          if (lt.is_enabled()) {
+            ResourceMark rm;
+            // Print out trace information
+            LogStream ls(lt);
+            ls.print_cr("PD in set is not alive:");
+            ls.print("class loader: "); loader_data()->class_loader()->print_value_on(&ls);
+            ls.print(" loading: "); probe->instance_klass()->print_value_on(&ls);
+            ls.cr();
+          }
+          if (probe->pd_set() == current) {
+            probe->set_pd_set(current->next());
+          } else {
+            assert(prev != NULL, "should be set by alive entry");
+            prev->set_next(current->next());
+          }
+          ProtectionDomainEntry* to_delete = current;
+          current = current->next();
+          delete to_delete;
+        } else {
+          prev = current;
+          current = current->next();
+        }
+      }
+    }
+  }
+}
+
 #if INCLUDE_CDS
 static bool is_jfr_event_class(Klass *k) {
   while (k) {
-    if (k->name()->equals("jdk/jfr/Event")) {
+    if (k->name()->equals("jdk/internal/event/Event")) {
       return true;
     }
     k = k->super();
@@ -558,8 +571,8 @@ void Dictionary::print_on(outputStream* st) const {
   ResourceMark rm;
 
   assert(loader_data() != NULL, "loader data should not be null");
-  st->print_cr("Java dictionary (table_size=%d, classes=%d)",
-               table_size(), number_of_entries());
+  st->print_cr("Java dictionary (table_size=%d, classes=%d, resizable=%s)",
+               table_size(), number_of_entries(), BOOL_TO_STR(_resizable));
   st->print_cr("^ indicates that initiating loader is different from defining loader");
 
   for (int index = 0; index < table_size(); index++) {

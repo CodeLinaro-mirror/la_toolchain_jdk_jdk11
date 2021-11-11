@@ -33,6 +33,7 @@
 #include "compiler/disassembler.hpp"
 #include "interpreter/interpreter.hpp"
 #include "logging/log.hpp"
+#include "logging/logStream.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/filemap.hpp"
 #include "oops/oop.inline.hpp"
@@ -1006,6 +1007,11 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
   } else {
     log_warning(os, thread)("Failed to start thread - thr_create failed (%s) for attributes: %s.",
       os::errno_name(status), describe_thr_create_attributes(buf, sizeof(buf), stack_size, flags));
+    // Log some OS information which might explain why creating the thread failed.
+    log_info(os, thread)("Number of threads approx. running in the VM: %d", Threads::number_of_threads());
+    LogStream st(Log(os, thread)::info());
+    os::Posix::print_rlimit_info(&st);
+    os::print_memory_info(&st);
   }
 
   if (status != 0) {
@@ -1341,8 +1347,15 @@ void os::abort(bool dump_core, void* siginfo, const void* context) {
 }
 
 // Die immediately, no exit hook, no abort hook, no cleanup.
+// Dump a core file, if possible, for debugging.
 void os::die() {
-  ::abort(); // dump core (for debugging)
+  if (TestUnresponsiveErrorHandler && !CreateCoredumpOnCrash) {
+    // For TimeoutInErrorHandlingTest.java, we just kill the VM
+    // and don't take the time to generate a core file.
+    os::signal_raise(SIGKILL);
+  } else {
+    ::abort();
+  }
 }
 
 // DLL functions
@@ -1525,18 +1538,29 @@ void os::print_dll_info(outputStream * st) {
 // same architecture as Hotspot is running on
 
 void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
+  log_info(os)("attempting shared library load of %s", filename);
+
   void * result= ::dlopen(filename, RTLD_LAZY);
   if (result != NULL) {
     // Successful loading
+    Events::log(NULL, "Loaded shared library %s", filename);
+    log_info(os)("shared library load of %s was successful", filename);
     return result;
   }
 
   Elf32_Ehdr elf_head;
+  const char* error_report = ::dlerror();
+  if (error_report == NULL) {
+    error_report = "dlerror returned no error description";
+  }
+  if (ebuf != NULL && ebuflen > 0) {
+    ::strncpy(ebuf, error_report, ebuflen-1);
+    ebuf[ebuflen-1]='\0';
+  }
 
-  // Read system error message into ebuf
-  // It may or may not be overwritten below
-  ::strncpy(ebuf, ::dlerror(), ebuflen-1);
-  ebuf[ebuflen-1]='\0';
+  Events::log(NULL, "Loading shared library %s failed, %s", filename, error_report);
+  log_info(os)("shared library load of %s failed, %s", filename, error_report);
+
   int diag_msg_max_length=ebuflen-strlen(ebuf);
   char* diag_msg_buf=ebuf+strlen(ebuf);
 
@@ -1707,6 +1731,8 @@ void os::print_os_info(outputStream* st) {
   os::Solaris::print_distro_info(st);
 
   os::Posix::print_uname_info(st);
+
+  os::Posix::print_uptime_info(st);
 
   os::Solaris::print_libversion_info(st);
 
@@ -2058,6 +2084,7 @@ void* os::signal(int signal_number, void* handler) {
   struct sigaction sigAct, oldSigAct;
   sigfillset(&(sigAct.sa_mask));
   sigAct.sa_flags = SA_RESTART & ~SA_RESETHAND;
+  sigAct.sa_flags |= SA_SIGINFO;
   sigAct.sa_handler = CAST_TO_FN_PTR(sa_handler_t, handler);
 
   if (sigaction(signal_number, &sigAct, &oldSigAct)) {
@@ -2697,6 +2724,7 @@ bool os::pd_release_memory(char* addr, size_t bytes) {
 static bool solaris_mprotect(char* addr, size_t bytes, int prot) {
   assert(addr == (char*)align_down((uintptr_t)addr, os::vm_page_size()),
          "addr must be page aligned");
+  Events::log(NULL, "Protecting memory [" INTPTR_FORMAT "," INTPTR_FORMAT "] with protection modes %x", p2i(addr), p2i(addr+bytes), prot);
   int retVal = mprotect(addr, bytes, prot);
   return retVal == 0;
 }
@@ -2900,16 +2928,6 @@ size_t os::restartable_read(int fd, void *buf, unsigned int nBytes) {
          "Assumed _thread_in_native");
   RESTARTABLE(::read(fd, buf, (size_t) nBytes), res);
   return res;
-}
-
-void os::naked_short_sleep(jlong ms) {
-  assert(ms < 1000, "Un-interruptable sleep, short time use only");
-
-  // usleep is deprecated and removed from POSIX, in favour of nanosleep, but
-  // Solaris requires -lrt for this.
-  usleep((ms * 1000));
-
-  return;
 }
 
 // Sleep forever; naked call to OS-specific sleep; use with CAUTION
@@ -4297,6 +4315,7 @@ jint os::init_2(void) {
 
 // Mark the polling page as unreadable
 void os::make_polling_page_unreadable(void) {
+  Events::log(NULL, "Protecting polling page " INTPTR_FORMAT " with PROT_NONE", p2i(_polling_page));
   if (mprotect((char *)_polling_page, page_size, PROT_NONE) != 0) {
     fatal("Could not disable polling page");
   }
@@ -4304,6 +4323,7 @@ void os::make_polling_page_unreadable(void) {
 
 // Mark the polling page as readable
 void os::make_polling_page_readable(void) {
+  Events::log(NULL, "Protecting polling page " INTPTR_FORMAT " with PROT_READ", p2i(_polling_page));
   if (mprotect((char *)_polling_page, page_size, PROT_READ) != 0) {
     fatal("Could not enable polling page");
   }
@@ -4546,7 +4566,7 @@ bool os::pd_unmap_memory(char* addr, size_t bytes) {
 void os::pause() {
   char filename[MAX_PATH];
   if (PauseAtStartupFile && PauseAtStartupFile[0]) {
-    jio_snprintf(filename, MAX_PATH, PauseAtStartupFile);
+    jio_snprintf(filename, MAX_PATH, "%s", PauseAtStartupFile);
   } else {
     jio_snprintf(filename, MAX_PATH, "./vm.paused.%d", current_process_id());
   }

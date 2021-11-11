@@ -335,8 +335,8 @@ void Modules::define_module(jobject module, jboolean is_open, jstring version,
           (package_name[JAVAPKG_LEN] == '/' || package_name[JAVAPKG_LEN] == '\0'))) {
       const char* class_loader_name = loader_data->loader_name_and_id();
       size_t pkg_len = strlen(package_name);
-      char* pkg_name = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, pkg_len);
-      strncpy(pkg_name, package_name, pkg_len);
+      char* pkg_name = NEW_RESOURCE_ARRAY_IN_THREAD(THREAD, char, pkg_len + 1);
+      strncpy(pkg_name, package_name, pkg_len + 1);
       StringUtils::replace_no_expand(pkg_name, "/", ".");
       const char* msg_text1 = "Class loader (instance of): ";
       const char* msg_text2 = " tried to define prohibited package name: ";
@@ -455,7 +455,7 @@ void Modules::define_module(jobject module, jboolean is_open, jstring version,
 
   // If the module is defined to the boot loader and an exploded build is being
   // used, prepend <java.home>/modules/modules_name to the system boot class path.
-  if (loader == NULL && !ClassLoader::has_jrt_entry()) {
+  if (h_loader.is_null() && !ClassLoader::has_jrt_entry()) {
     ClassLoader::add_to_exploded_build_list(module_symbol, CHECK);
   }
 }

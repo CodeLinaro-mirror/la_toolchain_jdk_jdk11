@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -45,15 +45,21 @@ bool Jfr::is_recording() {
   return JfrRecorder::is_recording();
 }
 
-void Jfr::on_vm_init() {
-  if (!JfrRecorder::on_vm_init()) {
-    vm_exit_during_initialization("Failure when starting JFR on_vm_init");
+void Jfr::on_create_vm_1() {
+  if (!JfrRecorder::on_create_vm_1()) {
+    vm_exit_during_initialization("Failure when starting JFR on_create_vm_1");
   }
 }
 
-void Jfr::on_vm_start() {
-  if (!JfrRecorder::on_vm_start()) {
-    vm_exit_during_initialization("Failure when starting JFR on_vm_start");
+void Jfr::on_create_vm_2() {
+  if (!JfrRecorder::on_create_vm_2()) {
+    vm_exit_during_initialization("Failure when starting JFR on_create_vm_2");
+  }
+}
+
+void Jfr::on_create_vm_3() {
+  if (!JfrRecorder::on_create_vm_3()) {
+    vm_exit_during_initialization("Failure when starting JFR on_create_vm_3");
   }
 }
 
@@ -63,13 +69,17 @@ void Jfr::on_unloading_classes() {
   }
 }
 
-void Jfr::on_thread_exit(JavaThread* thread) {
-  JfrThreadLocal::on_exit(thread);
+void Jfr::on_thread_start(Thread* t) {
+  JfrThreadLocal::on_start(t);
 }
 
-void Jfr::on_thread_destruct(Thread* thread) {
-  if (JfrRecorder::is_created()) {
-    JfrThreadLocal::on_destruct(thread);
+void Jfr::on_thread_exit(Thread* t) {
+  JfrThreadLocal::on_exit(t);
+}
+
+void Jfr::on_java_thread_dismantle(JavaThread* jt) {
+  if (JfrRecorder::is_recording()) {
+    JfrCheckpointManager::write_thread_checkpoint(jt);
   }
 }
 
@@ -80,7 +90,9 @@ void Jfr::on_vm_shutdown(bool exception_handler) {
 }
 
 void Jfr::weak_oops_do(BoolObjectClosure* is_alive, OopClosure* f) {
-  LeakProfiler::oops_do(is_alive, f);
+  if (LeakProfiler::is_running()) {
+    LeakProfiler::oops_do(is_alive, f);
+  }
 }
 
 bool Jfr::on_flight_recorder_option(const JavaVMOption** option, char* delimiter) {
@@ -89,8 +101,4 @@ bool Jfr::on_flight_recorder_option(const JavaVMOption** option, char* delimiter
 
 bool Jfr::on_start_flight_recording_option(const JavaVMOption** option, char* delimiter) {
   return JfrOptionSet::parse_start_flight_recording_option(option, delimiter);
-}
-
-Thread* Jfr::sampler_thread() {
-  return JfrThreadSampling::sampler_thread();
 }

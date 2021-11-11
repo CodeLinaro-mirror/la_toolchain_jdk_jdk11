@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -50,6 +50,7 @@
 
 jshort ClassLoaderExt::_app_class_paths_start_index = ClassLoaderExt::max_classpath_index;
 jshort ClassLoaderExt::_app_module_paths_start_index = ClassLoaderExt::max_classpath_index;
+jshort ClassLoaderExt::_max_used_path_index = 0;
 bool ClassLoaderExt::_has_app_classes = false;
 bool ClassLoaderExt::_has_platform_classes = false;
 
@@ -206,13 +207,13 @@ void ClassLoaderExt::process_jar_manifest(ClassPathEntry* entry,
         file_end = end;
       }
 
-      int name_len = (int)strlen(file_start);
+      size_t name_len = strlen(file_start);
       if (name_len > 0) {
         ResourceMark rm(THREAD);
-        char* libname = NEW_RESOURCE_ARRAY(char, dir_len + name_len + 1);
-        *libname = 0;
-        strncat(libname, dir_name, dir_len);
-        strncat(libname, file_start, name_len);
+        size_t libname_len = dir_len + name_len;
+        char* libname = NEW_RESOURCE_ARRAY(char, libname_len + 1);
+        int n = os::snprintf(libname, libname_len + 1, "%.*s%s", dir_len, dir_name, file_start);
+        assert((size_t)n == libname_len, "Unexpected number of characters in string");
         trace_class_path("library = ", libname);
         ClassLoader::update_class_path_entry_list(libname, true, false);
       }
@@ -241,6 +242,9 @@ void ClassLoaderExt::record_result(const s2 classpath_index,
   } else if (SystemDictionary::is_platform_class_loader(loader)) {
     classloader_type = ClassLoader::PLATFORM_LOADER;
     ClassLoaderExt::set_has_platform_classes();
+  }
+  if (classpath_index > ClassLoaderExt::max_used_path_index()) {
+    ClassLoaderExt::set_max_used_path_index(classpath_index);
   }
   result->set_shared_classpath_index(classpath_index);
   result->set_class_loader_type(classloader_type);

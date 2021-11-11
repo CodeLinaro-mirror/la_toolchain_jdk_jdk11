@@ -1,5 +1,5 @@
  /*
- * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -242,7 +242,7 @@ class VerifyContainsOopClosure : public OopClosure {
   VerifyContainsOopClosure(oop target) : _target(target), _found(false) {}
 
   void do_oop(oop* p) {
-    if (p != NULL && oopDesc::equals(RawAccess<>::oop_load(p), _target)) {
+    if (p != NULL && RawAccess<>::oop_load(p) == _target) {
       _found = true;
     }
   }
@@ -346,6 +346,11 @@ void ClassLoaderData::loaded_classes_do(KlassClosure* klass_closure) {
   for (Klass* k = OrderAccess::load_acquire(&_klasses); k != NULL; k = k->next_link()) {
     // Do not filter ArrayKlass oops here...
     if (k->is_array_klass() || (k->is_instance_klass() && InstanceKlass::cast(k)->is_loaded())) {
+#ifdef ASSERT
+      oop m = k->java_mirror();
+      assert(m != NULL, "NULL mirror");
+      assert(m->is_a(SystemDictionary::Class_klass()), "invalid mirror");
+#endif
       klass_closure->do_klass(k);
     }
   }
@@ -420,7 +425,7 @@ void ClassLoaderData::record_dependency(const Klass* k) {
 
     // Just return if this dependency is to a class with the same or a parent
     // class_loader.
-    if (oopDesc::equals(from, to) || java_lang_ClassLoader::isAncestor(from, to)) {
+    if (from == to || java_lang_ClassLoader::isAncestor(from, to)) {
       return; // this class loader is in the parent list, no need to add it.
     }
   }
@@ -652,7 +657,7 @@ Dictionary* ClassLoaderData::create_dictionary() {
     size = _default_loader_dictionary_size;
     resizable = true;
   }
-  if (!DynamicallyResizeSystemDictionaries || DumpSharedSpaces || UseSharedSpaces) {
+  if (!DynamicallyResizeSystemDictionaries || DumpSharedSpaces) {
     resizable = false;
   }
   return new Dictionary(this, size, resizable);
@@ -760,6 +765,14 @@ ClassLoaderData::~ClassLoaderData() {
   if (_deallocate_list != NULL) {
     delete _deallocate_list;
   }
+
+  // Decrement refcounts of Symbols if created.
+  if (_name != NULL) {
+    _name->decrement_refcount();
+  }
+  if (_name_and_id != NULL) {
+    _name_and_id->decrement_refcount();
+  }
 }
 
 // Returns true if this class loader data is for the app class loader
@@ -841,6 +854,7 @@ void ClassLoaderData::init_handle_locked(OopHandle& dest, Handle h) {
   if (dest.resolve() != NULL) {
     return;
   } else {
+    record_modified_oops();
     dest = _handles.add(h());
   }
 }
@@ -1028,21 +1042,23 @@ bool ClassLoaderDataGraph::_metaspace_oom = false;
 // Add a new class loader data node to the list.  Assign the newly created
 // ClassLoaderData into the java/lang/ClassLoader object as a hidden field
 ClassLoaderData* ClassLoaderDataGraph::add_to_graph(Handle loader, bool is_anonymous) {
+  ClassLoaderData* cld;
+
+  if (!is_anonymous) {
+    MutexLocker ml(ClassLoaderDataGraph_lock);
+    cld = java_lang_ClassLoader::loader_data_raw(loader());
+    if (cld != NULL) {
+      return cld;
+    }
+    cld = new ClassLoaderData(loader, is_anonymous);
+    java_lang_ClassLoader::release_set_loader_data(loader(), cld);
+  } else {
+    cld = new ClassLoaderData(loader, is_anonymous);
+  }
+
   NoSafepointVerifier no_safepoints; // we mustn't GC until we've installed the
                                      // ClassLoaderData in the graph since the CLD
                                      // contains oops in _handles that must be walked.
-
-  ClassLoaderData* cld = new ClassLoaderData(loader, is_anonymous);
-
-  if (!is_anonymous) {
-    // First, Atomically set it
-    ClassLoaderData* old = java_lang_ClassLoader::cmpxchg_loader_data(cld, loader(), NULL);
-    if (old != NULL) {
-      delete cld;
-      // Returns the data.
-      return old;
-    }
-  }
 
   // We won the race, and therefore the task of adding the data to the list of
   // class loader data
@@ -1414,6 +1430,13 @@ bool ClassLoaderDataGraph::do_unloading(bool clean_previous_versions) {
       }
       if (data->modules_defined()) {
         data->modules()->purge_all_module_reads();
+      }
+      // Clean cached pd lists
+      // It's unlikely, but some loaded classes in a dictionary might
+      // point to a protection_domain that has been unloaded.
+      // The dictionary pd_set points at entries in the ProtectionDomainCacheTable.
+      if (data->dictionary() != NULL) {
+        data->dictionary()->clean_cached_protection_domains();
       }
       data = data->next();
     }

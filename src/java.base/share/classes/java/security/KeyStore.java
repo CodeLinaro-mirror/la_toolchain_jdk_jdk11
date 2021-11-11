@@ -920,7 +920,7 @@ public class KeyStore {
         throws KeyStoreException, NoSuchProviderException
     {
         Objects.requireNonNull(type, "null type name");
-        if (provider == null || provider.length() == 0)
+        if (provider == null || provider.isEmpty())
             throw new IllegalArgumentException("missing provider");
         try {
             Object[] objs = Security.getImpl(type, "KeyStore", provider);
@@ -1813,8 +1813,8 @@ public class KeyStore {
             }
         }
 
-        throw new KeyStoreException("This keystore does not support probing "
-                + "and must be loaded with a specified type");
+        throw new KeyStoreException("Unrecognized keystore format. "
+                + "Please load it with a specified type");
     }
 
     /**

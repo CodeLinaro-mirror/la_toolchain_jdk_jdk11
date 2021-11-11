@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2016, 2018, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2016, 2018 SAP SE. All rights reserved.
+ * Copyright (c) 2016, 2019 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -257,7 +257,7 @@ JVM_handle_linux_signal(int sig,
   // avoid unnecessary crash when libjsig is not preloaded, try handle signals
   // that do not require siginfo/ucontext first.
 
-  if (sig == SIGPIPE) {
+  if (sig == SIGPIPE || sig == SIGXFSZ) {
     if (os::Linux::chained_handler(sig, info, ucVoid)) {
       return true;
     } else {
@@ -270,8 +270,9 @@ JVM_handle_linux_signal(int sig,
 
 #ifdef CAN_SHOW_REGISTERS_ON_ASSERT
   if ((sig == SIGSEGV || sig == SIGBUS) && info != NULL && info->si_addr == g_assert_poison) {
-    handle_assert_poison_fault(ucVoid, info->si_addr);
-    return 1;
+    if (handle_assert_poison_fault(ucVoid, info->si_addr)) {
+      return 1;
+    }
   }
 #endif
 
@@ -425,6 +426,7 @@ JVM_handle_linux_signal(int sig,
         stub = SharedRuntime::continuation_for_implicit_exception(thread, pc, SharedRuntime::IMPLICIT_NULL);
       }
 
+#ifdef COMPILER2
       // SIGTRAP-based implicit range check in compiled code.
       else if (sig == SIGFPE && TrapBasedRangeChecks &&
                (trap_pc != NULL) &&
@@ -434,6 +436,7 @@ JVM_handle_linux_signal(int sig,
         }
         stub = SharedRuntime::continuation_for_implicit_exception(thread, trap_pc, SharedRuntime::IMPLICIT_NULL);
       }
+#endif
 
       else if (sig == SIGFPE && info->si_code == FPE_INTDIV) {
         stub = SharedRuntime::continuation_for_implicit_exception(thread, trap_pc, SharedRuntime::IMPLICIT_DIVIDE_BY_ZERO);

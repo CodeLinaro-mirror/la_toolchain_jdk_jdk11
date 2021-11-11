@@ -429,9 +429,10 @@ AC_DEFUN([TOOLCHAIN_EXTRACT_COMPILER_VERSION],
     # There is no specific version flag, but all output starts with a version string.
     # First line typically looks something like:
     # Microsoft (R) 32-bit C/C++ Optimizing Compiler Version 16.00.40219.01 for 80x86
+    # but the compiler name may vary depending on locale.
     COMPILER_VERSION_OUTPUT=`$COMPILER 2>&1 | $HEAD -n 1 | $TR -d '\r'`
     # Check that this is likely to be Microsoft CL.EXE.
-    $ECHO "$COMPILER_VERSION_OUTPUT" | $GREP "Microsoft.*Compiler" > /dev/null
+    $ECHO "$COMPILER_VERSION_OUTPUT" | $GREP "Microsoft" > /dev/null
     if test $? -ne 0; then
       AC_MSG_NOTICE([The $COMPILER_NAME compiler (located as $COMPILER) does not seem to be the required $TOOLCHAIN_TYPE compiler.])
       AC_MSG_NOTICE([The result from running it was: "$COMPILER_VERSION_OUTPUT"])
@@ -460,7 +461,7 @@ AC_DEFUN([TOOLCHAIN_EXTRACT_COMPILER_VERSION],
     COMPILER_VERSION_STRING=`$ECHO $COMPILER_VERSION_OUTPUT | \
         $SED -e 's/ *Copyright .*//'`
     COMPILER_VERSION_NUMBER=`$ECHO $COMPILER_VERSION_OUTPUT | \
-        $SED -e 's/^.* \(@<:@1-9@:>@\.@<:@0-9.@:>@*\)@<:@^0-9.@:>@.*$/\1/'`
+        $SED -e 's/^.* \(@<:@1-9@:>@<:@0-9@:>@*\.@<:@0-9.@:>@*\)@<:@^0-9.@:>@.*$/\1/'`
   elif test  "x$TOOLCHAIN_TYPE" = xclang; then
     # clang --version output typically looks like
     #    Apple LLVM version 5.0 (clang-500.2.79) (based on LLVM 3.3svn)
@@ -589,7 +590,7 @@ AC_DEFUN([TOOLCHAIN_FIND_COMPILER],
 AC_DEFUN([TOOLCHAIN_EXTRACT_LD_VERSION],
 [
   LINKER=[$]$1
-  LINKER_NAME=$2
+  LINKER_NAME="$2"
 
   if test "x$TOOLCHAIN_TYPE" = xsolstudio; then
     # cc -Wl,-V output typically looks like
@@ -709,12 +710,18 @@ AC_DEFUN_ONCE([TOOLCHAIN_DETECT_TOOLCHAIN_CORE],
       AC_MSG_RESULT([yes])
     fi
     LDCXX="$LD"
+    # jaotc being a windows program expects the linker to be supplied with exe suffix.
+    LD_JAOTC="$LD$EXE_SUFFIX"
   else
     # All other toolchains use the compiler to link.
     LD="$CC"
     LDCXX="$CXX"
+    # jaotc expects 'ld' as the linker rather than the compiler.
+    BASIC_CHECK_TOOLS([LD_JAOTC], ld)
+    BASIC_FIXUP_EXECUTABLE(LD_JAOTC)
   fi
   AC_SUBST(LD)
+  AC_SUBST(LD_JAOTC)
   # FIXME: it should be CXXLD, according to standard (cf CXXCPP)
   AC_SUBST(LDCXX)
 
@@ -941,9 +948,14 @@ AC_DEFUN_ONCE([TOOLCHAIN_SETUP_BUILD_COMPILERS],
     # FIXME: we should list the discovered compilers as an exclude pattern!
     # If we do that, we can do this detection before POST_DETECTION, and still
     # find the build compilers in the tools dir, if needed.
-    BASIC_REQUIRE_PROGS(BUILD_CC, [cl cc gcc])
+    if test "x$OPENJDK_BUILD_OS" = xmacosx; then
+      BASIC_REQUIRE_PROGS(BUILD_CC, [clang cl cc gcc])
+      BASIC_REQUIRE_PROGS(BUILD_CXX, [clang++ cl CC g++])
+    else
+      BASIC_REQUIRE_PROGS(BUILD_CC, [cl cc gcc])
+      BASIC_REQUIRE_PROGS(BUILD_CXX, [cl CC g++])
+    fi
     BASIC_FIXUP_EXECUTABLE(BUILD_CC)
-    BASIC_REQUIRE_PROGS(BUILD_CXX, [cl CC g++])
     BASIC_FIXUP_EXECUTABLE(BUILD_CXX)
     BASIC_PATH_PROGS(BUILD_NM, nm gcc-nm)
     BASIC_FIXUP_EXECUTABLE(BUILD_NM)
@@ -1019,6 +1031,12 @@ AC_DEFUN_ONCE([TOOLCHAIN_MISC_CHECKS],
   if test "x$TOOLCHAIN_TYPE" = xgcc; then
     # If this is a --hash-style=gnu system, use --hash-style=both, why?
     HAS_GNU_HASH=`$CC -dumpspecs 2>/dev/null | $GREP 'hash-style=gnu'`
+    # This is later checked when setting flags.
+  fi
+
+  if test "x$TOOLCHAIN_TYPE" = xgcc || test "x$TOOLCHAIN_TYPE" = xclang; then
+    # Check if linker has -z noexecstack.
+    HAS_NOEXECSTACK=`$CC -Wl,--help 2>/dev/null | $GREP 'z noexecstack'`
     # This is later checked when setting flags.
   fi
 
@@ -1144,5 +1162,5 @@ AC_DEFUN_ONCE([TOOLCHAIN_SETUP_JIB],
     fi
   fi
 
-  AC_SUBST(JIB_JAR)
+  AC_SUBST(JIB_HOME)
 ])

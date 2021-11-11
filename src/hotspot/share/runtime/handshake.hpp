@@ -26,22 +26,32 @@
 #define SHARE_VM_RUNTIME_HANDSHAKE_HPP
 
 #include "memory/allocation.hpp"
+#include "memory/iterator.hpp"
 #include "runtime/flags/flagSetting.hpp"
 #include "runtime/semaphore.hpp"
 
-class ThreadClosure;
 class JavaThread;
 
-// A handshake operation is a callback that is executed for each JavaThread
+// A handshake closure is a callback that is executed for each JavaThread
 // while that thread is in a safepoint safe state. The callback is executed
 // either by the thread itself or by the VM thread while keeping the thread
 // in a blocked state. A handshake can be performed with a single
 // JavaThread as well.
+class HandshakeClosure : public ThreadClosure {
+  const char* const _name;
+ public:
+  HandshakeClosure(const char* name) : _name(name) {}
+  const char* name() const {
+    return _name;
+  }
+  virtual void do_thread(Thread* thread) = 0;
+};
+
 class Handshake : public AllStatic {
  public:
   // Execution of handshake operation
-  static void execute(ThreadClosure* thread_cl);
-  static bool execute(ThreadClosure* thread_cl, JavaThread* target);
+  static void execute(HandshakeClosure* hs_cl);
+  static bool execute(HandshakeClosure* hs_cl, JavaThread* target);
 };
 
 class HandshakeOperation;
@@ -60,7 +70,6 @@ class HandshakeState {
   bool vmthread_can_process_handshake(JavaThread* target);
 
   void clear_handshake(JavaThread* thread);
-  void cancel_inner(JavaThread* thread);
 
   void process_self_inner(JavaThread* thread);
 public:
@@ -72,20 +81,21 @@ public:
     return _operation != NULL;
   }
 
-  void cancel(JavaThread* thread) {
-    if (!_thread_in_process_handshake) {
-      FlagSetting fs(_thread_in_process_handshake, true);
-      cancel_inner(thread);
-    }
-  }
-
   void process_by_self(JavaThread* thread) {
     if (!_thread_in_process_handshake) {
       FlagSetting fs(_thread_in_process_handshake, true);
       process_self_inner(thread);
     }
   }
-  void process_by_vmthread(JavaThread* target);
+
+  enum ProcessResult {
+    _no_operation = 0,
+    _not_safe,
+    _state_busy,
+    _success,
+    _number_states
+  };
+  HandshakeState::ProcessResult try_process_by_vmThread(JavaThread* target);
 };
 
 #endif // SHARE_VM_RUNTIME_HANDSHAKE_HPP

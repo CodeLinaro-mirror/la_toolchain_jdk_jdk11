@@ -26,6 +26,8 @@
 #include "compiler/compileLog.hpp"
 #include "ci/bcEscapeAnalyzer.hpp"
 #include "compiler/oopMap.hpp"
+#include "gc/shared/barrierSet.hpp"
+#include "gc/shared/c2/barrierSetC2.hpp"
 #include "interpreter/interpreter.hpp"
 #include "opto/callGenerator.hpp"
 #include "opto/callnode.hpp"
@@ -965,6 +967,21 @@ uint CallJavaNode::cmp( const Node &n ) const {
   return CallNode::cmp(call) && _method == call._method &&
          _override_symbolic_info == call._override_symbolic_info;
 }
+#ifdef ASSERT
+bool CallJavaNode::validate_symbolic_info() const {
+  if (method() == NULL) {
+    return true; // call into runtime or uncommon trap
+  }
+  ciMethod* symbolic_info = jvms()->method()->get_method_at_bci(_bci);
+  ciMethod* callee = method();
+  if (symbolic_info->is_method_handle_intrinsic() && !callee->is_method_handle_intrinsic()) {
+    assert(override_symbolic_info(), "should be set");
+  }
+  assert(ciMethod::is_consistent_info(symbolic_info, callee), "inconsistent info");
+  return true;
+}
+#endif
+
 #ifndef PRODUCT
 void CallJavaNode::dump_spec(outputStream *st) const {
   if( _method ) _method->print_short_name(st);
@@ -1269,6 +1286,14 @@ uint SafePointNode::match_edge(uint idx) const {
   return (TypeFunc::Parms == idx);
 }
 
+void SafePointNode::disconnect_from_root(PhaseIterGVN *igvn) {
+  assert(Opcode() == Op_SafePoint, "only value for safepoint in loops");
+  int nb = igvn->C->root()->find_prec_edge(this);
+  if (nb != -1) {
+    igvn->C->root()->rm_prec(nb);
+  }
+}
+
 //==============  SafePointScalarObjectNode  ==============
 
 SafePointScalarObjectNode::SafePointScalarObjectNode(const TypeOopPtr* tp,
@@ -1406,7 +1431,7 @@ Node* AllocateArrayNode::Ideal(PhaseGVN *phase, bool can_reshape) {
         Node *frame = new ParmNode( phase->C->start(), TypeFunc::FramePtr );
         frame = phase->transform(frame);
         // Halt & Catch Fire
-        Node *halt = new HaltNode( nproj, frame );
+        Node* halt = new HaltNode(nproj, frame, "unexpected negative array length");
         phase->C->root()->add_req(halt);
         phase->transform(halt);
 
@@ -1451,7 +1476,7 @@ Node *AllocateArrayNode::make_ideal_length(const TypeOopPtr* oop_type, PhaseTran
       InitializeNode* init = initialization();
       assert(init != NULL, "initialization not found");
       length = new CastIINode(length, narrow_length_type);
-      length->set_req(0, init->proj_out_or_null(0));
+      length->set_req(TypeFunc::Control, init->proj_out_or_null(TypeFunc::Control));
     }
   }
 
@@ -1623,7 +1648,10 @@ bool AbstractLockNode::find_matching_unlock(const Node* ctrl, LockNode* lock,
     Node *n = ctrl_proj->in(0);
     if (n != NULL && n->is_Unlock()) {
       UnlockNode *unlock = n->as_Unlock();
-      if (lock->obj_node()->eqv_uncast(unlock->obj_node()) &&
+      BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+      Node* lock_obj = bs->step_over_gc_barrier(lock->obj_node());
+      Node* unlock_obj = bs->step_over_gc_barrier(unlock->obj_node());
+      if (lock_obj->eqv_uncast(unlock_obj) &&
           BoxLockNode::same_slot(lock->box_node(), unlock->box_node()) &&
           !unlock->is_eliminated()) {
         lock_ops.append(unlock);
@@ -1668,7 +1696,10 @@ LockNode *AbstractLockNode::find_matching_lock(UnlockNode* unlock) {
   }
   if (ctrl->is_Lock()) {
     LockNode *lock = ctrl->as_Lock();
-    if (lock->obj_node()->eqv_uncast(unlock->obj_node()) &&
+    BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+    Node* lock_obj = bs->step_over_gc_barrier(lock->obj_node());
+    Node* unlock_obj = bs->step_over_gc_barrier(unlock->obj_node());
+    if (lock_obj->eqv_uncast(unlock_obj) &&
         BoxLockNode::same_slot(lock->box_node(), unlock->box_node())) {
       lock_result = lock;
     }
@@ -1699,7 +1730,10 @@ bool AbstractLockNode::find_lock_and_unlock_through_if(Node* node, LockNode* loc
       }
       if (lock1_node != NULL && lock1_node->is_Lock()) {
         LockNode *lock1 = lock1_node->as_Lock();
-        if (lock->obj_node()->eqv_uncast(lock1->obj_node()) &&
+        BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+        Node* lock_obj = bs->step_over_gc_barrier(lock->obj_node());
+        Node* lock1_obj = bs->step_over_gc_barrier(lock1->obj_node());
+        if (lock_obj->eqv_uncast(lock1_obj) &&
             BoxLockNode::same_slot(lock->box_node(), lock1->box_node()) &&
             !lock1->is_eliminated()) {
           lock_ops.append(lock1);
@@ -1738,6 +1772,12 @@ bool AbstractLockNode::find_unlocks_for_region(const RegionNode* region, LockNod
 
 }
 
+const char* AbstractLockNode::_kind_names[] = {"Regular", "NonEscObj", "Coarsened", "Nested"};
+
+const char * AbstractLockNode::kind_as_string() const {
+  return _kind_names[_kind];
+}
+
 #ifndef PRODUCT
 //
 // Create a counter which counts the number of times this lock is acquired
@@ -1754,8 +1794,6 @@ void AbstractLockNode::set_eliminated_lock_counter() {
     _counter->set_tag(NamedCounter::EliminatedLockCounter);
   }
 }
-
-const char* AbstractLockNode::_kind_names[] = {"Regular", "NonEscObj", "Coarsened", "Nested"};
 
 void AbstractLockNode::dump_spec(outputStream* st) const {
   st->print("%s ", _kind_names[_kind]);
@@ -1808,6 +1846,9 @@ Node *LockNode::Ideal(PhaseGVN *phase, bool can_reshape) {
       return result;
     }
 
+    if (!phase->C->do_locks_coarsening()) {
+      return result; // Compiling without locks coarsening
+    }
     //
     // Try lock coarsening
     //
@@ -1845,6 +1886,9 @@ Node *LockNode::Ideal(PhaseGVN *phase, bool can_reshape) {
         if (PrintEliminateLocks) {
           int locks = 0;
           int unlocks = 0;
+          if (Verbose) {
+            tty->print_cr("=== Locks coarsening ===");
+          }
           for (int i = 0; i < lock_ops.length(); i++) {
             AbstractLockNode* lock = lock_ops.at(i);
             if (lock->Opcode() == Op_Lock)
@@ -1852,10 +1896,11 @@ Node *LockNode::Ideal(PhaseGVN *phase, bool can_reshape) {
             else
               unlocks++;
             if (Verbose) {
-              lock->dump(1);
+              tty->print(" %d: ", i);
+              lock->dump();
             }
           }
-          tty->print_cr("***Eliminated %d unlocks and %d locks", unlocks, locks);
+          tty->print_cr("=== Coarsened %d unlocks and %d locks", unlocks, locks);
         }
   #endif
 
@@ -1870,6 +1915,8 @@ Node *LockNode::Ideal(PhaseGVN *phase, bool can_reshape) {
 #endif
           lock->set_coarsened();
         }
+        // Record this coarsened group.
+        phase->C->add_coarsened_locks(lock_ops);
       } else if (ctrl->is_Region() &&
                  iter->_worklist.member(ctrl)) {
         // We weren't able to find any opportunities but the region this
@@ -1903,19 +1950,40 @@ bool LockNode::is_nested_lock_region(Compile * c) {
   // Ignore complex cases: merged locks or multiple locks.
   Node* obj = obj_node();
   LockNode* unique_lock = NULL;
-  if (!box->is_simple_lock_region(&unique_lock, obj)) {
+  Node* bad_lock = NULL;
+  if (!box->is_simple_lock_region(&unique_lock, obj, &bad_lock)) {
 #ifdef ASSERT
-    this->log_lock_optimization(c, "eliminate_lock_INLR_2a");
+    this->log_lock_optimization(c, "eliminate_lock_INLR_2a", bad_lock);
 #endif
     return false;
   }
   if (unique_lock != this) {
 #ifdef ASSERT
-    this->log_lock_optimization(c, "eliminate_lock_INLR_2b");
+    this->log_lock_optimization(c, "eliminate_lock_INLR_2b", (unique_lock != NULL ? unique_lock : bad_lock));
+    if (PrintEliminateLocks && Verbose) {
+      tty->print_cr("=============== unique_lock != this ============");
+      tty->print(" this: ");
+      this->dump();
+      tty->print(" box: ");
+      box->dump();
+      tty->print(" obj: ");
+      obj->dump();
+      if (unique_lock != NULL) {
+        tty->print(" unique_lock: ");
+        unique_lock->dump();
+      }
+      if (bad_lock != NULL) {
+        tty->print(" bad_lock: ");
+        bad_lock->dump();
+      }
+      tty->print_cr("===============");
+    }
 #endif
     return false;
   }
 
+  BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
+  obj = bs->step_over_gc_barrier(obj);
   // Look for external lock for the same object.
   SafePointNode* sfn = this->as_SafePoint();
   JVMState* youngest_jvms = sfn->jvms();
@@ -1926,6 +1994,7 @@ bool LockNode::is_nested_lock_region(Compile * c) {
     // Loop over monitors
     for (int idx = 0; idx < num_mon; idx++) {
       Node* obj_node = sfn->monitor_obj(jvms, idx);
+      obj_node = bs->step_over_gc_barrier(obj_node);
       BoxLockNode* box_node = sfn->monitor_box(jvms, idx)->as_BoxLock();
       if ((box_node->stack_slot() < stk_slot) && obj_node->eqv_uncast(obj)) {
         return true;
@@ -1975,23 +2044,21 @@ Node *UnlockNode::Ideal(PhaseGVN *phase, bool can_reshape) {
   return result;
 }
 
-const char * AbstractLockNode::kind_as_string() const {
-  return is_coarsened()   ? "coarsened" :
-         is_nested()      ? "nested" :
-         is_non_esc_obj() ? "non_escaping" :
-         "?";
-}
-
-void AbstractLockNode::log_lock_optimization(Compile *C, const char * tag)  const {
+void AbstractLockNode::log_lock_optimization(Compile *C, const char * tag, Node* bad_lock)  const {
   if (C == NULL) {
     return;
   }
   CompileLog* log = C->log();
   if (log != NULL) {
-    log->begin_head("%s lock='%d' compile_id='%d' class_id='%s' kind='%s'",
-          tag, is_Lock(), C->compile_id(),
+    Node* box = box_node();
+    Node* obj = obj_node();
+    int box_id = box != NULL ? box->_idx : -1;
+    int obj_id = obj != NULL ? obj->_idx : -1;
+
+    log->begin_head("%s compile_id='%d' lock_id='%d' class='%s' kind='%s' box_id='%d' obj_id='%d' bad_id='%d'",
+          tag, C->compile_id(), this->_idx,
           is_Unlock() ? "unlock" : is_Lock() ? "lock" : "?",
-          kind_as_string());
+          kind_as_string(), box_id, obj_id, (bad_lock != NULL ? bad_lock->_idx : -1));
     log->stamp();
     log->end_head();
     JVMState* p = is_Unlock() ? (as_Unlock()->dbg_jvms()) : jvms();

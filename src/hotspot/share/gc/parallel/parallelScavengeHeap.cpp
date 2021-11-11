@@ -41,6 +41,7 @@
 #include "gc/shared/gcLocker.hpp"
 #include "gc/shared/gcWhen.hpp"
 #include "logging/log.hpp"
+#include "memory/iterator.hpp"
 #include "memory/metaspaceCounters.hpp"
 #include "oops/oop.inline.hpp"
 #include "runtime/handles.inline.hpp"
@@ -508,6 +509,10 @@ void ParallelScavengeHeap::collect(GCCause::Cause cause) {
     // This value is guarded by the Heap_lock
     gc_count      = total_collections();
     full_gc_count = total_full_collections();
+  }
+
+  if (GCLocker::should_discard(cause, gc_count)) {
+    return;
   }
 
   VM_ParallelGCSystemGC op(gc_count, full_gc_count, cause);

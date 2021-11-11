@@ -52,7 +52,7 @@
 #include "runtime/biasedLocking.hpp"
 #include "runtime/compilationPolicy.hpp"
 #include "runtime/deoptimization.hpp"
-#include "runtime/fieldDescriptor.hpp"
+#include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/frame.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/icache.hpp"
@@ -71,21 +71,6 @@
 #ifdef COMPILER2
 #include "opto/runtime.hpp"
 #endif
-
-class UnlockFlagSaver {
-  private:
-    JavaThread* _thread;
-    bool _do_not_unlock;
-  public:
-    UnlockFlagSaver(JavaThread* t) {
-      _thread = t;
-      _do_not_unlock = t->do_not_unlock_if_synchronized();
-      t->set_do_not_unlock_if_synchronized(false);
-    }
-    ~UnlockFlagSaver() {
-      _thread->set_do_not_unlock_if_synchronized(_do_not_unlock);
-    }
-};
 
 // Helper class to access current interpreter state
 class LastFrameAccessor : public StackObj {
@@ -209,7 +194,7 @@ IRT_ENTRY(void, InterpreterRuntime::resolve_ldc(JavaThread* thread, Bytecodes::C
     if (rindex >= 0) {
       oop coop = m->constants()->resolved_references()->obj_at(rindex);
       oop roop = (result == NULL ? Universe::the_null_sentinel() : result);
-      assert(oopDesc::equals(roop, coop), "expected result for assembly code");
+      assert(roop == coop, "expected result for assembly code");
     }
   }
 #endif
@@ -543,7 +528,7 @@ IRT_ENTRY(address, InterpreterRuntime::exception_handler_for_exception(JavaThrea
       tempst.print("interpreter method <%s>\n"
                    " at bci %d for thread " INTPTR_FORMAT " (%s)",
                    h_method->print_value_string(), current_bci, p2i(thread), thread->name());
-      Exceptions::log_exception(h_exception, tempst);
+      Exceptions::log_exception(h_exception, tempst.as_string());
     }
 // Don't go paging in something which won't be used.
 //     else if (extable->length() == 0) {
@@ -1064,6 +1049,9 @@ nmethod* InterpreterRuntime::frequency_counter_overflow(JavaThread* thread, addr
 
 IRT_ENTRY(nmethod*,
           InterpreterRuntime::frequency_counter_overflow_inner(JavaThread* thread, address branch_bcp))
+  if (HAS_PENDING_EXCEPTION) {
+    return NULL;
+  }
   // use UnlockFlagSaver to clear and restore the _do_not_unlock_if_synchronized
   // flag, in case this method triggers classloading which will call into Java.
   UnlockFlagSaver fs(thread);
@@ -1074,7 +1062,6 @@ IRT_ENTRY(nmethod*,
   const int branch_bci = branch_bcp != NULL ? method->bci_from(branch_bcp) : InvocationEntryBci;
   const int bci = branch_bcp != NULL ? method->bci_from(last_frame.bcp()) : InvocationEntryBci;
 
-  assert(!HAS_PENDING_EXCEPTION, "Should not have any exceptions pending");
   nmethod* osr_nm = CompilationPolicy::policy()->event(method, method, branch_bci, bci, CompLevel_none, NULL, thread);
   assert(!HAS_PENDING_EXCEPTION, "Event handler should not throw any exceptions");
 
@@ -1110,6 +1097,9 @@ IRT_LEAF(jint, InterpreterRuntime::bcp_to_di(Method* method, address cur_bcp))
 IRT_END
 
 IRT_ENTRY(void, InterpreterRuntime::profile_method(JavaThread* thread))
+  if (HAS_PENDING_EXCEPTION) {
+    return;
+  }
   // use UnlockFlagSaver to clear and restore the _do_not_unlock_if_synchronized
   // flag, in case this method triggers classloading which will call into Java.
   UnlockFlagSaver fs(thread);
@@ -1292,7 +1282,10 @@ IRT_ENTRY(void, InterpreterRuntime::post_method_entry(JavaThread *thread))
 IRT_END
 
 
-IRT_ENTRY(void, InterpreterRuntime::post_method_exit(JavaThread *thread))
+// This is a JRT_BLOCK_ENTRY because we have to stash away the return oop
+// before transitioning to VM, and restore it after transitioning back
+// to Java. The return oop at the top-of-stack, is not walked by the GC.
+JRT_BLOCK_ENTRY(void, InterpreterRuntime::post_method_exit(JavaThread *thread))
   LastFrameAccessor last_frame(thread);
   JvmtiExport::post_method_exit(thread, last_frame.method(), last_frame.get_frame());
 IRT_END

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -42,7 +42,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import javax.security.auth.x500.X500Principal;
 
-import java.util.Base64;
 import sun.security.util.*;
 import sun.security.provider.X509Factory;
 
@@ -429,18 +428,16 @@ public class X509CertImpl extends X509Certificate implements DerEncoder {
         }
         // Verify the signature ...
         Signature sigVerf = null;
-        if (sigProvider.length() == 0) {
-            sigVerf = Signature.getInstance(algId.getName());
+        String sigName = algId.getName();
+        if (sigProvider.isEmpty()) {
+            sigVerf = Signature.getInstance(sigName);
         } else {
-            sigVerf = Signature.getInstance(algId.getName(), sigProvider);
+            sigVerf = Signature.getInstance(sigName, sigProvider);
         }
 
-        sigVerf.initVerify(key);
-
-        // set parameters after Signature.initSign/initVerify call,
-        // so the deferred provider selection happens when key is set
         try {
-            SignatureUtil.specialSetParameter(sigVerf, getSigAlgParams());
+            SignatureUtil.initVerifyWithParam(sigVerf, key,
+                SignatureUtil.getParamSpec(sigName, getSigAlgParams()));
         } catch (ProviderException e) {
             throw new CertificateException(e.getMessage(), e.getCause());
         } catch (InvalidAlgorithmParameterException e) {
@@ -485,18 +482,16 @@ public class X509CertImpl extends X509Certificate implements DerEncoder {
         }
         // Verify the signature ...
         Signature sigVerf = null;
+        String sigName = algId.getName();
         if (sigProvider == null) {
-            sigVerf = Signature.getInstance(algId.getName());
+            sigVerf = Signature.getInstance(sigName);
         } else {
-            sigVerf = Signature.getInstance(algId.getName(), sigProvider);
+            sigVerf = Signature.getInstance(sigName, sigProvider);
         }
 
-        sigVerf.initVerify(key);
-
-        // set parameters after Signature.initSign/initVerify call,
-        // so the deferred provider selection happens when key is set
         try {
-            SignatureUtil.specialSetParameter(sigVerf, getSigAlgParams());
+            SignatureUtil.initVerifyWithParam(sigVerf, key,
+                SignatureUtil.getParamSpec(sigName, getSigAlgParams()));
         } catch (ProviderException e) {
             throw new CertificateException(e.getMessage(), e.getCause());
         } catch (InvalidAlgorithmParameterException e) {
@@ -594,32 +589,25 @@ public class X509CertImpl extends X509Certificate implements DerEncoder {
             InvalidKeyException, InvalidAlgorithmParameterException,
             NoSuchProviderException, SignatureException {
         try {
-            if (readOnly)
+            if (readOnly) {
                 throw new CertificateEncodingException(
-                              "cannot over-write existing certificate");
+                        "cannot over-write existing certificate");
+            }
             Signature sigEngine = null;
-            if ((provider == null) || (provider.length() == 0))
+            if (provider == null || provider.isEmpty()) {
                 sigEngine = Signature.getInstance(algorithm);
-            else
+            } else {
                 sigEngine = Signature.getInstance(algorithm, provider);
-
-            sigEngine.initSign(key);
-
-            // set parameters after Signature.initSign/initVerify call, so
-            // the deferred provider selection happens when the key is set
-            try {
-                sigEngine.setParameter(signingParams);
-            } catch (UnsupportedOperationException e) {
-                // for backward compatibility, only re-throw when
-                // parameters is not null
-                if (signingParams != null) throw e;
             }
 
-            // in case the name is reset
+            SignatureUtil.initSignWithParam(sigEngine, key, signingParams,
+                    null);
+
             if (signingParams != null) {
                 algId = AlgorithmId.get(sigEngine.getParameters());
             } else {
-                algId = AlgorithmId.get(algorithm);
+                // in case the name is reset
+                algId = AlgorithmId.get(sigEngine.getAlgorithm());
             }
             DerOutputStream out = new DerOutputStream();
             DerOutputStream tmp = new DerOutputStream();

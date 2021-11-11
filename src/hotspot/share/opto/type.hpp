@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -166,6 +166,7 @@ private:
 #endif
 
   const Type *meet_helper(const Type *t, bool include_speculative) const;
+  void check_symmetrical(const Type *t, const Type *mt) const;
 
 protected:
   // Each class of type is also identified by its base.
@@ -453,10 +454,10 @@ public:
   const Type* maybe_remove_speculative(bool include_speculative) const;
 
   virtual bool maybe_null() const { return true; }
+  virtual bool is_known_instance() const { return false; }
 
 private:
   // support arrays
-  static const BasicType _basic_type[];
   static const Type*        _zero_type[T_CONFLICT+1];
   static const Type* _const_basic_type[T_CONFLICT+1];
 };
@@ -483,6 +484,8 @@ public:
   // Convenience common pre-built types.
   static const TypeF *ZERO; // positive zero only
   static const TypeF *ONE;
+  static const TypeF *POS_INF;
+  static const TypeF *NEG_INF;
 #ifndef PRODUCT
   virtual void dump2( Dict &d, uint depth, outputStream *st ) const;
 #endif
@@ -510,6 +513,8 @@ public:
   // Convenience common pre-built types.
   static const TypeD *ZERO; // positive zero only
   static const TypeD *ONE;
+  static const TypeD *POS_INF;
+  static const TypeD *NEG_INF;
 #ifndef PRODUCT
   virtual void dump2( Dict &d, uint depth, outputStream *st ) const;
 #endif
@@ -1039,6 +1044,8 @@ public:
   virtual bool would_improve_type(ciKlass* exact_kls, int inline_depth) const;
   virtual const TypePtr* with_inline_depth(int depth) const;
 
+  virtual const TypePtr* with_instance_id(int instance_id) const;
+
   virtual const Type *xdual() const;    // Compute dual right now.
   // the core of the computation of the meet for TypeOopPtr and for its subclasses
   virtual const Type *xmeet_helper(const Type *t) const;
@@ -1115,6 +1122,7 @@ class TypeInstPtr : public TypeOopPtr {
   // Speculative type helper methods.
   virtual const Type* remove_speculative() const;
   virtual const TypePtr* with_inline_depth(int depth) const;
+  virtual const TypePtr* with_instance_id(int instance_id) const;
 
   // the core of the computation of the meet of 2 types
   virtual const Type *xmeet_helper(const Type *t) const;
@@ -1202,6 +1210,7 @@ public:
   // Speculative type helper methods.
   virtual const Type* remove_speculative() const;
   virtual const TypePtr* with_inline_depth(int depth) const;
+  virtual const TypePtr* with_instance_id(int instance_id) const;
 
   // the core of the computation of the meet of 2 types
   virtual const Type *xmeet_helper(const Type *t) const;
@@ -1211,6 +1220,8 @@ public:
   int stable_dimension() const;
 
   const TypeAryPtr* cast_to_autobox_cache(bool cache) const;
+
+  static jint max_array_length(BasicType etype) ;
 
   // Convenience common pre-built types.
   static const TypeAryPtr *RANGE;
@@ -1387,6 +1398,10 @@ public:
   // returns the equivalent ptr type for this compressed pointer
   const TypePtr *get_ptrtype() const {
     return _ptrtype;
+  }
+
+  bool is_known_instance() const {
+    return _ptrtype->is_known_instance();
   }
 
 #ifndef PRODUCT
@@ -1770,6 +1785,10 @@ inline bool Type::is_ptr_to_boxing_obj() const {
 // UseOptoBiasInlining
 #define XorXNode     XorLNode
 #define StoreXConditionalNode StoreLConditionalNode
+#if INCLUDE_SHENANDOAHGC
+#define LoadXNode    LoadLNode
+#define StoreXNode   StoreLNode
+#endif
 // Opcodes
 #define Op_LShiftX   Op_LShiftL
 #define Op_AndX      Op_AndL
@@ -1815,6 +1834,10 @@ inline bool Type::is_ptr_to_boxing_obj() const {
 // UseOptoBiasInlining
 #define XorXNode     XorINode
 #define StoreXConditionalNode StoreIConditionalNode
+#if INCLUDE_SHENANDOAHGC
+#define LoadXNode    LoadINode
+#define StoreXNode   StoreINode
+#endif
 // Opcodes
 #define Op_LShiftX   Op_LShiftI
 #define Op_AndX      Op_AndI

@@ -157,6 +157,16 @@ public:
 // Phase that first performs a PhaseRemoveUseless, then it renumbers compiler
 // structures accordingly.
 class PhaseRenumberLive : public PhaseRemoveUseless {
+protected:
+  Type_Array _new_type_array; // Storage for the updated type information.
+  GrowableArray<int> _old2new_map;
+  Node_List _delayed;
+  bool _is_pass_finished;
+  uint _live_node_count;
+
+  int update_embedded_ids(Node* n);
+  int new_index(int old_idx);
+
 public:
   PhaseRenumberLive(PhaseGVN* gvn,
                     Unique_Node_List* worklist, Unique_Node_List* new_worklist,
@@ -425,6 +435,12 @@ public:
 
   bool is_dominator(Node *d, Node *n) { return is_dominator_helper(d, n, true); }
 
+  // Helper to call Node::Ideal() and BarrierSetC2::ideal_node().
+  Node* apply_ideal(Node* i, bool can_reshape);
+
+  // Helper to call Node::Identity() and BarrierSetC2::identity_node().
+  Node* apply_identity(Node* n);
+
   // Check for a simple dead loop when a data node references itself.
   DEBUG_ONLY(void dead_loop_check(Node *n);)
 };
@@ -543,19 +559,13 @@ public:
     _delay_transform = delay;
   }
 
-  // Clone loop predicates. Defined in loopTransform.cpp.
-  Node* clone_loop_predicates(Node* old_entry, Node* new_entry, bool clone_limit_check);
-  // Create a new if below new_entry for the predicate to be cloned
-  ProjNode* create_new_if_for_predicate(ProjNode* cont_proj, Node* new_entry,
-                                        Deoptimization::DeoptReason reason,
-                                        int opcode);
-
   void remove_speculative_types();
   void check_no_speculative_types() {
     _table.check_no_speculative_types();
   }
 
   bool is_dominator(Node *d, Node *n) { return is_dominator_helper(d, n, false); }
+  bool no_dependent_zero_check(Node* n) const;
 
 #ifndef PRODUCT
 protected:

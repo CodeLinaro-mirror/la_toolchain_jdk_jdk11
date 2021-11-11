@@ -32,6 +32,7 @@
 #include "oops/instanceKlass.hpp"
 #include "oops/oopsHierarchy.hpp"
 #include "runtime/mutexLocker.hpp"
+#include "utilities/macros.hpp"
 
 // The CodeCache implements the code cache for various pieces of generated
 // code, e.g., compiled java methods, runtime stubs, transition frames, etc.
@@ -80,6 +81,9 @@ class CodeCache : AllStatic {
   template <class T, class Filter> friend class CodeBlobIterator;
   friend class WhiteBox;
   friend class CodeCacheLoader;
+#if INCLUDE_SHENANDOAHGC
+  friend class ShenandoahParallelCodeHeapIterator;
+#endif
  private:
   // CodeHeaps of the cache
   static GrowableArray<CodeHeap*>* _heaps;
@@ -107,7 +111,6 @@ class CodeCache : AllStatic {
   static CodeHeap* get_code_heap(int code_blob_type);         // Returns the CodeHeap for the given CodeBlobType
   // Returns the name of the VM option to set the size of the corresponding CodeHeap
   static const char* get_code_heap_flag_name(int code_blob_type);
-  static size_t page_size(bool aligned = true);               // Returns the page size used by the CodeCache
   static ReservedCodeSpace reserve_heap_memory(size_t size);  // Reserves one continuous chunk of memory for the CodeHeaps
 
   // Iteration
@@ -129,6 +132,7 @@ class CodeCache : AllStatic {
  public:
   // Initialization
   static void initialize();
+  static size_t page_size(bool aligned = true, size_t min_pages = 1); // Returns the page size used by the CodeCache
 
   static int code_heap_compare(CodeHeap* const &lhs, CodeHeap* const &rhs);
 
@@ -302,7 +306,7 @@ class CodeCache : AllStatic {
 
   // CodeHeap State Analytics.
   // interface methods for CodeHeap printing, called by CompileBroker
-  static void aggregate(outputStream *out, const char* granularity);
+  static void aggregate(outputStream *out, size_t granularity);
   static void discard(outputStream *out);
   static void print_usedSpace(outputStream *out);
   static void print_freeSpace(outputStream *out);

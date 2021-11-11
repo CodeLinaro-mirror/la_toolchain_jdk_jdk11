@@ -46,6 +46,7 @@
 #include "oops/methodData.hpp"
 #include "oops/oop.inline.hpp"
 #include "prims/jvmtiImpl.hpp"
+#include "prims/jvmtiThreadState.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/flags/flagSetting.hpp"
 #include "runtime/frame.inline.hpp"
@@ -54,6 +55,7 @@
 #include "runtime/orderAccess.hpp"
 #include "runtime/os.hpp"
 #include "runtime/safepointVerifiers.hpp"
+#include "runtime/serviceThread.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/sweeper.hpp"
 #include "runtime/vmThread.hpp"
@@ -403,7 +405,8 @@ void nmethod::init_defaults() {
   _has_flushed_dependencies   = 0;
   _lock_count                 = 0;
   _stack_traversal_mark       = 0;
-  _unload_reported            = false; // jvmti state
+  _load_reported              = false; // jvmti state
+  _unload_reported            = false;
   _is_far_code                = false; // nmethods are located in CodeCache
 
 #ifdef ASSERT
@@ -411,7 +414,6 @@ void nmethod::init_defaults() {
 #endif
 
   _oops_do_mark_link       = NULL;
-  _jmethod_id              = NULL;
   _osr_link                = NULL;
   _unloading_next          = NULL;
   _scavenge_root_link      = NULL;
@@ -1065,7 +1067,6 @@ void nmethod::make_unloaded(oop cause) {
     if (_method->code() == this) {
       _method->clear_code(); // Break a cycle
     }
-    _method = NULL;            // Clear the method of this dead nmethod
   }
 
   // Make the class unloaded - i.e., change state and notify sweeper
@@ -1077,10 +1078,16 @@ void nmethod::make_unloaded(oop cause) {
     CodeCache::set_needs_cache_clean(true);
   }
 
+  // Clear ICStubs and release any CompiledICHolders.
+  clear_ic_callsites();
+
   // Unregister must be done before the state change
   Universe::heap()->unregister_nmethod(this);
 
   _state = unloaded;
+
+  // Clear the method of this dead nmethod
+  set_method(NULL);
 
   // Log the unloading.
   log_state_change();
@@ -1284,6 +1291,7 @@ bool nmethod::make_not_entrant_or_zombie(int state) {
 }
 
 void nmethod::flush() {
+  MutexLockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
   // Note that there are no valid oops in the nmethod anymore.
   assert(!is_osr_method() || is_unloaded() || is_zombie(),
          "osr nmethod must be unloaded or zombie before flushing");
@@ -1386,38 +1394,40 @@ bool nmethod::can_unload(BoolObjectClosure* is_alive, oop* root) {
 // post_compiled_method_load_event
 // new method for install_code() path
 // Transfer information from compilation to jvmti
-void nmethod::post_compiled_method_load_event() {
+void nmethod::post_compiled_method_load_event(JvmtiThreadState* state) {
 
-  Method* moop = method();
+  // Don't post this nmethod load event if it is already dying
+  // because the sweeper might already be deleting this nmethod.
+  if (is_not_entrant() && can_convert_to_zombie()) {
+    return;
+  }
+
+  // This is a bad time for a safepoint.  We don't want
+  // this nmethod to get unloaded while we're queueing the event.
+  NoSafepointVerifier nsv;
+
+  Method* m = method();
   HOTSPOT_COMPILED_METHOD_LOAD(
-      (char *) moop->klass_name()->bytes(),
-      moop->klass_name()->utf8_length(),
-      (char *) moop->name()->bytes(),
-      moop->name()->utf8_length(),
-      (char *) moop->signature()->bytes(),
-      moop->signature()->utf8_length(),
+      (char *) m->klass_name()->bytes(),
+      m->klass_name()->utf8_length(),
+      (char *) m->name()->bytes(),
+      m->name()->utf8_length(),
+      (char *) m->signature()->bytes(),
+      m->signature()->utf8_length(),
       insts_begin(), insts_size());
 
-  if (JvmtiExport::should_post_compiled_method_load() ||
-      JvmtiExport::should_post_compiled_method_unload()) {
-    get_and_cache_jmethod_id();
-  }
-
   if (JvmtiExport::should_post_compiled_method_load()) {
-    // Let the Service thread (which is a real Java thread) post the event
-    MutexLockerEx ml(Service_lock, Mutex::_no_safepoint_check_flag);
-    JvmtiDeferredEventQueue::enqueue(
-      JvmtiDeferredEvent::compiled_method_load_event(this));
+    // Only post unload events if load events are found.
+    set_load_reported();
+    // If a JavaThread hasn't been passed in, let the Service thread
+    // (which is a real Java thread) post the event
+    JvmtiDeferredEvent event = JvmtiDeferredEvent::compiled_method_load_event(this);
+    if (state == NULL) {
+      ServiceThread::enqueue_deferred_event(&event);
+    } else {
+      state->enqueue_event(&event);
+    }
   }
-}
-
-jmethodID nmethod::get_and_cache_jmethod_id() {
-  if (_jmethod_id == NULL) {
-    // Cache the jmethod_id since it can no longer be looked up once the
-    // method itself has been marked for unloading.
-    _jmethod_id = method()->jmethod_id();
-  }
-  return _jmethod_id;
 }
 
 void nmethod::post_compiled_method_unload() {
@@ -1433,18 +1443,17 @@ void nmethod::post_compiled_method_unload() {
   // If a JVMTI agent has enabled the CompiledMethodUnload event then
   // post the event. Sometime later this nmethod will be made a zombie
   // by the sweeper but the Method* will not be valid at that point.
-  // If the _jmethod_id is null then no load event was ever requested
-  // so don't bother posting the unload.  The main reason for this is
-  // that the jmethodID is a weak reference to the Method* so if
+  // The jmethodID is a weak reference to the Method* so if
   // it's being unloaded there's no way to look it up since the weak
   // ref will have been cleared.
-  if (_jmethod_id != NULL && JvmtiExport::should_post_compiled_method_unload()) {
+
+  // Don't bother posting the unload if the load event wasn't posted.
+  if (load_reported() && JvmtiExport::should_post_compiled_method_unload()) {
     assert(!unload_reported(), "already unloaded");
     JvmtiDeferredEvent event =
-      JvmtiDeferredEvent::compiled_method_unload_event(this,
-          _jmethod_id, insts_begin());
-    MutexLockerEx ml(Service_lock, Mutex::_no_safepoint_check_flag);
-    JvmtiDeferredEventQueue::enqueue(event);
+      JvmtiDeferredEvent::compiled_method_unload_event(
+        this, method()->jmethod_id(), insts_begin());
+    ServiceThread::enqueue_deferred_event(&event);
   }
 
   // The JVMTI CompiledMethodUnload event can be enabled or disabled at
@@ -2444,6 +2453,7 @@ const char* nmethod::reloc_string_for(u_char* begin, u_char* end) {
         case relocInfo::section_word_type:     return "section_word";
         case relocInfo::poll_type:             return "poll";
         case relocInfo::poll_return_type:      return "poll_return";
+        case relocInfo::trampoline_stub_type:  return "trampoline_stub";
         case relocInfo::type_mask:             return "type_bit_mask";
 
         default:

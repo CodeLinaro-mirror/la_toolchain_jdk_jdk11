@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@
 #include "memory/metaspaceChunkFreeListSummary.hpp"
 #include "memory/virtualspace.hpp"
 #include "utilities/exceptions.hpp"
+#include "utilities/macros.hpp"
 
 // Metaspace
 //
@@ -140,6 +141,8 @@ class Metaspace : public AllStatic {
 
   static const MetaspaceTracer* _tracer;
 
+  static bool _initialized;
+
  public:
   static metaspace::VirtualSpaceList* space_list()       { return _space_list; }
   static metaspace::VirtualSpaceList* class_space_list() { return _class_space_list; }
@@ -225,12 +228,17 @@ class Metaspace : public AllStatic {
     return mdType == ClassType && using_class_space();
   }
 
+  static bool initialized() { return _initialized; }
+
 };
 
 // Manages the metaspace portion belonging to a class loader
 class ClassLoaderMetaspace : public CHeapObj<mtClass> {
   friend class CollectedHeap; // For expand_and_allocate()
   friend class ZCollectedHeap; // For expand_and_allocate()
+#if INCLUDE_SHENANDOAHGC
+  friend class ShenandoahHeap; // For expand_and_allocate()
+#endif
   friend class Metaspace;
   friend class MetaspaceUtils;
   friend class metaspace::PrintCLDMetaspaceInfoClosure;

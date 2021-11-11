@@ -230,11 +230,9 @@ class CompileBroker: AllStatic {
   static volatile int _print_compilation_warning;
 
   static Handle create_thread_oop(const char* name, TRAPS);
-  static JavaThread* make_thread(jobject thread_oop, CompileQueue* queue,
-                                 AbstractCompiler* comp, bool compiler_thread, TRAPS);
+  static JavaThread* make_thread(jobject thread_oop, CompileQueue* queue, AbstractCompiler* comp, TRAPS);
   static void init_compiler_sweeper_threads();
   static void possibly_add_compiler_threads();
-  static bool compilation_is_complete  (const methodHandle& method, int osr_bci, int comp_level);
   static bool compilation_is_prohibited(const methodHandle& method, int osr_bci, int comp_level, bool excluded);
   static void preload_classes          (const methodHandle& method, TRAPS);
 
@@ -274,10 +272,6 @@ class CompileBroker: AllStatic {
   static void shutdown_compiler_runtime(AbstractCompiler* comp, CompilerThread* thread);
 
 public:
-
-  static DirectivesStack* dirstack();
-  static void set_dirstack(DirectivesStack* stack);
-
   enum {
     // The entry bci used for non-OSR compilations.
     standard_entry_bci = InvocationEntryBci
@@ -289,9 +283,9 @@ public:
     return NULL;
   }
 
+  static bool compilation_is_complete(const methodHandle& method, int osr_bci, int comp_level);
   static bool compilation_is_in_queue(const methodHandle& method);
   static void print_compile_queues(outputStream* st);
-  static void print_directives(outputStream* st);
   static int queue_size(int comp_level) {
     CompileQueue *q = compile_queue(comp_level);
     return q != NULL ? q->size() : 0;
@@ -402,6 +396,8 @@ public:
     return _compiler2_objects[idx];
   }
 
+  static bool can_remove(CompilerThread *ct, bool do_it);
+
   static CompileLog* get_log(CompilerThread* ct);
 
   static int get_total_compile_count() {            return _total_compile_count; }
@@ -424,7 +420,7 @@ public:
 
   // CodeHeap State Analytics.
   static void print_info(outputStream *out);
-  static void print_heapinfo(outputStream *out, const char* function, const char* granularity );
+  static void print_heapinfo(outputStream *out, const char* function, size_t granularity);
 };
 
 #endif // SHARE_VM_COMPILER_COMPILEBROKER_HPP

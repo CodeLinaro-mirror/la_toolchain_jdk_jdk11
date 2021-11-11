@@ -65,7 +65,7 @@
 #include "oops/oop.inline.hpp"
 #include "oops/symbol.hpp"
 #include "oops/typeArrayKlass.hpp"
-#include "prims/jvmtiEnvBase.hpp"
+#include "prims/jvmtiExport.hpp"
 #include "prims/resolvedMethodTable.hpp"
 #include "prims/methodHandles.hpp"
 #include "runtime/arguments.hpp"
@@ -179,7 +179,7 @@ bool SystemDictionary::is_system_class_loader(oop class_loader) {
     return false;
   }
   return (class_loader->klass() == SystemDictionary::jdk_internal_loader_ClassLoaders_AppClassLoader_klass() ||
-         oopDesc::equals(class_loader, _java_system_loader));
+         class_loader == _java_system_loader);
 }
 
 // Returns true if the passed class loader is the platform class loader.
@@ -384,7 +384,7 @@ Klass* SystemDictionary::resolve_super_or_fail(Symbol* child_name,
        ((quicksuperk = childk->super()) != NULL) &&
 
          ((quicksuperk->name() == class_name) &&
-            (oopDesc::equals(quicksuperk->class_loader(), class_loader())))) {
+            (quicksuperk->class_loader() == class_loader()))) {
            return quicksuperk;
     } else {
       PlaceholderEntry* probe = placeholders()->get_entry(p_index, p_hash, child_name, loader_data);
@@ -518,7 +518,7 @@ void SystemDictionary::double_lock_wait(Handle lockObject, TRAPS) {
   bool calledholdinglock
       = ObjectSynchronizer::current_thread_holds_lock((JavaThread*)THREAD, lockObject);
   assert(calledholdinglock,"must hold lock for notify");
-  assert((!oopDesc::equals(lockObject(), _system_loader_lock_obj) && !is_parallelCapable(lockObject)), "unexpected double_lock_wait");
+  assert((lockObject() != _system_loader_lock_obj && !is_parallelCapable(lockObject)), "unexpected double_lock_wait");
   ObjectSynchronizer::notifyall(lockObject, THREAD);
   intptr_t recursions =  ObjectSynchronizer::complete_exit(lockObject, THREAD);
   SystemDictionary_lock->wait();
@@ -824,7 +824,7 @@ Klass* SystemDictionary::resolve_instance_class_or_null(Symbol* name,
       // If everything was OK (no exceptions, no null return value), and
       // class_loader is NOT the defining loader, do a little more bookkeeping.
       if (!HAS_PENDING_EXCEPTION && k != NULL &&
-        !oopDesc::equals(k->class_loader(), class_loader())) {
+        k->class_loader() != class_loader()) {
 
         check_constraints(d_hash, k, class_loader, false, THREAD);
 
@@ -977,7 +977,7 @@ InstanceKlass* SystemDictionary::parse_stream(Symbol* class_name,
   if (host_klass != NULL) {
     // Create a new CLD for anonymous class, that uses the same class loader
     // as the host_klass
-    guarantee(oopDesc::equals(host_klass->class_loader(), class_loader()), "should be the same");
+    guarantee(host_klass->class_loader() == class_loader(), "should be the same");
     loader_data = ClassLoaderData::anonymous_class_loader_data(class_loader);
   } else {
     loader_data = ClassLoaderData::class_loader_data(class_loader());
@@ -1139,10 +1139,12 @@ InstanceKlass* SystemDictionary::resolve_from_stream(Symbol* class_name,
 #if INCLUDE_CDS
 void SystemDictionary::set_shared_dictionary(HashtableBucket<mtClass>* t, int length,
                                              int number_of_entries) {
+  assert(!DumpSharedSpaces, "Should not be called with DumpSharedSpaces");
   assert(length == _shared_dictionary_size * sizeof(HashtableBucket<mtClass>),
          "bad shared dictionary size.");
   _shared_dictionary = new Dictionary(ClassLoaderData::the_null_class_loader_data(),
-                                      _shared_dictionary_size, t, number_of_entries);
+                                      _shared_dictionary_size, t, number_of_entries,
+                                      false /* explicitly set _resizable to false */);
 }
 
 
@@ -1461,8 +1463,7 @@ InstanceKlass* SystemDictionary::load_instance_class(Symbol* class_name, Handle 
            !search_only_bootloader_append,
            "Attempt to load a class outside of boot loader's module path");
 
-    // Search the shared system dictionary for classes preloaded into the
-    // shared spaces.
+    // Search for classes in the CDS archive.
     InstanceKlass* k = NULL;
     {
 #if INCLUDE_CDS
@@ -1749,7 +1750,7 @@ void SystemDictionary::check_loader_lock_contention(Handle loader_lock, TRAPS) {
       == ObjectSynchronizer::owner_other) {
     // contention will likely happen, so increment the corresponding
     // contention counter.
-    if (oopDesc::equals(loader_lock(), _system_loader_lock_obj)) {
+    if (loader_lock() == _system_loader_lock_obj) {
       ClassLoader::sync_systemLoaderLockContentionRate()->inc();
     } else {
       ClassLoader::sync_nonSystemLoaderLockContentionRate()->inc();
@@ -1915,7 +1916,7 @@ void SystemDictionary::initialize(TRAPS) {
   // Allocate private object used as system class loader lock
   _system_loader_lock_obj = oopFactory::new_intArray(0, CHECK);
   // Initialize basic classes
-  initialize_preloaded_classes(CHECK);
+  resolve_well_known_classes(CHECK);
 }
 
 // Compact table of directions on the initialization of klasses:
@@ -1929,7 +1930,20 @@ static const short wk_init_info[] = {
   0
 };
 
-bool SystemDictionary::initialize_wk_klass(WKID id, int init_opt, TRAPS) {
+#ifdef ASSERT
+bool SystemDictionary::is_well_known_klass(Symbol* class_name) {
+  int sid;
+  for (int i = 0; (sid = wk_init_info[i]) != 0; i++) {
+    Symbol* symbol = vmSymbols::symbol_at((vmSymbols::SID)sid);
+    if (class_name == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+#endif
+
+bool SystemDictionary::resolve_wk_klass(WKID id, int init_opt, TRAPS) {
   assert(id >= (int)FIRST_WKID && id < (int)WKID_LIMIT, "oob");
   int  info = wk_init_info[id - FIRST_WKID];
   int  sid  = (info >> CEIL_LG_OPTION_LIMIT);
@@ -1959,7 +1973,7 @@ bool SystemDictionary::initialize_wk_klass(WKID id, int init_opt, TRAPS) {
   return ((*klassp) != NULL);
 }
 
-void SystemDictionary::initialize_wk_klasses_until(WKID limit_id, WKID &start_id, TRAPS) {
+void SystemDictionary::resolve_wk_klasses_until(WKID limit_id, WKID &start_id, TRAPS) {
   assert((int)start_id <= (int)limit_id, "IDs are out of order!");
   for (int id = (int)start_id; id < (int)limit_id; id++) {
     assert(id >= (int)FIRST_WKID && id < (int)WKID_LIMIT, "oob");
@@ -1967,15 +1981,15 @@ void SystemDictionary::initialize_wk_klasses_until(WKID limit_id, WKID &start_id
     int sid  = (info >> CEIL_LG_OPTION_LIMIT);
     int opt  = (info & right_n_bits(CEIL_LG_OPTION_LIMIT));
 
-    initialize_wk_klass((WKID)id, opt, CHECK);
+    resolve_wk_klass((WKID)id, opt, CHECK);
   }
 
   // move the starting value forward to the limit:
   start_id = limit_id;
 }
 
-void SystemDictionary::initialize_preloaded_classes(TRAPS) {
-  assert(WK_KLASS(Object_klass) == NULL, "preloaded classes should only be initialized once");
+void SystemDictionary::resolve_well_known_classes(TRAPS) {
+  assert(WK_KLASS(Object_klass) == NULL, "well-known classes should only be initialized once");
 
   // Create the ModuleEntry for java.base.  This call needs to be done here,
   // after vmSymbols::initialize() is called but before any classes are pre-loaded.
@@ -1986,14 +2000,14 @@ void SystemDictionary::initialize_preloaded_classes(TRAPS) {
   // first do Object, then String, Class
 #if INCLUDE_CDS
   if (UseSharedSpaces) {
-    initialize_wk_klasses_through(WK_KLASS_ENUM_NAME(Object_klass), scan, CHECK);
+    resolve_wk_klasses_through(WK_KLASS_ENUM_NAME(Object_klass), scan, CHECK);
     // Initialize the constant pool for the Object_class
     Object_klass()->constants()->restore_unshareable_info(CHECK);
-    initialize_wk_klasses_through(WK_KLASS_ENUM_NAME(Class_klass), scan, CHECK);
+    resolve_wk_klasses_through(WK_KLASS_ENUM_NAME(Class_klass), scan, CHECK);
   } else
 #endif
   {
-    initialize_wk_klasses_through(WK_KLASS_ENUM_NAME(Class_klass), scan, CHECK);
+    resolve_wk_klasses_through(WK_KLASS_ENUM_NAME(Class_klass), scan, CHECK);
   }
 
   // Calculate offsets for String and Class classes since they are loaded and
@@ -2010,13 +2024,13 @@ void SystemDictionary::initialize_preloaded_classes(TRAPS) {
   Universe::fixup_mirrors(CHECK);
 
   // do a bunch more:
-  initialize_wk_klasses_through(WK_KLASS_ENUM_NAME(Reference_klass), scan, CHECK);
+  resolve_wk_klasses_through(WK_KLASS_ENUM_NAME(Reference_klass), scan, CHECK);
 
   // Preload ref klasses and set reference types
   InstanceKlass::cast(WK_KLASS(Reference_klass))->set_reference_type(REF_OTHER);
   InstanceRefKlass::update_nonstatic_oop_maps(WK_KLASS(Reference_klass));
 
-  initialize_wk_klasses_through(WK_KLASS_ENUM_NAME(PhantomReference_klass), scan, CHECK);
+  resolve_wk_klasses_through(WK_KLASS_ENUM_NAME(PhantomReference_klass), scan, CHECK);
   InstanceKlass::cast(WK_KLASS(SoftReference_klass))->set_reference_type(REF_SOFT);
   InstanceKlass::cast(WK_KLASS(WeakReference_klass))->set_reference_type(REF_WEAK);
   InstanceKlass::cast(WK_KLASS(FinalReference_klass))->set_reference_type(REF_FINAL);
@@ -2025,9 +2039,10 @@ void SystemDictionary::initialize_preloaded_classes(TRAPS) {
   // JSR 292 classes
   WKID jsr292_group_start = WK_KLASS_ENUM_NAME(MethodHandle_klass);
   WKID jsr292_group_end   = WK_KLASS_ENUM_NAME(VolatileCallSite_klass);
-  initialize_wk_klasses_until(jsr292_group_start, scan, CHECK);
-  initialize_wk_klasses_through(jsr292_group_end, scan, CHECK);
-  initialize_wk_klasses_until(NOT_JVMCI(WKID_LIMIT) JVMCI_ONLY(FIRST_JVMCI_WKID), scan, CHECK);
+  resolve_wk_klasses_until(jsr292_group_start, scan, CHECK);
+  resolve_wk_klasses_through(jsr292_group_end, scan, CHECK);
+  WKID last = NOT_JVMCI(WKID_LIMIT) JVMCI_ONLY(FIRST_JVMCI_WKID);
+  resolve_wk_klasses_until(last, scan, CHECK);
 
   _box_klasses[T_BOOLEAN] = WK_KLASS(Boolean_klass);
   _box_klasses[T_CHAR]    = WK_KLASS(Character_klass);
@@ -2044,6 +2059,17 @@ void SystemDictionary::initialize_preloaded_classes(TRAPS) {
     Method* method = InstanceKlass::cast(ClassLoader_klass())->find_method(vmSymbols::checkPackageAccess_name(), vmSymbols::class_protectiondomain_signature());
     _has_checkPackageAccess = (method != NULL);
   }
+
+#ifdef ASSERT
+  if (UseSharedSpaces) {
+    assert(JvmtiExport::is_early_phase(),
+           "All well known classes must be resolved in JVMTI early phase");
+    for (int i = FIRST_WKID; i < last; i++) {
+      InstanceKlass* k = _well_known_klasses[i];
+      assert(k->is_shared(), "must not be replaced by JVMTI class file load hook");
+    }
+  }
+#endif
 }
 
 // Tells if a given klass is a box (wrapper class, such as java.lang.Integer).
@@ -2111,7 +2137,7 @@ void SystemDictionary::check_constraints(unsigned int d_hash,
         ss.print(" wants to load %s %s.",
                  k->external_kind(), k->external_name());
         Klass *existing_klass = constraints()->find_constrained_klass(name, class_loader);
-        if (existing_klass->class_loader() != class_loader()) {
+        if (existing_klass != NULL && existing_klass->class_loader() != class_loader()) {
           ss.print(" A different %s with the same name was previously loaded by %s. (%s)",
                    existing_klass->external_kind(),
                    existing_klass->class_loader_data()->loader_name_and_id(),
@@ -2160,7 +2186,7 @@ void SystemDictionary::update_dictionary(unsigned int d_hash,
       // cleared if revocation occurs too often for this type
       // NOTE that we must only do this when the class is initally
       // defined, not each time it is referenced from a new class loader
-      if (oopDesc::equals(k->class_loader(), class_loader())) {
+      if (k->class_loader() == class_loader()) {
         k->set_prototype_header(markOopDesc::biased_locking_prototype());
       }
     }
@@ -2353,7 +2379,7 @@ Symbol* SystemDictionary::check_signature_loaders(Symbol* signature,
                                                Handle loader1, Handle loader2,
                                                bool is_method, TRAPS)  {
   // Nothing to do if loaders are the same.
-  if (oopDesc::equals(loader1(), loader2())) {
+  if (loader1() == loader2()) {
     return NULL;
   }
 

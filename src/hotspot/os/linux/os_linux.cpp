@@ -33,6 +33,7 @@
 #include "compiler/disassembler.hpp"
 #include "interpreter/interpreter.hpp"
 #include "logging/log.hpp"
+#include "logging/logStream.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/filemap.hpp"
 #include "oops/oop.inline.hpp"
@@ -61,6 +62,7 @@
 #include "runtime/threadCritical.hpp"
 #include "runtime/threadSMR.hpp"
 #include "runtime/timer.hpp"
+#include "runtime/vm_version.hpp"
 #include "semaphore_posix.hpp"
 #include "services/attachListener.hpp"
 #include "services/memTracker.hpp"
@@ -106,6 +108,9 @@
 # include <stdint.h>
 # include <inttypes.h>
 # include <sys/ioctl.h>
+#ifdef __GLIBC__
+# include <malloc.h>
+#endif
 
 #ifndef _GNU_SOURCE
   #define _GNU_SOURCE
@@ -409,7 +414,14 @@ void os::init_system_properties_values() {
 #if defined(AMD64) || (defined(_LP64) && defined(SPARC)) || defined(PPC64) || defined(S390)
   #define DEFAULT_LIBPATH "/usr/lib64:/lib64:/lib:/usr/lib"
 #else
+#if defined(AARCH64)
+  // Use 32-bit locations first for AARCH64 (a 64-bit architecture), since some systems
+  // might not adhere to the FHS and it would be a change in behaviour if we used
+  // DEFAULT_LIBPATH of other 64-bit architectures which prefer the 64-bit paths.
+  #define DEFAULT_LIBPATH "/lib:/usr/lib:/usr/lib64:/lib64"
+#else
   #define DEFAULT_LIBPATH "/lib:/usr/lib"
+#endif // AARCH64
 #endif
 
 // Base path of extensions installed on the system.
@@ -848,6 +860,13 @@ bool os::create_thread(Thread* thread, ThreadType thr_type,
     } else {
       log_warning(os, thread)("Failed to start thread - pthread_create failed (%s) for attributes: %s.",
         os::errno_name(ret), os::Posix::describe_pthread_attr(buf, sizeof(buf), &attr));
+      // Log some OS information which might explain why creating the thread failed.
+      log_info(os, thread)("Number of threads approx. running in the VM: %d", Threads::number_of_threads());
+      LogStream st(Log(os, thread)::info());
+      os::Posix::print_rlimit_info(&st);
+      os::print_memory_info(&st);
+      os::Linux::print_proc_sys_info(&st);
+      os::Linux::print_container_info(&st);
     }
 
     pthread_attr_destroy(&attr);
@@ -1497,8 +1516,15 @@ void os::abort(bool dump_core, void* siginfo, const void* context) {
 }
 
 // Die immediately, no exit hook, no abort hook, no cleanup.
+// Dump a core file, if possible, for debugging.
 void os::die() {
-  ::abort();
+  if (TestUnresponsiveErrorHandler && !CreateCoredumpOnCrash) {
+    // For TimeoutInErrorHandlingTest.java, we just kill the VM
+    // and don't take the time to generate a core file.
+    os::signal_raise(SIGKILL);
+  } else {
+    ::abort();
+  }
 }
 
 
@@ -1706,6 +1732,8 @@ class VM_LinuxDllLoad: public VM_Operation {
 void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
   void * result = NULL;
   bool load_attempted = false;
+
+  log_info(os)("attempting shared library load of %s", filename);
 
   // Check whether the library to load might change execution rights
   // of the stack. If they are changed, the protection of the stack
@@ -1927,8 +1955,19 @@ void * os::Linux::dlopen_helper(const char *filename, char *ebuf,
                                 int ebuflen) {
   void * result = ::dlopen(filename, RTLD_LAZY);
   if (result == NULL) {
-    ::strncpy(ebuf, ::dlerror(), ebuflen - 1);
-    ebuf[ebuflen-1] = '\0';
+    const char* error_report = ::dlerror();
+    if (error_report == NULL) {
+      error_report = "dlerror returned no error description";
+    }
+    if (ebuf != NULL && ebuflen > 0) {
+      ::strncpy(ebuf, error_report, ebuflen-1);
+      ebuf[ebuflen-1]='\0';
+    }
+    Events::log(NULL, "Loading shared library %s failed, %s", filename, error_report);
+    log_info(os)("shared library load of %s failed, %s", filename, error_report);
+  } else {
+    Events::log(NULL, "Loaded shared library %s", filename);
+    log_info(os)("shared library load of %s was successful", filename);
   }
   return result;
 }
@@ -1993,34 +2032,12 @@ static bool _print_ascii_file(const char* filename, outputStream* st, const char
   return true;
 }
 
-#if defined(S390) || defined(PPC64)
-// keywords_to_match - NULL terminated array of keywords
-static bool print_matching_lines_from_file(const char* filename, outputStream* st, const char* keywords_to_match[]) {
-  char* line = NULL;
-  size_t length = 0;
-  FILE* fp = fopen(filename, "r");
-  if (fp == NULL) {
-    return false;
+static void _print_ascii_file_h(const char* header, const char* filename, outputStream* st) {
+  st->print_cr("%s:", header);
+  if (!_print_ascii_file(filename, st)) {
+    st->print_cr("<Not Available>");
   }
-
-  st->print_cr("Virtualization information:");
-  while (getline(&line, &length, fp) != -1) {
-    int i = 0;
-    while (keywords_to_match[i] != NULL) {
-      if (strncmp(line, keywords_to_match[i], strlen(keywords_to_match[i])) == 0) {
-        st->print("%s", line);
-        break;
-      }
-      i++;
-    }
-  }
-
-  free(line);
-  fclose(fp);
-
-  return true;
 }
-#endif
 
 void os::print_dll_info(outputStream *st) {
   st->print_cr("Dynamic libraries:");
@@ -2045,17 +2062,18 @@ int os::get_loaded_modules_info(os::LoadedModulesCallbackFunc callback, void *pa
 
     // Read line by line from 'file'
     while (fgets(line, sizeof(line), procmapsFile) != NULL) {
-      u8 base, top, offset, inode;
-      char permissions[5];
-      char device[6];
-      char name[PATH_MAX + 1];
+      u8 base, top, inode;
+      char name[sizeof(line)];
 
-      // Parse fields from line
-      sscanf(line, UINT64_FORMAT_X "-" UINT64_FORMAT_X " %4s " UINT64_FORMAT_X " %7s " INT64_FORMAT " %s",
-             &base, &top, permissions, &offset, device, &inode, name);
+      // Parse fields from line, discard perms, offset and device
+      int matches = sscanf(line, UINT64_FORMAT_X "-" UINT64_FORMAT_X " %*s %*s %*s " INT64_FORMAT " %s",
+             &base, &top, &inode, name);
+      // the last entry 'name' is empty for some entries, so we might have 3 matches instead of 4 for some lines
+      if (matches < 3) continue;
+      if (matches == 3) name[0] = '\0';
 
-      // Filter by device id '00:00' so that we only get file system mapped files.
-      if (strcmp(device, "00:00") != 0) {
+      // Filter by inode 0 so that we only get file system mapped files.
+      if (inode != 0) {
 
         // Call callback with the fields of interest
         if(callback(name, (address)base, (address)top, param)) {
@@ -2086,6 +2104,8 @@ void os::print_os_info(outputStream* st) {
 
   os::Posix::print_uname_info(st);
 
+  os::Linux::print_uptime_info(st);
+
   // Print warning if unsafe chroot environment detected
   if (unsafe_chroot_detected) {
     st->print("WARNING!! ");
@@ -2098,7 +2118,10 @@ void os::print_os_info(outputStream* st) {
 
   os::Posix::print_load_average(st);
 
-  os::Linux::print_full_memory_info(st);
+  os::Linux::print_system_memory_info(st);
+  st->cr();
+
+  os::Linux::print_process_memory_info(st);
 
   os::Linux::print_proc_sys_info(st);
 
@@ -2106,7 +2129,7 @@ void os::print_os_info(outputStream* st) {
 
   os::Linux::print_container_info(st);
 
-  os::Linux::print_virtualization_info(st);
+  VM_Version::print_platform_virtualization_info(st);
 
   os::Linux::print_steal_info(st);
 }
@@ -2244,32 +2267,102 @@ void os::Linux::print_libversion_info(outputStream* st) {
 
 void os::Linux::print_proc_sys_info(outputStream* st) {
   st->cr();
-  st->print_cr("/proc/sys/kernel/threads-max (system-wide limit on the number of threads):");
-  _print_ascii_file("/proc/sys/kernel/threads-max", st);
-  st->cr();
-  st->cr();
-
-  st->print_cr("/proc/sys/vm/max_map_count (maximum number of memory map areas a process may have):");
-  _print_ascii_file("/proc/sys/vm/max_map_count", st);
-  st->cr();
-  st->cr();
-
-  st->print_cr("/proc/sys/kernel/pid_max (system-wide limit on number of process identifiers):");
-  _print_ascii_file("/proc/sys/kernel/pid_max", st);
-  st->cr();
-  st->cr();
+  _print_ascii_file_h("/proc/sys/kernel/threads-max (system-wide limit on the number of threads)",
+                      "/proc/sys/kernel/threads-max", st);
+  _print_ascii_file_h("/proc/sys/vm/max_map_count (maximum number of memory map areas a process may have)",
+                      "/proc/sys/vm/max_map_count", st);
+  _print_ascii_file_h("/proc/sys/kernel/pid_max (system-wide limit on number of process identifiers)",
+                      "/proc/sys/kernel/pid_max", st);
 }
 
-void os::Linux::print_full_memory_info(outputStream* st) {
-  st->print("\n/proc/meminfo:\n");
-  _print_ascii_file("/proc/meminfo", st);
+void os::Linux::print_system_memory_info(outputStream* st) {
+  _print_ascii_file_h("\n/proc/meminfo", "/proc/meminfo", st);
   st->cr();
+
+  // some information regarding THPs; for details see
+  // https://www.kernel.org/doc/Documentation/vm/transhuge.txt
+  _print_ascii_file_h("/sys/kernel/mm/transparent_hugepage/enabled",
+                      "/sys/kernel/mm/transparent_hugepage/enabled", st);
+  _print_ascii_file_h("/sys/kernel/mm/transparent_hugepage/defrag (defrag/compaction efforts parameter)",
+                      "/sys/kernel/mm/transparent_hugepage/defrag", st);
+}
+
+void os::Linux::print_process_memory_info(outputStream* st) {
+
+  st->print_cr("Process Memory:");
+
+  // Print virtual and resident set size; peak values; swap; and for
+  //  rss its components if the kernel is recent enough.
+  ssize_t vmsize = -1, vmpeak = -1, vmswap = -1,
+      vmrss = -1, vmhwm = -1, rssanon = -1, rssfile = -1, rssshmem = -1;
+  const int num_values = 8;
+  int num_found = 0;
+  FILE* f = ::fopen("/proc/self/status", "r");
+  char buf[256];
+  if (f != NULL) {
+    while (::fgets(buf, sizeof(buf), f) != NULL && num_found < num_values) {
+      if ( (vmsize == -1    && sscanf(buf, "VmSize: " SSIZE_FORMAT " kB", &vmsize) == 1) ||
+           (vmpeak == -1    && sscanf(buf, "VmPeak: " SSIZE_FORMAT " kB", &vmpeak) == 1) ||
+           (vmswap == -1    && sscanf(buf, "VmSwap: " SSIZE_FORMAT " kB", &vmswap) == 1) ||
+           (vmhwm == -1     && sscanf(buf, "VmHWM: " SSIZE_FORMAT " kB", &vmhwm) == 1) ||
+           (vmrss == -1     && sscanf(buf, "VmRSS: " SSIZE_FORMAT " kB", &vmrss) == 1) ||
+           (rssanon == -1   && sscanf(buf, "RssAnon: " SSIZE_FORMAT " kB", &rssanon) == 1) ||
+           (rssfile == -1   && sscanf(buf, "RssFile: " SSIZE_FORMAT " kB", &rssfile) == 1) ||
+           (rssshmem == -1  && sscanf(buf, "RssShmem: " SSIZE_FORMAT " kB", &rssshmem) == 1)
+           )
+      {
+        num_found ++;
+      }
+    }
+    fclose(f);
+
+    st->print_cr("Virtual Size: " SSIZE_FORMAT "K (peak: " SSIZE_FORMAT "K)", vmsize, vmpeak);
+    st->print("Resident Set Size: " SSIZE_FORMAT "K (peak: " SSIZE_FORMAT "K)", vmrss, vmhwm);
+    if (rssanon != -1) { // requires kernel >= 4.5
+      st->print(" (anon: " SSIZE_FORMAT "K, file: " SSIZE_FORMAT "K, shmem: " SSIZE_FORMAT "K)",
+                  rssanon, rssfile, rssshmem);
+    }
+    st->cr();
+    if (vmswap != -1) { // requires kernel >= 2.6.34
+      st->print_cr("Swapped out: " SSIZE_FORMAT "K", vmswap);
+    }
+  } else {
+    st->print_cr("Could not open /proc/self/status to get process memory related information");
+  }
+
+  // Print glibc outstanding allocations.
+  // (note: there is no implementation of mallinfo for muslc)
+#ifdef __GLIBC__
+  struct mallinfo mi = ::mallinfo();
+
+  // mallinfo is an old API. Member names mean next to nothing and, beyond that, are int.
+  // So values may have wrapped around. Still useful enough to see how much glibc thinks
+  // we allocated.
+  const size_t total_allocated = (size_t)(unsigned)mi.uordblks;
+  st->print("C-Heap outstanding allocations: " SIZE_FORMAT "K", total_allocated / K);
+  // Since mallinfo members are int, glibc values may have wrapped. Warn about this.
+  if ((vmrss * K) > UINT_MAX && (vmrss * K) > (total_allocated + UINT_MAX)) {
+    st->print(" (may have wrapped)");
+  }
+  st->cr();
+
+#endif // __GLIBC__
+
 }
 
 void os::Linux::print_ld_preload_file(outputStream* st) {
   _print_ascii_file("/etc/ld.so.preload", st, "\n/etc/ld.so.preload:");
   st->cr();
 }
+
+void os::Linux::print_uptime_info(outputStream* st) {
+  struct sysinfo sinfo;
+  int ret = sysinfo(&sinfo);
+  if (ret == 0) {
+    os::print_dhm(st, "OS uptime:", (long) sinfo.uptime);
+  }
+}
+
 
 void os::Linux::print_container_info(outputStream* st) {
   if (!OSContainer::is_containerized()) {
@@ -2320,40 +2413,6 @@ void os::Linux::print_container_info(outputStream* st) {
   j = OSContainer::OSContainer::memory_max_usage_in_bytes();
   st->print("memory_max_usage_in_bytes: " JLONG_FORMAT "\n", j);
   st->cr();
-}
-
-void os::Linux::print_virtualization_info(outputStream* st) {
-#if defined(S390)
-  // /proc/sysinfo contains interesting information about
-  // - LPAR
-  // - whole "Box" (CPUs )
-  // - z/VM / KVM (VM<nn>); this is not available in an LPAR-only setup
-  const char* kw[] = { "LPAR", "CPUs", "VM", NULL };
-  const char* info_file = "/proc/sysinfo";
-
-  if (!print_matching_lines_from_file(info_file, st, kw)) {
-    st->print_cr("  <%s Not Available>", info_file);
-  }
-#elif defined(PPC64)
-  const char* info_file = "/proc/ppc64/lparcfg";
-  const char* kw[] = { "system_type=", // qemu indicates PowerKVM
-                       "partition_entitled_capacity=", // entitled processor capacity percentage
-                       "partition_max_entitled_capacity=",
-                       "capacity_weight=", // partition CPU weight
-                       "partition_active_processors=",
-                       "partition_potential_processors=",
-                       "entitled_proc_capacity_available=",
-                       "capped=", // 0 - uncapped, 1 - vcpus capped at entitled processor capacity percentage
-                       "shared_processor_mode=", // (non)dedicated partition
-                       "system_potential_processors=",
-                       "pool=", // CPU-pool number
-                       "pool_capacity=",
-                       "NumLpars=", // on non-KVM machines, NumLpars is not found for full partition mode machines
-                       NULL };
-  if (!print_matching_lines_from_file(info_file, st, kw)) {
-    st->print_cr("  <%s Not Available>", info_file);
-  }
-#endif
 }
 
 void os::Linux::print_steal_info(outputStream* st) {
@@ -2432,14 +2491,60 @@ static bool print_model_name_and_flags(outputStream* st, char* buf, size_t bufle
   return false;
 }
 
+// additional information about CPU e.g. available frequency ranges
+static void print_sys_devices_cpu_info(outputStream* st, char* buf, size_t buflen) {
+  _print_ascii_file_h("Online cpus", "/sys/devices/system/cpu/online", st);
+  _print_ascii_file_h("Offline cpus", "/sys/devices/system/cpu/offline", st);
+
+  if (ExtensiveErrorReports) {
+    // cache related info (cpu 0, should be similar for other CPUs)
+    for (unsigned int i=0; i < 10; i++) { // handle max. 10 cache entries
+      char hbuf_level[60];
+      char hbuf_type[60];
+      char hbuf_size[60];
+      char hbuf_coherency_line_size[80];
+      snprintf(hbuf_level, 60, "/sys/devices/system/cpu/cpu0/cache/index%u/level", i);
+      snprintf(hbuf_type, 60, "/sys/devices/system/cpu/cpu0/cache/index%u/type", i);
+      snprintf(hbuf_size, 60, "/sys/devices/system/cpu/cpu0/cache/index%u/size", i);
+      snprintf(hbuf_coherency_line_size, 80, "/sys/devices/system/cpu/cpu0/cache/index%u/coherency_line_size", i);
+      if (file_exists(hbuf_level)) {
+        _print_ascii_file_h("cache level", hbuf_level, st);
+        _print_ascii_file_h("cache type", hbuf_type, st);
+        _print_ascii_file_h("cache size", hbuf_size, st);
+        _print_ascii_file_h("cache coherency line size", hbuf_coherency_line_size, st);
+      }
+    }
+  }
+
+  // we miss the cpufreq entries on Power and s390x
+#if defined(IA32) || defined(AMD64)
+  _print_ascii_file_h("BIOS frequency limitation", "/sys/devices/system/cpu/cpu0/cpufreq/bios_limit", st);
+  _print_ascii_file_h("Frequency switch latency (ns)", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_transition_latency", st);
+  _print_ascii_file_h("Available cpu frequencies", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies", st);
+  // min and max should be in the Available range but still print them (not all info might be available for all kernels)
+  if (ExtensiveErrorReports) {
+    _print_ascii_file_h("Maximum cpu frequency", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", st);
+    _print_ascii_file_h("Minimum cpu frequency", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq", st);
+    _print_ascii_file_h("Current cpu frequency", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", st);
+  }
+  // governors are power schemes, see https://wiki.archlinux.org/index.php/CPU_frequency_scaling
+  if (ExtensiveErrorReports) {
+    _print_ascii_file_h("Available governors", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors", st);
+  }
+  _print_ascii_file_h("Current governor", "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", st);
+  // Core performance boost, see https://www.kernel.org/doc/Documentation/cpu-freq/boost.txt
+  // Raise operating frequency of some cores in a multi-core package if certain conditions apply, e.g.
+  // whole chip is not fully utilized
+  _print_ascii_file_h("Core performance/turbo boost", "/sys/devices/system/cpu/cpufreq/boost", st);
+#endif
+}
+
 void os::pd_print_cpu_info(outputStream* st, char* buf, size_t buflen) {
   // Only print the model name if the platform provides this as a summary
   if (!print_model_name_and_flags(st, buf, buflen)) {
-    st->print("\n/proc/cpuinfo:\n");
-    if (!_print_ascii_file("/proc/cpuinfo", st)) {
-      st->print_cr("  <Not Available>");
-    }
+    _print_ascii_file_h("\n/proc/cpuinfo", "/proc/cpuinfo", st);
   }
+  print_sys_devices_cpu_info(st, buf, buflen);
 }
 
 #if defined(AMD64) || defined(IA32) || defined(X32)
@@ -2550,6 +2655,7 @@ void os::jvm_path(char *buf, jint buflen) {
   }
 
   char dli_fname[MAXPATHLEN];
+  dli_fname[0] = '\0';
   bool ret = dll_address_to_library_name(
                                          CAST_FROM_FN_PTR(address, os::jvm_path),
                                          dli_fname, sizeof(dli_fname), NULL);
@@ -3537,6 +3643,7 @@ static bool linux_mprotect(char* addr, size_t size, int prot) {
   assert(addr == bottom, "sanity check");
 
   size = align_up(pointer_delta(addr, bottom, 1) + size, os::Linux::page_size());
+  Events::log(NULL, "Protecting memory [" INTPTR_FORMAT "," INTPTR_FORMAT "] with protection modes %x", p2i(bottom), p2i(bottom+size), prot);
   return ::mprotect(bottom, size, prot) == 0;
 }
 
@@ -4256,33 +4363,6 @@ size_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {
   return ::pread(fd, buf, nBytes, offset);
 }
 
-// Short sleep, direct OS call.
-//
-// Note: certain versions of Linux CFS scheduler (since 2.6.23) do not guarantee
-// sched_yield(2) will actually give up the CPU:
-//
-//   * Alone on this pariticular CPU, keeps running.
-//   * Before the introduction of "skip_buddy" with "compat_yield" disabled
-//     (pre 2.6.39).
-//
-// So calling this with 0 is an alternative.
-//
-void os::naked_short_sleep(jlong ms) {
-  struct timespec req;
-
-  assert(ms < 1000, "Un-interruptable sleep, short time use only");
-  req.tv_sec = 0;
-  if (ms > 0) {
-    req.tv_nsec = (ms % 1000) * 1000000;
-  } else {
-    req.tv_nsec = 1;
-  }
-
-  nanosleep(&req, NULL);
-
-  return;
-}
-
 // Sleep forever; naked call to OS-specific sleep; use with CAUTION
 void os::infinite_sleep() {
   while (true) {    // sleep forever ...
@@ -4295,6 +4375,16 @@ bool os::dont_yield() {
   return DontYieldALot;
 }
 
+// Linux CFS scheduler (since 2.6.23) does not guarantee sched_yield(2) will
+// actually give up the CPU. Since skip buddy (v2.6.28):
+//
+// * Sets the yielding task as skip buddy for current CPU's run queue.
+// * Picks next from run queue, if empty, picks a skip buddy (can be the yielding task).
+// * Clears skip buddies for this run queue (yielding task no longer a skip buddy).
+//
+// An alternative is calling os::naked_short_nanosleep with a small number to avoid
+// getting re-scheduled immediately.
+//
 void os::naked_yield() {
   sched_yield();
 }
@@ -4340,7 +4430,7 @@ int os::java_to_os_priority[CriticalPriority + 1] = {
 static int prio_init() {
   if (ThreadPriorityPolicy == 1) {
     if (geteuid() != 0) {
-      if (!FLAG_IS_DEFAULT(ThreadPriorityPolicy)) {
+      if (!FLAG_IS_DEFAULT(ThreadPriorityPolicy) && !FLAG_IS_JIMAGE_RESOURCE(ThreadPriorityPolicy)) {
         warning("-XX:ThreadPriorityPolicy=1 may require system level permission, " \
                 "e.g., being the root user. If the necessary permission is not " \
                 "possessed, changes to priority will be silently ignored.");
@@ -4661,11 +4751,6 @@ static void signalHandler(int sig, siginfo_t* info, void* uc) {
 bool os::Linux::signal_handlers_are_installed = false;
 
 // For signal-chaining
-struct sigaction sigact[NSIG];
-uint64_t sigs = 0;
-#if (64 < NSIG-1)
-#error "Not all signals can be encoded in sigs. Adapt its type!"
-#endif
 bool os::Linux::libjsig_is_loaded = false;
 typedef struct sigaction *(*get_signal_t)(int);
 get_signal_t os::Linux::get_signal_action = NULL;
@@ -4679,7 +4764,7 @@ struct sigaction* os::Linux::get_chained_signal_action(int sig) {
   }
   if (actp == NULL) {
     // Retrieve the preinstalled signal handler from jvm
-    actp = get_preinstalled_handler(sig);
+    actp = os::Posix::get_preinstalled_handler(sig);
   }
 
   return actp;
@@ -4743,19 +4828,6 @@ bool os::Linux::chained_handler(int sig, siginfo_t* siginfo, void* context) {
   return chained;
 }
 
-struct sigaction* os::Linux::get_preinstalled_handler(int sig) {
-  if ((((uint64_t)1 << (sig-1)) & sigs) != 0) {
-    return &sigact[sig];
-  }
-  return NULL;
-}
-
-void os::Linux::save_preinstalled_handler(int sig, struct sigaction& oldAct) {
-  assert(sig > 0 && sig < NSIG, "vm signal out of expected range");
-  sigact[sig] = oldAct;
-  sigs |= (uint64_t)1 << (sig-1);
-}
-
 // for diagnostic
 int sigflags[NSIG];
 
@@ -4787,7 +4859,7 @@ void os::Linux::set_signal_handler(int sig, bool set_installed) {
       return;
     } else if (UseSignalChaining) {
       // save the old handler in jvm
-      save_preinstalled_handler(sig, oldAct);
+      os::Posix::save_preinstalled_handler(sig, oldAct);
       // libjsig also interposes the sigaction() call below and saves the
       // old sigaction on it own.
     } else {
@@ -5215,7 +5287,7 @@ jint os::init_2(void) {
     return JNI_ERR;
   }
 
-#if defined(IA32)
+#if defined(IA32) && !defined(ZERO)
   // Need to ensure we've determined the process's initial stack to
   // perform the workaround
   Linux::capture_initial_stack(JavaThread::stack_size_at_create());
@@ -5678,9 +5750,7 @@ int os::open(const char *path, int oflag, int mode) {
 // create binary file, rewriting existing file if required
 int os::create_binary_file(const char* path, bool rewrite_existing) {
   int oflags = O_WRONLY | O_CREAT;
-  if (!rewrite_existing) {
-    oflags |= O_EXCL;
-  }
+  oflags |= rewrite_existing ? O_TRUNC : O_EXCL;
   return ::open64(path, oflags, S_IREAD | S_IWRITE);
 }
 
@@ -6004,11 +6074,21 @@ int os::get_core_path(char* buffer, size_t bufferSize) {
     core_pattern[ret] = '\0';
   }
 
+  // Replace the %p in the core pattern with the process id. NOTE: we do this
+  // only if the pattern doesn't start with "|", and we support only one %p in
+  // the pattern.
   char *pid_pos = strstr(core_pattern, "%p");
+  const char* tail = (pid_pos != NULL) ? (pid_pos + 2) : "";  // skip over the "%p"
   int written;
 
   if (core_pattern[0] == '/') {
-    written = jio_snprintf(buffer, bufferSize, "%s", core_pattern);
+    if (pid_pos != NULL) {
+      *pid_pos = '\0';
+      written = jio_snprintf(buffer, bufferSize, "%s%d%s", core_pattern,
+                             current_process_id(), tail);
+    } else {
+      written = jio_snprintf(buffer, bufferSize, "%s", core_pattern);
+    }
   } else {
     char cwd[PATH_MAX];
 
@@ -6021,6 +6101,10 @@ int os::get_core_path(char* buffer, size_t bufferSize) {
       written = jio_snprintf(buffer, bufferSize,
                              "\"%s\" (or dumping to %s/core.%d)",
                              &core_pattern[1], p, current_process_id());
+    } else if (pid_pos != NULL) {
+      *pid_pos = '\0';
+      written = jio_snprintf(buffer, bufferSize, "%s/%s%d%s", p, core_pattern,
+                             current_process_id(), tail);
     } else {
       written = jio_snprintf(buffer, bufferSize, "%s/%s", p, core_pattern);
     }

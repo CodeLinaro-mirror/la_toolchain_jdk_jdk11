@@ -238,6 +238,7 @@ JNIEXPORT jobject JNICALL Java_java_net_NetworkInterface_getByName0
 
     ifs = enumInterfaces(env);
     if (ifs == NULL) {
+        (*env)->ReleaseStringUTFChars(env, name, name_utf);
         return NULL;
     }
 
@@ -460,6 +461,7 @@ JNIEXPORT jobjectArray JNICALL Java_java_net_NetworkInterface_getAll
 
         // put the NetworkInterface into the array
         (*env)->SetObjectArrayElement(env, netIFArr, arr_index++, netifObj);
+        (*env)->DeleteLocalRef(env, netifObj);
 
         curr = curr->next;
     }
@@ -723,12 +725,14 @@ static jobject createNetworkInterface(JNIEnv *env, netif *ifs) {
                             ((struct sockaddr_in*)addrP->brdcast)->sin_addr.s_addr));
                         JNU_CHECK_EXCEPTION_RETURN(env, NULL);
                         (*env)->SetObjectField(env, ibObj, ni_ib4broadcastID, ia2Obj);
+                        (*env)->DeleteLocalRef(env, ia2Obj);
                     } else {
                         return NULL;
                     }
                 }
                 (*env)->SetShortField(env, ibObj, ni_ib4maskID, addrP->mask);
                 (*env)->SetObjectArrayElement(env, bindArr, bind_index++, ibObj);
+                (*env)->DeleteLocalRef(env, ibObj);
             } else {
                 return NULL;
             }
@@ -757,12 +761,14 @@ static jobject createNetworkInterface(JNIEnv *env, netif *ifs) {
                 (*env)->SetObjectField(env, ibObj, ni_ibaddressID, iaObj);
                 (*env)->SetShortField(env, ibObj, ni_ib4maskID, addrP->mask);
                 (*env)->SetObjectArrayElement(env, bindArr, bind_index++, ibObj);
+                (*env)->DeleteLocalRef(env, ibObj);
             } else {
                 return NULL;
             }
         }
 
         (*env)->SetObjectArrayElement(env, addrArr, addr_index++, iaObj);
+        (*env)->DeleteLocalRef(env, iaObj);
         addrP = addrP->next;
     }
 
@@ -794,6 +800,11 @@ static jobject createNetworkInterface(JNIEnv *env, netif *ifs) {
     (*env)->SetObjectField(env, netifObj, ni_addrsID, addrArr);
     (*env)->SetObjectField(env, netifObj, ni_bindsID, bindArr);
     (*env)->SetObjectField(env, netifObj, ni_childsID, childArr);
+
+    (*env)->DeleteLocalRef(env, name);
+    (*env)->DeleteLocalRef(env, addrArr);
+    (*env)->DeleteLocalRef(env, bindArr);
+    (*env)->DeleteLocalRef(env, childArr);
 
     // return the NetworkInterface
     return netifObj;
@@ -1328,6 +1339,10 @@ static int getFlags(int sock, const char *ifname, int *flags) {
 /** AIX **/
 #if defined(_AIX)
 
+/* seems getkerninfo is guarded by _KERNEL in the system headers */
+/* see net/proto_uipc.h */
+int getkerninfo(int, char *, int *, int32long64_t);
+
 /*
  * Opens a socket for further ioctl calls. Tries AF_INET socket first and
  * if it fails return AF_INET6 socket.
@@ -1547,7 +1562,7 @@ static int getMacAddress
         return -1;
     }
 
-    if (getkerninfo(KINFO_NDD, nddp, &size, 0) < 0) {
+    if (getkerninfo(KINFO_NDD, (char*) nddp, &size, 0) < 0) {
         perror("getkerninfo 2");
         free(nddp);
         return -1;

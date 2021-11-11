@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -273,7 +273,7 @@ public class ZoneInfo extends TimeZone {
         }
 
         // beyond the transitions, delegate to SimpleTimeZone if there
-        // is a rule; otherwise, return rawOffset.
+        // is a rule; otherwise, return the offset of the last transition.
         SimpleTimeZone tz = getLastRule();
         if (tz != null) {
             int rawoffset = tz.getRawOffset();
@@ -284,7 +284,7 @@ public class ZoneInfo extends TimeZone {
             int dstoffset = tz.getOffset(msec) - rawOffset;
 
             // Check if it's in a standard-to-daylight transition.
-            if (dstoffset > 0 && tz.getOffset(msec - dstoffset) == rawoffset) {
+            if (dstoffset > 0 && tz.getOffset(msec - dstoffset) == rawoffset && type == WALL_TIME) {
                 dstoffset = 0;
             }
 
@@ -293,13 +293,18 @@ public class ZoneInfo extends TimeZone {
                 offsets[1] = dstoffset;
             }
             return rawoffset + dstoffset;
+        } else {
+            // use the last transition
+            long val = transitions[transitions.length - 1];
+            int offset = this.offsets[(int)(val & OFFSET_MASK)] + rawOffsetDiff;
+            if (offsets != null) {
+                int dst = (int)((val >>> DST_NSHIFT) & 0xfL);
+                int save = (dst == 0) ? 0 : this.offsets[dst];
+                offsets[0] = offset - save;
+                offsets[1] = save;
+            }
+            return offset;
         }
-        int offset = getLastRawOffset();
-        if (offsets != null) {
-            offsets[0] = offset;
-            offsets[1] = 0;
-        }
-        return offset;
     }
 
     private int getTransitionIndex(long date, int type) {
@@ -502,8 +507,10 @@ public class ZoneInfo extends TimeZone {
         SimpleTimeZone tz = getLastRule();
         if (tz != null) {
             return tz.inDaylightTime(date);
-       }
-        return false;
+        } else {
+            // use the last transition
+            return (transitions[transitions.length - 1] & DST_MASK) != 0;
+        }
     }
 
     /**

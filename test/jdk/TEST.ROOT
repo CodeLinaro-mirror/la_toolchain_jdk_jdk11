@@ -22,7 +22,10 @@ com/apple/laf com/sun/java/accessibility com/sun/java/swing sanity/client demo/j
 javax/management com/sun/awt sun/awt sun/java2d javax/xml/jaxp/testng/validation java/lang/ProcessHandle
 
 # Tests that cannot run concurrently
-exclusiveAccess.dirs=java/rmi/Naming java/util/prefs sun/management/jmxremote sun/tools/jstatd sun/security/mscapi java/util/stream java/util/Arrays/largeMemory java/util/BitSet/stream javax/rmi
+exclusiveAccess.dirs=java/rmi/Naming java/util/prefs sun/management/jmxremote sun/tools/jstatd \
+sun/security/mscapi java/util/stream java/util/Arrays/largeMemory java/util/BitSet/stream javax/rmi \
+sanity/client
+
 # Group definitions
 groups=TEST.groups
 
@@ -32,16 +35,20 @@ groups=TEST.groups
 # to determine additional characteristics of the system for use with the @requires tag.
 # Note: compiled bootlibs code will be located in the folder 'bootClasses'
 requires.extraPropDefns = ../../test/jtreg-ext/requires/VMProps.java [../../closed/test/jtreg-ext/requires/VMPropsExt.java]
-requires.extraPropDefns.bootlibs = ../../test/lib/sun ../../test/lib/jdk/test/lib/Platform.java
+requires.extraPropDefns.bootlibs = ../../test/lib/sun \
+    ../../test/lib/jdk/test/lib/Platform.java \
+    ../../test/lib/jdk/test/lib/Container.java
 requires.extraPropDefns.vmOpts = -XX:+UnlockDiagnosticVMOptions -XX:+WhiteBoxAPI -Xbootclasspath/a:bootClasses
 requires.properties= \
     sun.arch.data.model \
     java.runtime.name \
     vm.gc.Z \
+    vm.gc.Shenandoah \
     vm.graal.enabled \
     vm.compiler1.enabled \
     vm.compiler2.enabled \
     vm.cds \
+    vm.debug \
     vm.hasSA \
     vm.hasSAandCanAttach \
     vm.hasJFR \
@@ -49,7 +56,7 @@ requires.properties= \
     release.implementor
 
 # Minimum jtreg version
-requiredVersion=4.2 b12
+requiredVersion=5.1 b1
 
 # Path to libraries in the topmost test directory. This is needed so @library
 # does not need ../../ notation to reach them

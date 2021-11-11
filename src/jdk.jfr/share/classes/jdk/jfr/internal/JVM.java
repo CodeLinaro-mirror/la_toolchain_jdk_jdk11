@@ -106,11 +106,11 @@ public final class JVM {
     public native void endRecording();
 
     /**
-     * Return a list of all classes deriving from {@link Event}
+     * Return a list of all classes deriving from {@link jdk.internal.event.Event}
      *
      * @return list of event classes.
      */
-    public native List<Class<? extends Event>> getAllEventClasses();
+    public native List<Class<? extends jdk.internal.event.Event>> getAllEventClasses();
 
     /**
      * Return a count of the number of unloaded classes deriving from {@link Event}
@@ -188,6 +188,8 @@ public final class JVM {
      * Call to invoke event tagging and retransformation of the passed classes
      *
      * @param classes
+     *
+     * @throws IllegalStateException if wrong JVMTI phase.
      */
     public native synchronized void retransformClasses(Class<?>[] classes);
 
@@ -483,17 +485,9 @@ public final class JVM {
      *
      * @param s string constant to be added, not null
      *
-     * @return the current epoch of this insertion attempt
+     * @return true, if the string was successfully added.
      */
-    public static native boolean addStringConstant(boolean epoch, long id, String s);
-    /**
-     * Gets the address of the jboolean epoch.
-     *
-     * The epoch alternates every checkpoint.
-     *
-     * @return The address of the jboolean.
-     */
-    public native long getEpochAddress();
+    public static native boolean addStringConstant(long id, String s);
 
     public native void uncaughtException(Thread thread, Throwable t);
     /**

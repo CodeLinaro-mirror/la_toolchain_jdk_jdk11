@@ -308,7 +308,7 @@ JfrThreadSampleClosure::JfrThreadSampleClosure(EventExecutionSample* events, Eve
   _added_native(0) {
 }
 
-class JfrThreadSampler : public Thread {
+class JfrThreadSampler : public NonJavaThread {
   friend class JfrThreadSampling;
  private:
   Semaphore _sample;
@@ -321,7 +321,6 @@ class JfrThreadSampler : public Thread {
   int _cur_index;
   const u4 _max_frames;
   volatile bool _disenrolled;
-  static Monitor* _transition_block_lock;
 
   JavaThread* next_thread(ThreadsList* t_list, JavaThread* first_sampled, JavaThread* current);
   void task_stacktrace(JfrSampleType type, JavaThread** last_thread);
@@ -339,11 +338,9 @@ class JfrThreadSampler : public Thread {
 
  public:
   void run();
-  static Monitor* transition_block() { return _transition_block_lock; }
+  static Monitor* transition_block() { return JfrThreadSampler_lock; }
   static void on_javathread_suspend(JavaThread* thread);
 };
-
-Monitor* JfrThreadSampler::_transition_block_lock = new Monitor(Mutex::leaf, "Trace block", true, Monitor::_safepoint_check_never);
 
 static void clear_transition_block(JavaThread* jt) {
   jt->clear_trace_flag();
@@ -467,8 +464,8 @@ void JfrThreadSampler::run() {
       last_native_ms = last_java_ms;
     }
     _sample.signal();
-    jlong java_interval = _interval_java == 0 ? max_jlong : MAX2<jlong>(_interval_java, 10);
-    jlong native_interval = _interval_native == 0 ? max_jlong : MAX2<jlong>(_interval_native, 10);
+    jlong java_interval = _interval_java == 0 ? max_jlong : MAX2<jlong>(_interval_java, 1);
+    jlong native_interval = _interval_native == 0 ? max_jlong : MAX2<jlong>(_interval_native, 1);
 
     jlong now_ms = get_monotonic_ms();
 
@@ -633,11 +630,4 @@ void JfrThreadSampling::set_native_sample_interval(size_t period) {
 
 void JfrThreadSampling::on_javathread_suspend(JavaThread* thread) {
   JfrThreadSampler::on_javathread_suspend(thread);
-}
-
-Thread* JfrThreadSampling::sampler_thread() {
-  if (_instance == NULL) {
-    return NULL;
-  }
-  return _instance->_sampler != NULL ? _instance->_sampler->_sampler_thread : NULL;
 }

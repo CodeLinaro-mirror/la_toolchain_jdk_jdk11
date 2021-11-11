@@ -21,10 +21,7 @@
  * under the License.
  */
 /*
- * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
- */
-/*
- * $Id: DOMKeyInfoFactory.java 1788465 2017-03-24 15:10:51Z coheigea $
+ * Copyright (c) 2005, Oracle and/or its affiliates. All rights reserved.
  */
 package org.jcp.xml.dsig.internal.dom;
 
@@ -170,9 +167,15 @@ public final class DOMKeyInfoFactory extends KeyInfoFactory {
                 "support DOM Level 2 and be namespace aware");
         }
         if ("KeyInfo".equals(tag) && XMLSignature.XMLNS.equals(namespace)) {
-            return new DOMKeyInfo(element, new UnmarshalContext(), getProvider());
+            try {
+                return new DOMKeyInfo(element, new UnmarshalContext(), getProvider());
+            } catch (MarshalException me) {
+                throw me;
+            } catch (Exception e) {
+                throw new MarshalException(e);
+            }
         } else {
-            throw new MarshalException("invalid KeyInfo tag: " + namespace + ":" + tag);
+            throw new MarshalException("Invalid KeyInfo tag: " + namespace + ":" + tag);
         }
     }
 

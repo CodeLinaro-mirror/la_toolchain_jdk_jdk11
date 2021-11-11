@@ -42,6 +42,7 @@ hotspot_compiler_all_gcs = \
 hotspot_gc = \
   gc
 
+# By design this group should include ALL tests under runtime sub-directory
 hotspot_runtime = \
   runtime
 
@@ -51,6 +52,9 @@ hotspot_handshake = \
 hotspot_serviceability = \
   serviceability
 
+hotspot_resourcehogs = \
+  resourcehogs
+
 hotspot_misc = \
   / \
  -applications \
@@ -58,10 +62,14 @@ hotspot_misc = \
  -:hotspot_compiler \
  -:hotspot_gc \
  -:hotspot_runtime \
- -:hotspot_serviceability
+ -:hotspot_serviceability \
+ -:hotspot_containers
 
 hotspot_native_sanity = \
   native_sanity
+
+hotspot_containers = \
+  containers
 
 tier1_common = \
   sanity/BasicVMTest.java \
@@ -119,6 +127,7 @@ tier1_compiler_2 = \
 tier1_compiler_3 = \
   compiler/intrinsics/ \
   compiler/jsr292/ \
+  compiler/locks/ \
   compiler/loopopts/ \
   compiler/macronodes/ \
   compiler/memoryinitialization/ \
@@ -139,7 +148,8 @@ tier1_compiler_3 = \
   -compiler/runtime/Test6826736.java
 
 tier1_compiler_not_xcomp = \
-  compiler/aot
+  compiler/aot \
+  compiler/profiling
 
 tier1_compiler_not_cms = \
   compiler/aot \
@@ -161,13 +171,15 @@ ctw_3 = \
   applications/ctw/modules/jdk_compiler.java \
   applications/ctw/modules/jdk_internal_vm_compiler.java \
   applications/ctw/modules/jdk_localedata.java \
+  applications/ctw/modules/jdk_localedata_2.java \
   applications/ctw/modules/jdk_scripting_nashorn.java \
 
 tier1_gc = \
   :tier1_gc_1 \
   :tier1_gc_2 \
   :tier1_gc_gcold \
-  :tier1_gc_gcbasher
+  :tier1_gc_gcbasher \
+  :tier1_gc_shenandoah
 
 hotspot_not_fast_gc = \
   :hotspot_gc \
@@ -187,7 +199,8 @@ tier1_gc_2 = \
   -gc/stress \
   -gc/survivorAlignment/TestPromotionFromSurvivorToTenuredAfterMinorGC.java \
   -gc/cms/TestMBeanCMS.java \
-  -gc/metaspace/CompressedClassSpaceSizeInJmapHeap.java
+  -gc/metaspace/CompressedClassSpaceSizeInJmapHeap.java \
+  -gc/shenandoah
 
 tier1_gc_gcold = \
   gc/stress/gcold/TestGCOldWithG1.java \
@@ -200,6 +213,51 @@ tier1_gc_gcbasher = \
   gc/stress/gcbasher/TestGCBasherWithCMS.java \
   gc/stress/gcbasher/TestGCBasherWithSerial.java \
   gc/stress/gcbasher/TestGCBasherWithParallel.java
+  
+tier1_gc_shenandoah = \
+  gc/shenandoah/options/ \
+  gc/shenandoah/compiler/ \
+  gc/shenandoah/mxbeans/ \
+  gc/shenandoah/TestSmallHeap.java \
+  gc/shenandoah/oom/
+
+tier2_gc_shenandoah = \
+  runtime/MemberName/MemberNameLeak.java \
+  runtime/CompressedOops/UseCompressedOops.java \
+  gc/TestHumongousReferenceObject.java \
+  gc/TestSystemGC.java \
+  gc/arguments/TestDisableDefaultGC.java \
+  gc/arguments/TestUseCompressedOopsErgo.java \
+  gc/arguments/TestAlignmentToUseLargePages.java \
+  gc/class_unloading/TestClassUnloadingDisabled.java \
+  gc/ergonomics/TestInitialGCThreadLogging.java \
+  gc/ergonomics/TestDynamicNumberOfGCThreads.java \
+  gc/logging/TestGCId.java \
+  gc/metaspace/TestMetaspacePerfCounters.java \
+  gc/metaspace/TestMetaspacePerfCounters.java \
+  gc/startup_warnings/TestShenandoah.java \
+  gc/TestFullGCALot.java \
+  gc/logging/TestUnifiedLoggingSwitchStress.java \
+  runtime/Metaspace/DefineClass.java \
+  gc/shenandoah/ \
+  serviceability/sa/TestHeapDumpForInvokeDynamic.java \
+  -gc/shenandoah/TestStringDedupStress.java \
+  -gc/shenandoah/jni/CriticalNativeStress.java \
+  -:tier1_gc_shenandoah
+
+tier3_gc_shenandoah = \
+  gc/stress/gcold/TestGCOldWithShenandoah.java \
+  gc/stress/gcbasher/TestGCBasherWithShenandoah.java \
+  gc/stress/gclocker/TestGCLockerWithShenandoah.java \
+  gc/stress/systemgc/TestSystemGCWithShenandoah.java \
+  gc/shenandoah/TestStringDedupStress.java \
+  gc/shenandoah/jni/CriticalNativeStress.java \
+  -:tier2_gc_shenandoah
+
+hotspot_gc_shenandoah = \
+  :tier1_gc_shenandoah \
+  :tier2_gc_shenandoah \
+  :tier3_gc_shenandoah
 
 tier1_runtime = \
   runtime/ \
@@ -243,7 +301,6 @@ tier1_runtime = \
  -runtime/Thread/CancellableThreadTest.java \
  -runtime/Thread/TestThreadDumpMonitorContention.java \
  -runtime/Unsafe/RangeCheck.java \
- -runtime/containers/ \
   sanity/ \
   testlibrary_tests/TestMutuallyExclusivePlatformPredicates.java \
  -:tier1_runtime_appcds_exclude \
@@ -275,8 +332,7 @@ tier1_serviceability = \
   serviceability/sa \
   -serviceability/sa/ClhsdbScanOops.java \
   -serviceability/sa/TestJmapCore.java \
-  -serviceability/sa/TestJmapCoreMetaspace.java \
-  -serviceability/sa/TestHeapDumpForLargeArray.java
+  -serviceability/sa/TestJmapCoreMetaspace.java
 
 tier1 = \
   :tier1_common \
@@ -290,7 +346,6 @@ hotspot_tier2_runtime = \
   serviceability/ \
  -runtime/CommandLine/OptionsValidation/TestOptionsWithRanges.java \
  -runtime/Thread/TestThreadDumpMonitorContention.java \
- -runtime/containers/ \
  -:tier1_runtime \
  -:tier1_serviceability \
  -:hotspot_tier2_runtime_platform_agnostic \
@@ -304,7 +359,6 @@ hotspot_tier2_runtime_platform_agnostic = \
 hotspot_tier3_runtime = \
   runtime/ \
   serviceability/ \
- -runtime/containers/ \
  -:tier1_runtime \
  -:tier1_serviceability \
  -:hotspot_tier2_runtime_platform_agnostic \

@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2018 SAP SE. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,8 +26,8 @@
 #ifndef CPU_PPC_VM_VM_VERSION_PPC_HPP
 #define CPU_PPC_VM_VM_VERSION_PPC_HPP
 
+#include "runtime/abstract_vm_version.hpp"
 #include "runtime/globals_extension.hpp"
-#include "runtime/vm_version.hpp"
 
 class VM_Version: public Abstract_VM_Version {
 protected:
@@ -51,6 +51,7 @@ protected:
     vshasig,
     rtm,
     darn,
+    brw,
     num_features // last entry to count features
   };
   enum Feature_Flag_Set {
@@ -74,6 +75,7 @@ protected:
     vshasig_m             = (1 << vshasig),
     rtm_m                 = (1 << rtm    ),
     darn_m                = (1 << darn   ),
+    brw_m                 = (1 << brw    ),
     all_features_m        = (unsigned long)-1
   };
 
@@ -87,6 +89,10 @@ protected:
 public:
   // Initialization
   static void initialize();
+  static void check_virtualizations();
+
+  // Override Abstract_VM_Version implementation
+  static void print_platform_virtualization_info(outputStream*);
 
   // Override Abstract_VM_Version implementation
   static bool use_biased_locking();
@@ -112,6 +118,7 @@ public:
   static bool has_vshasig() { return (_features & vshasig_m) != 0; }
   static bool has_tm()      { return (_features & rtm_m) != 0; }
   static bool has_darn()    { return (_features & darn_m) != 0; }
+  static bool has_brw()     { return (_features & brw_m) != 0; }
 
   static bool has_mtfprd()  { return has_vpmsumb(); } // alias for P8
 

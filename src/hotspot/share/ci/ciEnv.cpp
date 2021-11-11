@@ -118,6 +118,9 @@ ciEnv::ciEnv(CompileTask* task, int system_dictionary_modification_counter)
   _system_dictionary_modification_counter = system_dictionary_modification_counter;
   _num_inlined_bytecodes = 0;
   assert(task == NULL || thread->task() == task, "sanity");
+  if (task != NULL) {
+    task->mark_started(os::elapsed_counter());
+  }
   _task = task;
   _log = NULL;
 
@@ -231,6 +234,7 @@ void ciEnv::cache_jvmti_state() {
   _jvmti_can_access_local_variables     = JvmtiExport::can_access_local_variables();
   _jvmti_can_post_on_exceptions         = JvmtiExport::can_post_on_exceptions();
   _jvmti_can_pop_frame                  = JvmtiExport::can_pop_frame();
+  _jvmti_can_get_owned_monitor_info     = JvmtiExport::can_get_owned_monitor_info();
 }
 
 bool ciEnv::jvmti_state_changed() const {
@@ -369,6 +373,10 @@ bool ciEnv::check_klass_accessibility(ciKlass* accessing_klass,
     accessing_klass = accessing_klass->as_obj_array_klass()->base_element_klass();
   }
   if (!accessing_klass->is_instance_klass()) {
+    return true;
+  }
+  if (!_jvmti_can_get_owned_monitor_info &&
+      JvmtiExport::can_get_owned_monitor_info()) {
     return true;
   }
 
@@ -537,7 +545,7 @@ ciKlass* ciEnv::get_klass_by_index_impl(const constantPoolHandle& cpool,
     // Calculate accessibility the hard way.
     if (!k->is_loaded()) {
       is_accessible = false;
-    } else if (!oopDesc::equals(k->loader(), accessor->loader()) &&
+    } else if (k->loader() != accessor->loader() &&
                get_klass_by_name_impl(accessor, cpool, k->name(), true) == NULL) {
       // Loaded only remotely.  Not linked yet.
       is_accessible = false;
@@ -588,7 +596,7 @@ ciConstant ciEnv::get_constant_by_index_impl(const constantPoolHandle& cpool,
     index = cpool->object_to_cp_index(cache_index);
     oop obj = cpool->resolved_references()->obj_at(cache_index);
     if (obj != NULL) {
-      if (oopDesc::equals(obj, Universe::the_null_sentinel())) {
+      if (obj == Universe::the_null_sentinel()) {
         return ciConstant(T_OBJECT, get_object(NULL));
       }
       BasicType bt = T_OBJECT;
@@ -959,6 +967,18 @@ void ciEnv::register_method(ciMethod* target,
   VM_ENTRY_MARK;
   nmethod* nm = NULL;
   {
+    methodHandle method(THREAD, target->get_Method());
+
+    // We require method counters to store some method state (max compilation levels) required by the compilation policy.
+    if (method->get_method_counters(THREAD) == NULL) {
+      record_failure("can't create method counters");
+      // All buffers in the CodeBuffer are allocated in the CodeCache.
+      // If the code buffer is created on each compile attempt
+      // as in C2, then it must be freed.
+      code_buffer->free_blob();
+      return;
+    }
+
     // To prevent compile queue updates.
     MutexLocker locker(MethodCompileQueue_lock, THREAD);
 
@@ -993,9 +1013,6 @@ void ciEnv::register_method(ciMethod* target,
       // Check for {class loads, evolution, breakpoints, ...} during compilation
       validate_compile_task_dependencies(target);
     }
-
-    methodHandle method(THREAD, target->get_Method());
-
 #if INCLUDE_RTM_OPT
     if (!failing() && (rtm_state != NoRTM) &&
         (method()->method_data() != NULL) &&

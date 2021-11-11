@@ -69,6 +69,7 @@
 #define REG_PC Eip
 #endif // AMD64
 
+JNIEXPORT
 extern LONG WINAPI topLevelExceptionFilter(_EXCEPTION_POINTERS* );
 
 // Install a win32 structured exception handler around thread.
@@ -465,6 +466,8 @@ frame os::get_sender_for_C_frame(frame* fr) {
 }
 
 #ifndef AMD64
+// Ignore "C4172: returning address of local variable or temporary" on 32bit
+#pragma warning( disable : 4172 )
 // Returns an estimate of the current stack pointer. Result must be guaranteed
 // to point into the calling threads stack, and be no lower than the current
 // stack pointer.
@@ -473,6 +476,7 @@ address os::current_stack_pointer() {
   address sp = (address)&dummy;
   return sp;
 }
+#pragma warning( default : 4172 )
 #else
 // Returns the current stack pointer. Accurate value needed for
 // os::verify_stack_alignment().
@@ -647,6 +651,23 @@ extern "C" int SpinPause () {
 #endif // AMD64
 }
 
+juint os::cpu_microcode_revision() {
+  juint result = 0;
+  BYTE data[8] = {0};
+  HKEY key;
+  DWORD status = RegOpenKey(HKEY_LOCAL_MACHINE,
+               "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", &key);
+  if (status == ERROR_SUCCESS) {
+    DWORD size = sizeof(data);
+    status = RegQueryValueEx(key, "Update Revision", NULL, NULL, data, &size);
+    if (status == ERROR_SUCCESS) {
+      if (size == 4) result = *((juint*)data);
+      if (size == 8) result = *((juint*)data + 1); // upper 32-bits
+    }
+    RegCloseKey(key);
+  }
+  return result;
+}
 
 void os::setup_fpu() {
 #ifndef AMD64

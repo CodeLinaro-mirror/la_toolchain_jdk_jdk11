@@ -21,7 +21,7 @@
  * under the License.
  */
 /*
- * Portions copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, Oracle and/or its affiliates. All rights reserved.
  */
 /*
  * ===========================================================================
@@ -29,9 +29,6 @@
  * (C) Copyright IBM Corp. 2003 All Rights Reserved.
  *
  * ===========================================================================
- */
-/*
- * $Id: DOMXMLSignature.java 1788465 2017-03-24 15:10:51Z coheigea $
  */
 package org.jcp.xml.dsig.internal.dom;
 
@@ -151,7 +148,7 @@ public final class DOMXMLSignature extends DOMStructure
 
         // unmarshal KeyInfo, if specified
         Element nextSibling = DOMUtils.getNextSiblingElement(sigValElem);
-        if (nextSibling != null && nextSibling.getLocalName().equals("KeyInfo")
+        if (nextSibling != null && "KeyInfo".equals(nextSibling.getLocalName())
             && XMLSignature.XMLNS.equals(nextSibling.getNamespaceURI())) {
             ki = new DOMKeyInfo(nextSibling, context, provider);
             nextSibling = DOMUtils.getNextSiblingElement(nextSibling);
@@ -508,7 +505,7 @@ public final class DOMXMLSignature extends DOMStructure
             throws MarshalException
         {
             // base64 decode signatureValue
-            String content = XMLUtils.getFullTextChildrenFromElement(sigValueElem);
+            String content = XMLUtils.getFullTextChildrenFromNode(sigValueElem);
             value = XMLUtils.decode(content);
 
             Attr attr = sigValueElem.getAttributeNodeNS(null, "Id");
@@ -612,6 +609,7 @@ public final class DOMXMLSignature extends DOMStructure
                             DOMCryptoContext context)
             throws MarshalException
         {
+            // create SignatureValue element
             sigValueElem = DOMUtils.createElement(ownerDoc, "SignatureValue",
                                                   XMLSignature.XMLNS, dsPrefix);
             if (valueBase64 != null) {

@@ -312,7 +312,11 @@ static JfrAgeNode* get_free_age_node(JfrStorageAgeMspace* age_mspace, Thread* th
 
 static bool insert_full_age_node(JfrAgeNode* age_node, JfrStorageAgeMspace* age_mspace, Thread* thread) {
   assert(JfrBuffer_lock->owned_by_self(), "invariant");
+  assert(age_node != NULL, "invariant");
+  assert(age_node->acquired_by_self(), "invariant");
   assert(age_node->retired_buffer()->retired(), "invariant");
+  age_node->release(); // drop identity claim on age node when inserting to full list
+  assert(age_node->identity() == NULL, "invariant");
   age_mspace->insert_full_head(age_node);
   return true;
 }
@@ -329,8 +333,8 @@ static bool full_buffer_registration(BufferPtr buffer, JfrStorageAgeMspace* age_
       return false;
     }
   }
-  assert(age_node->acquired_by_self(), "invariant");
   assert(age_node != NULL, "invariant");
+  assert(age_node->acquired_by_self(), "invariant");
   age_node->set_retired_buffer(buffer);
   control.increment_full();
   return insert_full_age_node(age_node, age_mspace, thread);
@@ -412,20 +416,20 @@ void JfrStorage::discard_oldest(Thread* thread) {
       if (oldest_age_node == NULL) {
         break;
       }
+      assert(oldest_age_node->identity() == NULL, "invariant");
       BufferPtr const buffer = oldest_age_node->retired_buffer();
       assert(buffer->retired(), "invariant");
-      discarded_size += buffer->unflushed_size();
+      discarded_size += buffer->discard();
+      assert(buffer->unflushed_size() == 0, "invariant");
       num_full_post_discard = control().decrement_full();
+      mspace_release_full(oldest_age_node, _age_mspace);
       if (buffer->transient()) {
         mspace_release_full(buffer, _transient_mspace);
-        mspace_release_full(oldest_age_node, _age_mspace);
         continue;
-      } else {
-        mspace_release_full(oldest_age_node, _age_mspace);
-        buffer->reinitialize();
-        buffer->release(); // pusb
-        break;
       }
+      buffer->reinitialize();
+      buffer->release(); // publish
+      break;
     }
     JfrBuffer_lock->unlock();
     const size_t number_of_discards = num_full_pre_discard - num_full_post_discard;
@@ -484,7 +488,7 @@ BufferPtr JfrStorage::flush(BufferPtr cur, size_t used, size_t req, bool native,
 
 BufferPtr JfrStorage::flush_regular(BufferPtr cur, const u1* const cur_pos, size_t used, size_t req, bool native, Thread* t) {
   debug_only(assert_flush_regular_precondition(cur, cur_pos, used, req, t);)
-  // A flush is needed before memcpy since a non-large buffer is thread stable
+  // A flush is needed before memmove since a non-large buffer is thread stable
   // (thread local). The flush will not modify memory in addresses above pos()
   // which is where the "used / uncommitted" data resides. It is therefore both
   // possible and valid to migrate data after the flush. This is however only
@@ -496,7 +500,8 @@ BufferPtr JfrStorage::flush_regular(BufferPtr cur, const u1* const cur_pos, size
   if (cur->free_size() >= req) {
     // simplest case, no switching of buffers
     if (used > 0) {
-      memcpy(cur->pos(), (void*)cur_pos, used);
+      // source and destination may overlap so memmove must be used instead of memcpy
+      memmove(cur->pos(), (void*)cur_pos, used);
     }
     assert(native ? t->jfr_thread_local()->native_buffer() == cur : t->jfr_thread_local()->java_buffer() == cur, "invariant");
     return cur;
@@ -637,12 +642,12 @@ static void process_age_list(Processor& processor, JfrStorageAgeMspace* age_mspa
   JfrAgeNode* last = NULL;
   while (node != NULL) {
     last = node;
+    assert(node->identity() == NULL, "invariant");
     BufferPtr const buffer = node->retired_buffer();
     assert(buffer != NULL, "invariant");
     assert(buffer->retired(), "invariant");
     processor.process(buffer);
     // at this point, buffer is already live or destroyed
-    node->clear_identity();
     JfrAgeNode* const next = (JfrAgeNode*)node->next();
     if (node->transient()) {
       // detach

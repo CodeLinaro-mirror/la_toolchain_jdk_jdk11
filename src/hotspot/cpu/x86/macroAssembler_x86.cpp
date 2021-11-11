@@ -828,11 +828,13 @@ static void pass_arg3(MacroAssembler* masm, Register arg) {
 }
 
 void MacroAssembler::stop(const char* msg) {
-  address rip = pc();
-  pusha(); // get regs on stack
+  if (ShowMessageBoxOnError) {
+    address rip = pc();
+    pusha(); // get regs on stack
+    lea(c_rarg1, InternalAddress(rip));
+    movq(c_rarg2, rsp); // pass pointer to regs array
+  }
   lea(c_rarg0, ExternalAddress((address) msg));
-  lea(c_rarg1, InternalAddress(rip));
-  movq(c_rarg2, rsp); // pass pointer to regs array
   andq(rsp, -16); // align stack as required by ABI
   call(RuntimeAddress(CAST_FROM_FN_PTR(address, MacroAssembler::debug64)));
   hlt();
@@ -1003,25 +1005,25 @@ void MacroAssembler::align(int modulus, int target) {
   }
 }
 
-void MacroAssembler::andpd(XMMRegister dst, AddressLiteral src) {
+void MacroAssembler::andpd(XMMRegister dst, AddressLiteral src, Register scratch_reg) {
   // Used in sign-masking with aligned address.
   assert((UseAVX > 0) || (((intptr_t)src.target() & 15) == 0), "SSE mode requires address alignment 16 bytes");
   if (reachable(src)) {
     Assembler::andpd(dst, as_Address(src));
   } else {
-    lea(rscratch1, src);
-    Assembler::andpd(dst, Address(rscratch1, 0));
+    lea(scratch_reg, src);
+    Assembler::andpd(dst, Address(scratch_reg, 0));
   }
 }
 
-void MacroAssembler::andps(XMMRegister dst, AddressLiteral src) {
+void MacroAssembler::andps(XMMRegister dst, AddressLiteral src, Register scratch_reg) {
   // Used in sign-masking with aligned address.
   assert((UseAVX > 0) || (((intptr_t)src.target() & 15) == 0), "SSE mode requires address alignment 16 bytes");
   if (reachable(src)) {
     Assembler::andps(dst, as_Address(src));
   } else {
-    lea(rscratch1, src);
-    Assembler::andps(dst, Address(rscratch1, 0));
+    lea(scratch_reg, src);
+    Assembler::andps(dst, Address(scratch_reg, 0));
   }
 }
 
@@ -1183,7 +1185,7 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   // the prototype header is no longer biased and we have to revoke
   // the bias on this object.
   testptr(header_reg, markOopDesc::biased_lock_mask_in_place);
-  jccb(Assembler::notZero, try_revoke_bias);
+  jcc(Assembler::notZero, try_revoke_bias);
 
   // Biasing is still enabled for this data type. See whether the
   // epoch of the current bias is still valid, meaning that the epoch
@@ -3545,13 +3547,13 @@ void MacroAssembler::vmovdqu(XMMRegister dst, XMMRegister src) {
     Assembler::vmovdqu(dst, src);
 }
 
-void MacroAssembler::vmovdqu(XMMRegister dst, AddressLiteral src) {
+void MacroAssembler::vmovdqu(XMMRegister dst, AddressLiteral src, Register scratch_reg) {
   if (reachable(src)) {
     vmovdqu(dst, as_Address(src));
   }
   else {
-    lea(rscratch1, src);
-    vmovdqu(dst, Address(rscratch1, 0));
+    lea(scratch_reg, src);
+    vmovdqu(dst, Address(scratch_reg, 0));
   }
 }
 
@@ -3892,6 +3894,15 @@ void MacroAssembler::subsd(XMMRegister dst, AddressLiteral src) {
   }
 }
 
+void MacroAssembler::roundsd(XMMRegister dst, AddressLiteral src, int32_t rmode, Register scratch_reg) {
+  if (reachable(src)) {
+    Assembler::roundsd(dst, as_Address(src), rmode);
+  } else {
+    lea(scratch_reg, src);
+    Assembler::roundsd(dst, Address(scratch_reg, 0), rmode);
+  }
+}
+
 void MacroAssembler::subss(XMMRegister dst, AddressLiteral src) {
   if (reachable(src)) {
     Assembler::subss(dst, as_Address(src));
@@ -3919,14 +3930,14 @@ void MacroAssembler::ucomiss(XMMRegister dst, AddressLiteral src) {
   }
 }
 
-void MacroAssembler::xorpd(XMMRegister dst, AddressLiteral src) {
+void MacroAssembler::xorpd(XMMRegister dst, AddressLiteral src, Register scratch_reg) {
   // Used in sign-bit flipping with aligned address.
   assert((UseAVX > 0) || (((intptr_t)src.target() & 15) == 0), "SSE mode requires address alignment 16 bytes");
   if (reachable(src)) {
     Assembler::xorpd(dst, as_Address(src));
   } else {
-    lea(rscratch1, src);
-    Assembler::xorpd(dst, Address(rscratch1, 0));
+    lea(scratch_reg, src);
+    Assembler::xorpd(dst, Address(scratch_reg, 0));
   }
 }
 
@@ -3947,14 +3958,14 @@ void MacroAssembler::xorps(XMMRegister dst, XMMRegister src) {
   }
 }
 
-void MacroAssembler::xorps(XMMRegister dst, AddressLiteral src) {
+void MacroAssembler::xorps(XMMRegister dst, AddressLiteral src, Register scratch_reg) {
   // Used in sign-bit flipping with aligned address.
   assert((UseAVX > 0) || (((intptr_t)src.target() & 15) == 0), "SSE mode requires address alignment 16 bytes");
   if (reachable(src)) {
     Assembler::xorps(dst, as_Address(src));
   } else {
-    lea(rscratch1, src);
-    Assembler::xorps(dst, Address(rscratch1, 0));
+    lea(scratch_reg, src);
+    Assembler::xorps(dst, Address(scratch_reg, 0));
   }
 }
 
@@ -3990,6 +4001,16 @@ void MacroAssembler::vaddss(XMMRegister dst, XMMRegister nds, AddressLiteral src
   }
 }
 
+void MacroAssembler::vpaddd(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len, Register rscratch) {
+  assert(UseAVX > 0, "requires some form of AVX");
+  if (reachable(src)) {
+    Assembler::vpaddd(dst, nds, as_Address(src), vector_len);
+  } else {
+    lea(rscratch, src);
+    Assembler::vpaddd(dst, nds, Address(rscratch, 0), vector_len);
+  }
+}
+
 void MacroAssembler::vabsss(XMMRegister dst, XMMRegister nds, XMMRegister src, AddressLiteral negate_field, int vector_len) {
   assert(((dst->encoding() < 16 && src->encoding() < 16 && nds->encoding() < 16) || VM_Version::supports_avx512vldq()),"XMM register should be 0-15");
   vandps(dst, nds, negate_field, vector_len);
@@ -4020,12 +4041,12 @@ void MacroAssembler::vpaddw(XMMRegister dst, XMMRegister nds, Address src, int v
   Assembler::vpaddw(dst, nds, src, vector_len);
 }
 
-void MacroAssembler::vpand(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len) {
+void MacroAssembler::vpand(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len, Register scratch_reg) {
   if (reachable(src)) {
     Assembler::vpand(dst, nds, as_Address(src), vector_len);
   } else {
-    lea(rscratch1, src);
-    Assembler::vpand(dst, nds, Address(rscratch1, 0), vector_len);
+    lea(scratch_reg, src);
+    Assembler::vpand(dst, nds, Address(scratch_reg, 0), vector_len);
   }
 }
 
@@ -4094,6 +4115,22 @@ void MacroAssembler::vpsraw(XMMRegister dst, XMMRegister nds, int shift, int vec
   Assembler::vpsraw(dst, nds, shift, vector_len);
 }
 
+void MacroAssembler::evpsraq(XMMRegister dst, XMMRegister nds, XMMRegister shift, int vector_len) {
+  assert(UseAVX > 2,"");
+  if (!VM_Version::supports_avx512vl() && vector_len < 2) {
+     vector_len = 2;
+  }
+  Assembler::evpsraq(dst, nds, shift, vector_len);
+}
+
+void MacroAssembler::evpsraq(XMMRegister dst, XMMRegister nds, int shift, int vector_len) {
+  assert(UseAVX > 2,"");
+  if (!VM_Version::supports_avx512vl() && vector_len < 2) {
+     vector_len = 2;
+  }
+  Assembler::evpsraq(dst, nds, shift, vector_len);
+}
+
 void MacroAssembler::vpsrlw(XMMRegister dst, XMMRegister nds, XMMRegister shift, int vector_len) {
   assert(((dst->encoding() < 16 && shift->encoding() < 16 && nds->encoding() < 16) || VM_Version::supports_avx512vlbw()),"XMM register should be 0-15");
   Assembler::vpsrlw(dst, nds, shift, vector_len);
@@ -4134,21 +4171,21 @@ void MacroAssembler::pshuflw(XMMRegister dst, XMMRegister src, int mode) {
   Assembler::pshuflw(dst, src, mode);
 }
 
-void MacroAssembler::vandpd(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len) {
+void MacroAssembler::vandpd(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len, Register scratch_reg) {
   if (reachable(src)) {
     vandpd(dst, nds, as_Address(src), vector_len);
   } else {
-    lea(rscratch1, src);
-    vandpd(dst, nds, Address(rscratch1, 0), vector_len);
+    lea(scratch_reg, src);
+    vandpd(dst, nds, Address(scratch_reg, 0), vector_len);
   }
 }
 
-void MacroAssembler::vandps(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len) {
+void MacroAssembler::vandps(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len, Register scratch_reg) {
   if (reachable(src)) {
     vandps(dst, nds, as_Address(src), vector_len);
   } else {
-    lea(rscratch1, src);
-    vandps(dst, nds, Address(rscratch1, 0), vector_len);
+    lea(scratch_reg, src);
+    vandps(dst, nds, Address(scratch_reg, 0), vector_len);
   }
 }
 
@@ -4216,23 +4253,161 @@ void MacroAssembler::vnegatesd(XMMRegister dst, XMMRegister nds, AddressLiteral 
   vxorpd(dst, nds, src, Assembler::AVX_128bit);
 }
 
-void MacroAssembler::vxorpd(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len) {
+void MacroAssembler::vxorpd(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len, Register scratch_reg) {
   if (reachable(src)) {
     vxorpd(dst, nds, as_Address(src), vector_len);
   } else {
-    lea(rscratch1, src);
-    vxorpd(dst, nds, Address(rscratch1, 0), vector_len);
+    lea(scratch_reg, src);
+    vxorpd(dst, nds, Address(scratch_reg, 0), vector_len);
   }
 }
 
-void MacroAssembler::vxorps(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len) {
+void MacroAssembler::vxorps(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len, Register scratch_reg) {
   if (reachable(src)) {
     vxorps(dst, nds, as_Address(src), vector_len);
   } else {
-    lea(rscratch1, src);
-    vxorps(dst, nds, Address(rscratch1, 0), vector_len);
+    lea(scratch_reg, src);
+    vxorps(dst, nds, Address(scratch_reg, 0), vector_len);
   }
 }
+
+void MacroAssembler::vpxor(XMMRegister dst, XMMRegister nds, AddressLiteral src, int vector_len, Register scratch_reg) {
+  if (UseAVX > 1 || (vector_len < 1)) {
+    if (reachable(src)) {
+      Assembler::vpxor(dst, nds, as_Address(src), vector_len);
+    } else {
+      lea(scratch_reg, src);
+      Assembler::vpxor(dst, nds, Address(scratch_reg, 0), vector_len);
+    }
+  }
+  else {
+    MacroAssembler::vxorpd(dst, nds, src, vector_len, scratch_reg);
+  }
+}
+
+//-------------------------------------------------------------------------------------------
+#ifdef COMPILER2
+// Generic instructions support for use in .ad files C2 code generation
+
+void MacroAssembler::vabsnegd(int opcode, XMMRegister dst, Register scr) {
+  if (opcode == Op_AbsVD) {
+    andpd(dst, ExternalAddress(StubRoutines::x86::vector_double_sign_mask()), scr);
+  } else {
+    assert((opcode == Op_NegVD),"opcode should be Op_NegD");
+    xorpd(dst, ExternalAddress(StubRoutines::x86::vector_double_sign_flip()), scr);
+  }
+}
+
+void MacroAssembler::vabsnegd(int opcode, XMMRegister dst, XMMRegister src, int vector_len, Register scr) {
+  if (opcode == Op_AbsVD) {
+    vandpd(dst, src, ExternalAddress(StubRoutines::x86::vector_double_sign_mask()), vector_len, scr);
+  } else {
+    assert((opcode == Op_NegVD),"opcode should be Op_NegD");
+    vxorpd(dst, src, ExternalAddress(StubRoutines::x86::vector_double_sign_flip()), vector_len, scr);
+  }
+}
+
+void MacroAssembler::vabsnegf(int opcode, XMMRegister dst, Register scr) {
+  if (opcode == Op_AbsVF) {
+    andps(dst, ExternalAddress(StubRoutines::x86::vector_float_sign_mask()), scr);
+  } else {
+    assert((opcode == Op_NegVF),"opcode should be Op_NegF");
+    xorps(dst, ExternalAddress(StubRoutines::x86::vector_float_sign_flip()), scr);
+  }
+}
+
+void MacroAssembler::vabsnegf(int opcode, XMMRegister dst, XMMRegister src, int vector_len, Register scr) {
+  if (opcode == Op_AbsVF) {
+    vandps(dst, src, ExternalAddress(StubRoutines::x86::vector_float_sign_mask()), vector_len, scr);
+  } else {
+    assert((opcode == Op_NegVF),"opcode should be Op_NegF");
+    vxorps(dst, src, ExternalAddress(StubRoutines::x86::vector_float_sign_flip()), vector_len, scr);
+  }
+}
+
+void MacroAssembler::vextendbw(bool sign, XMMRegister dst, XMMRegister src) {
+  if (sign) {
+    pmovsxbw(dst, src);
+  } else {
+    pmovzxbw(dst, src);
+  }
+}
+
+void MacroAssembler::vextendbw(bool sign, XMMRegister dst, XMMRegister src, int vector_len) {
+  if (sign) {
+    vpmovsxbw(dst, src, vector_len);
+  } else {
+    vpmovzxbw(dst, src, vector_len);
+  }
+}
+
+void MacroAssembler::vshiftd(int opcode, XMMRegister dst, XMMRegister src) {
+  if (opcode == Op_RShiftVI) {
+    psrad(dst, src);
+  } else if (opcode == Op_LShiftVI) {
+    pslld(dst, src);
+  } else {
+    assert((opcode == Op_URShiftVI),"opcode should be Op_URShiftVI");
+    psrld(dst, src);
+  }
+}
+
+void MacroAssembler::vshiftd(int opcode, XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len) {
+  if (opcode == Op_RShiftVI) {
+    vpsrad(dst, nds, src, vector_len);
+  } else if (opcode == Op_LShiftVI) {
+    vpslld(dst, nds, src, vector_len);
+  } else {
+    assert((opcode == Op_URShiftVI),"opcode should be Op_URShiftVI");
+    vpsrld(dst, nds, src, vector_len);
+  }
+}
+
+void MacroAssembler::vshiftw(int opcode, XMMRegister dst, XMMRegister src) {
+  if ((opcode == Op_RShiftVS) || (opcode == Op_RShiftVB)) {
+    psraw(dst, src);
+  } else if ((opcode == Op_LShiftVS) || (opcode == Op_LShiftVB)) {
+    psllw(dst, src);
+  } else {
+    assert(((opcode == Op_URShiftVS) || (opcode == Op_URShiftVB)),"opcode should be one of Op_URShiftVS or Op_URShiftVB");
+    psrlw(dst, src);
+  }
+}
+
+void MacroAssembler::vshiftw(int opcode, XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len) {
+  if ((opcode == Op_RShiftVS) || (opcode == Op_RShiftVB)) {
+    vpsraw(dst, nds, src, vector_len);
+  } else if ((opcode == Op_LShiftVS) || (opcode == Op_LShiftVB)) {
+    vpsllw(dst, nds, src, vector_len);
+  } else {
+    assert(((opcode == Op_URShiftVS) || (opcode == Op_URShiftVB)),"opcode should be one of Op_URShiftVS or Op_URShiftVB");
+    vpsrlw(dst, nds, src, vector_len);
+  }
+}
+
+void MacroAssembler::vshiftq(int opcode, XMMRegister dst, XMMRegister src) {
+  if (opcode == Op_RShiftVL) {
+    psrlq(dst, src);  // using srl to implement sra on pre-avs512 systems
+  } else if (opcode == Op_LShiftVL) {
+    psllq(dst, src);
+  } else {
+    assert((opcode == Op_URShiftVL),"opcode should be Op_URShiftVL");
+    psrlq(dst, src);
+  }
+}
+
+void MacroAssembler::vshiftq(int opcode, XMMRegister dst, XMMRegister nds, XMMRegister src, int vector_len) {
+  if (opcode == Op_RShiftVL) {
+    evpsraq(dst, nds, src, vector_len);
+  } else if (opcode == Op_LShiftVL) {
+    vpsllq(dst, nds, src, vector_len);
+  } else {
+    assert((opcode == Op_URShiftVL),"opcode should be Op_URShiftVL");
+    vpsrlq(dst, nds, src, vector_len);
+  }
+}
+#endif
+//-------------------------------------------------------------------------------------------
 
 void MacroAssembler::clear_jweak_tag(Register possibly_jweak) {
   const int32_t inverted_jweak_mask = ~static_cast<int32_t>(JNIHandles::weak_tag_mask);
@@ -6353,7 +6528,7 @@ void MacroAssembler::string_indexof_char(Register str1, Register cnt1, Register 
   movptr(result, str1);
   if (UseAVX >= 2) {
     cmpl(cnt1, stride);
-    jcc(Assembler::less, SCAN_TO_CHAR_LOOP);
+    jcc(Assembler::less, SCAN_TO_CHAR);
     cmpl(cnt1, 2*stride);
     jcc(Assembler::less, SCAN_TO_8_CHAR_INIT);
     movdl(vec1, ch);
@@ -6380,10 +6555,8 @@ void MacroAssembler::string_indexof_char(Register str1, Register cnt1, Register 
   }
   bind(SCAN_TO_8_CHAR);
   cmpl(cnt1, stride);
-  if (UseAVX >= 2) {
-    jcc(Assembler::less, SCAN_TO_CHAR);
-  } else {
-    jcc(Assembler::less, SCAN_TO_CHAR_LOOP);
+  jcc(Assembler::less, SCAN_TO_CHAR);
+  if (UseAVX < 2) {
     movdl(vec1, ch);
     pshuflw(vec1, vec1, 0x00);
     pshufd(vec1, vec1, 0);
@@ -6424,7 +6597,7 @@ void MacroAssembler::string_indexof_char(Register str1, Register cnt1, Register 
     pmovmskb(tmp, vec3);
   }
   bsfl(ch, tmp);
-  addl(result, ch);
+  addptr(result, ch);
 
   bind(FOUND_SEQ_CHAR);
   subptr(result, str1);
@@ -6596,7 +6769,7 @@ void MacroAssembler::string_compare(Register str1, Register str2,
     bind(COMPARE_WIDE_VECTORS_LOOP);
 
 #ifdef _LP64
-    if (VM_Version::supports_avx512vlbw()) { // trying 64 bytes fast loop
+    if ((AVX3Threshold == 0) && VM_Version::supports_avx512vlbw()) { // trying 64 bytes fast loop
       cmpl(cnt2, stride2x2);
       jccb(Assembler::below, COMPARE_WIDE_VECTORS_LOOP_AVX2);
       testl(cnt2, stride2x2-1);   // cnt2 holds the vector count
@@ -6856,7 +7029,7 @@ void MacroAssembler::has_negatives(Register ary1, Register len,
   testl(len, len);
   jcc(Assembler::zero, FALSE_LABEL);
 
-  if ((UseAVX > 2) && // AVX512
+  if ((AVX3Threshold == 0) && (UseAVX > 2) && // AVX512
     VM_Version::supports_avx512vlbw() &&
     VM_Version::supports_bmi2()) {
 
@@ -6929,7 +7102,7 @@ void MacroAssembler::has_negatives(Register ary1, Register len,
   } else {
     movl(result, len); // copy
 
-    if (UseAVX == 2 && UseSSE >= 2) {
+    if (UseAVX >= 2 && UseSSE >= 2) {
       // With AVX2, use 32-byte vector compare
       Label COMPARE_WIDE_VECTORS, COMPARE_TAIL;
 
@@ -7102,14 +7275,12 @@ void MacroAssembler::arrays_equals(bool is_array_equ, Register ary1, Register ar
     lea(ary2, Address(ary2, limit, Address::times_1));
     negptr(limit);
 
-    bind(COMPARE_WIDE_VECTORS);
-
 #ifdef _LP64
-    if (VM_Version::supports_avx512vlbw()) { // trying 64 bytes fast loop
+    if ((AVX3Threshold == 0) && VM_Version::supports_avx512vlbw()) { // trying 64 bytes fast loop
       Label COMPARE_WIDE_VECTORS_LOOP_AVX2, COMPARE_WIDE_VECTORS_LOOP_AVX3;
 
       cmpl(limit, -64);
-      jccb(Assembler::greater, COMPARE_WIDE_VECTORS_LOOP_AVX2);
+      jcc(Assembler::greater, COMPARE_WIDE_VECTORS_LOOP_AVX2);
 
       bind(COMPARE_WIDE_VECTORS_LOOP_AVX3); // the hottest loop
 
@@ -7142,7 +7313,7 @@ void MacroAssembler::arrays_equals(bool is_array_equ, Register ary1, Register ar
 
     }//if (VM_Version::supports_avx512vlbw())
 #endif //_LP64
-
+    bind(COMPARE_WIDE_VECTORS);
     vmovdqu(vec1, Address(ary1, limit, Address::times_1));
     vmovdqu(vec2, Address(ary2, limit, Address::times_1));
     vpxor(vec1, vec2);
@@ -7366,32 +7537,33 @@ void MacroAssembler::generate_fill(BasicType t, bool aligned,
       assert( UseSSE >= 2, "supported cpu only" );
       Label L_fill_32_bytes_loop, L_check_fill_8_bytes, L_fill_8_bytes_loop, L_fill_8_bytes;
       movdl(xtmp, value);
-      if (UseAVX > 2 && UseUnalignedLoadStores) {
+      if (UseAVX >= 2 && UseUnalignedLoadStores) {
+        Label L_check_fill_32_bytes;
+        if (UseAVX > 2) {
+          // Fill 64-byte chunks
+          Label L_fill_64_bytes_loop_avx3, L_check_fill_64_bytes_avx2;
+
+          // If number of bytes to fill < AVX3Threshold, perform fill using AVX2
+          cmpl(count, AVX3Threshold);
+          jccb(Assembler::below, L_check_fill_64_bytes_avx2);
+
+          vpbroadcastd(xtmp, xtmp, Assembler::AVX_512bit);
+
+          subl(count, 16 << shift);
+          jccb(Assembler::less, L_check_fill_32_bytes);
+          align(16);
+
+          BIND(L_fill_64_bytes_loop_avx3);
+          evmovdqul(Address(to, 0), xtmp, Assembler::AVX_512bit);
+          addptr(to, 64);
+          subl(count, 16 << shift);
+          jcc(Assembler::greaterEqual, L_fill_64_bytes_loop_avx3);
+          jmpb(L_check_fill_32_bytes);
+
+          BIND(L_check_fill_64_bytes_avx2);
+        }
         // Fill 64-byte chunks
-        Label L_fill_64_bytes_loop, L_check_fill_32_bytes;
-        vpbroadcastd(xtmp, xtmp, Assembler::AVX_512bit);
-
-        subl(count, 16 << shift);
-        jcc(Assembler::less, L_check_fill_32_bytes);
-        align(16);
-
-        BIND(L_fill_64_bytes_loop);
-        evmovdqul(Address(to, 0), xtmp, Assembler::AVX_512bit);
-        addptr(to, 64);
-        subl(count, 16 << shift);
-        jcc(Assembler::greaterEqual, L_fill_64_bytes_loop);
-
-        BIND(L_check_fill_32_bytes);
-        addl(count, 8 << shift);
-        jccb(Assembler::less, L_check_fill_8_bytes);
-        vmovdqu(Address(to, 0), xtmp);
-        addptr(to, 32);
-        subl(count, 8 << shift);
-
-        BIND(L_check_fill_8_bytes);
-      } else if (UseAVX == 2 && UseUnalignedLoadStores) {
-        // Fill 64-byte chunks
-        Label L_fill_64_bytes_loop, L_check_fill_32_bytes;
+        Label L_fill_64_bytes_loop;
         vpbroadcastd(xtmp, xtmp, Assembler::AVX_256bit);
 
         subl(count, 16 << shift);
@@ -8105,10 +8277,11 @@ void MacroAssembler::vectorized_mismatch(Register obja, Register objb, Register 
   shlq(length);
   xorq(result, result);
 
-  if ((UseAVX > 2) &&
+  if ((AVX3Threshold == 0) && (UseAVX > 2) &&
       VM_Version::supports_avx512vlbw()) {
     cmpq(length, 64);
     jcc(Assembler::less, VECTOR32_TAIL);
+
     movq(tmp1, length);
     andq(tmp1, 0x3F);      // tail count
     andq(length, ~(0x3F)); //vector count
@@ -8823,16 +8996,6 @@ void MacroAssembler::update_byte_crc32(Register crc, Register val, Register tabl
 }
 
 /**
-* Fold four 128-bit data chunks
-*/
-void MacroAssembler::fold_128bit_crc32_avx512(XMMRegister xcrc, XMMRegister xK, XMMRegister xtmp, Register buf, int offset) {
-  evpclmulhdq(xtmp, xK, xcrc, Assembler::AVX_512bit); // [123:64]
-  evpclmulldq(xcrc, xK, xcrc, Assembler::AVX_512bit); // [63:0]
-  evpxorq(xcrc, xcrc, Address(buf, offset), Assembler::AVX_512bit /* vector_len */);
-  evpxorq(xcrc, xcrc, xtmp, Assembler::AVX_512bit /* vector_len */);
-}
-
-/**
  * Fold 128-bit data chunk
  */
 void MacroAssembler::fold_128bit_crc32(XMMRegister xcrc, XMMRegister xK, XMMRegister xtmp, Register buf, int offset) {
@@ -8932,34 +9095,6 @@ void MacroAssembler::kernel_crc32(Register crc, Register buf, Register len, Regi
   shrl(len, 4);
   jcc(Assembler::zero, L_tail_restore);
 
-  // Fold total 512 bits of polynomial on each iteration
-  if (VM_Version::supports_vpclmulqdq()) {
-    Label Parallel_loop, L_No_Parallel;
-
-    cmpl(len, 8);
-    jccb(Assembler::less, L_No_Parallel);
-
-    movdqu(xmm0, ExternalAddress(StubRoutines::x86::crc_by128_masks_addr() + 32));
-    evmovdquq(xmm1, Address(buf, 0), Assembler::AVX_512bit);
-    movdl(xmm5, crc);
-    evpxorq(xmm1, xmm1, xmm5, Assembler::AVX_512bit);
-    addptr(buf, 64);
-    subl(len, 7);
-    evshufi64x2(xmm0, xmm0, xmm0, 0x00, Assembler::AVX_512bit); //propagate the mask from 128 bits to 512 bits
-
-    BIND(Parallel_loop);
-    fold_128bit_crc32_avx512(xmm1, xmm0, xmm5, buf, 0);
-    addptr(buf, 64);
-    subl(len, 4);
-    jcc(Assembler::greater, Parallel_loop);
-
-    vextracti64x2(xmm2, xmm1, 0x01);
-    vextracti64x2(xmm3, xmm1, 0x02);
-    vextracti64x2(xmm4, xmm1, 0x03);
-    jmp(L_fold_512b);
-
-    BIND(L_No_Parallel);
-  }
   // Fold crc into first bytes of vector
   movdqa(xmm1, Address(buf, 0));
   movdl(rax, xmm1);
@@ -9063,6 +9198,372 @@ void MacroAssembler::kernel_crc32(Register crc, Register buf, Register len, Regi
 }
 
 #ifdef _LP64
+// Helper function for AVX 512 CRC32
+// Fold 512-bit data chunks
+void MacroAssembler::fold512bit_crc32_avx512(XMMRegister xcrc, XMMRegister xK, XMMRegister xtmp, Register buf,
+                                             Register pos, int offset) {
+  evmovdquq(xmm3, Address(buf, pos, Address::times_1, offset), Assembler::AVX_512bit);
+  evpclmulqdq(xtmp, xcrc, xK, 0x10, Assembler::AVX_512bit); // [123:64]
+  evpclmulqdq(xmm2, xcrc, xK, 0x01, Assembler::AVX_512bit); // [63:0]
+  evpxorq(xcrc, xtmp, xmm2, Assembler::AVX_512bit /* vector_len */);
+  evpxorq(xcrc, xcrc, xmm3, Assembler::AVX_512bit /* vector_len */);
+}
+
+// Helper function for AVX 512 CRC32
+// Compute CRC32 for < 256B buffers
+void MacroAssembler::kernel_crc32_avx512_256B(Register crc, Register buf, Register len, Register key, Register pos,
+                                              Register tmp1, Register tmp2, Label& L_barrett, Label& L_16B_reduction_loop,
+                                              Label& L_get_last_two_xmms, Label& L_128_done, Label& L_cleanup) {
+
+  Label L_less_than_32, L_exact_16_left, L_less_than_16_left;
+  Label L_less_than_8_left, L_less_than_4_left, L_less_than_2_left, L_zero_left;
+  Label L_only_less_than_4, L_only_less_than_3, L_only_less_than_2;
+
+  // check if there is enough buffer to be able to fold 16B at a time
+  cmpl(len, 32);
+  jcc(Assembler::less, L_less_than_32);
+
+  // if there is, load the constants
+  movdqu(xmm10, Address(key, 1 * 16));    //rk1 and rk2 in xmm10
+  movdl(xmm0, crc);                        // get the initial crc value
+  movdqu(xmm7, Address(buf, pos, Address::times_1, 0 * 16)); //load the plaintext
+  pxor(xmm7, xmm0);
+
+  // update the buffer pointer
+  addl(pos, 16);
+  //update the counter.subtract 32 instead of 16 to save one instruction from the loop
+  subl(len, 32);
+  jmp(L_16B_reduction_loop);
+
+  bind(L_less_than_32);
+  //mov initial crc to the return value. this is necessary for zero - length buffers.
+  movl(rax, crc);
+  testl(len, len);
+  jcc(Assembler::equal, L_cleanup);
+
+  movdl(xmm0, crc);                        //get the initial crc value
+
+  cmpl(len, 16);
+  jcc(Assembler::equal, L_exact_16_left);
+  jcc(Assembler::less, L_less_than_16_left);
+
+  movdqu(xmm7, Address(buf, pos, Address::times_1, 0 * 16)); //load the plaintext
+  pxor(xmm7, xmm0);                       //xor the initial crc value
+  addl(pos, 16);
+  subl(len, 16);
+  movdqu(xmm10, Address(key, 1 * 16));    // rk1 and rk2 in xmm10
+  jmp(L_get_last_two_xmms);
+
+  bind(L_less_than_16_left);
+  //use stack space to load data less than 16 bytes, zero - out the 16B in memory first.
+  pxor(xmm1, xmm1);
+  movptr(tmp1, rsp);
+  movdqu(Address(tmp1, 0 * 16), xmm1);
+
+  cmpl(len, 4);
+  jcc(Assembler::less, L_only_less_than_4);
+
+  //backup the counter value
+  movl(tmp2, len);
+  cmpl(len, 8);
+  jcc(Assembler::less, L_less_than_8_left);
+
+  //load 8 Bytes
+  movq(rax, Address(buf, pos, Address::times_1, 0 * 16));
+  movq(Address(tmp1, 0 * 16), rax);
+  addptr(tmp1, 8);
+  subl(len, 8);
+  addl(pos, 8);
+
+  bind(L_less_than_8_left);
+  cmpl(len, 4);
+  jcc(Assembler::less, L_less_than_4_left);
+
+  //load 4 Bytes
+  movl(rax, Address(buf, pos, Address::times_1, 0));
+  movl(Address(tmp1, 0 * 16), rax);
+  addptr(tmp1, 4);
+  subl(len, 4);
+  addl(pos, 4);
+
+  bind(L_less_than_4_left);
+  cmpl(len, 2);
+  jcc(Assembler::less, L_less_than_2_left);
+
+  // load 2 Bytes
+  movw(rax, Address(buf, pos, Address::times_1, 0));
+  movl(Address(tmp1, 0 * 16), rax);
+  addptr(tmp1, 2);
+  subl(len, 2);
+  addl(pos, 2);
+
+  bind(L_less_than_2_left);
+  cmpl(len, 1);
+  jcc(Assembler::less, L_zero_left);
+
+  // load 1 Byte
+  movb(rax, Address(buf, pos, Address::times_1, 0));
+  movb(Address(tmp1, 0 * 16), rax);
+
+  bind(L_zero_left);
+  movdqu(xmm7, Address(rsp, 0));
+  pxor(xmm7, xmm0);                       //xor the initial crc value
+
+  lea(rax, ExternalAddress(StubRoutines::x86::shuf_table_crc32_avx512_addr()));
+  movdqu(xmm0, Address(rax, tmp2));
+  pshufb(xmm7, xmm0);
+  jmp(L_128_done);
+
+  bind(L_exact_16_left);
+  movdqu(xmm7, Address(buf, pos, Address::times_1, 0));
+  pxor(xmm7, xmm0);                       //xor the initial crc value
+  jmp(L_128_done);
+
+  bind(L_only_less_than_4);
+  cmpl(len, 3);
+  jcc(Assembler::less, L_only_less_than_3);
+
+  // load 3 Bytes
+  movb(rax, Address(buf, pos, Address::times_1, 0));
+  movb(Address(tmp1, 0), rax);
+
+  movb(rax, Address(buf, pos, Address::times_1, 1));
+  movb(Address(tmp1, 1), rax);
+
+  movb(rax, Address(buf, pos, Address::times_1, 2));
+  movb(Address(tmp1, 2), rax);
+
+  movdqu(xmm7, Address(rsp, 0));
+  pxor(xmm7, xmm0);                     //xor the initial crc value
+
+  pslldq(xmm7, 0x5);
+  jmp(L_barrett);
+  bind(L_only_less_than_3);
+  cmpl(len, 2);
+  jcc(Assembler::less, L_only_less_than_2);
+
+  // load 2 Bytes
+  movb(rax, Address(buf, pos, Address::times_1, 0));
+  movb(Address(tmp1, 0), rax);
+
+  movb(rax, Address(buf, pos, Address::times_1, 1));
+  movb(Address(tmp1, 1), rax);
+
+  movdqu(xmm7, Address(rsp, 0));
+  pxor(xmm7, xmm0);                     //xor the initial crc value
+
+  pslldq(xmm7, 0x6);
+  jmp(L_barrett);
+
+  bind(L_only_less_than_2);
+  //load 1 Byte
+  movb(rax, Address(buf, pos, Address::times_1, 0));
+  movb(Address(tmp1, 0), rax);
+
+  movdqu(xmm7, Address(rsp, 0));
+  pxor(xmm7, xmm0);                     //xor the initial crc value
+
+  pslldq(xmm7, 0x7);
+}
+
+/**
+* Compute CRC32 using AVX512 instructions
+* param crc   register containing existing CRC (32-bit)
+* param buf   register pointing to input byte buffer (byte*)
+* param len   register containing number of bytes
+* param tmp1  scratch register
+* param tmp2  scratch register
+* return rax  result register
+*/
+void MacroAssembler::kernel_crc32_avx512(Register crc, Register buf, Register len, Register key, Register tmp1, Register tmp2) {
+  assert_different_registers(crc, buf, len, key, tmp1, tmp2, rax);
+
+  Label L_tail, L_tail_restore, L_tail_loop, L_exit, L_align_loop, L_aligned;
+  Label L_fold_tail, L_fold_128b, L_fold_512b, L_fold_512b_loop, L_fold_tail_loop;
+  Label L_less_than_256, L_fold_128_B_loop, L_fold_256_B_loop;
+  Label L_fold_128_B_register, L_final_reduction_for_128, L_16B_reduction_loop;
+  Label L_128_done, L_get_last_two_xmms, L_barrett, L_cleanup;
+
+  const Register pos = r12;
+  push(r12);
+  subptr(rsp, 16 * 2 + 8);
+
+  // For EVEX with VL and BW, provide a standard mask, VL = 128 will guide the merge
+  // context for the registers used, where all instructions below are using 128-bit mode
+  // On EVEX without VL and BW, these instructions will all be AVX.
+  lea(key, ExternalAddress(StubRoutines::x86::crc_table_avx512_addr()));
+  notl(crc);
+  movl(pos, 0);
+
+  // check if smaller than 256B
+  cmpl(len, 256);
+  jcc(Assembler::less, L_less_than_256);
+
+  // load the initial crc value
+  movdl(xmm10, crc);
+
+  // receive the initial 64B data, xor the initial crc value
+  evmovdquq(xmm0, Address(buf, pos, Address::times_1, 0 * 64), Assembler::AVX_512bit);
+  evmovdquq(xmm4, Address(buf, pos, Address::times_1, 1 * 64), Assembler::AVX_512bit);
+  evpxorq(xmm0, xmm0, xmm10, Assembler::AVX_512bit);
+  evbroadcasti32x4(xmm10, Address(key, 2 * 16), Assembler::AVX_512bit); //zmm10 has rk3 and rk4
+
+  subl(len, 256);
+  cmpl(len, 256);
+  jcc(Assembler::less, L_fold_128_B_loop);
+
+  evmovdquq(xmm7, Address(buf, pos, Address::times_1, 2 * 64), Assembler::AVX_512bit);
+  evmovdquq(xmm8, Address(buf, pos, Address::times_1, 3 * 64), Assembler::AVX_512bit);
+  evbroadcasti32x4(xmm16, Address(key, 0 * 16), Assembler::AVX_512bit); //zmm16 has rk-1 and rk-2
+  subl(len, 256);
+
+  bind(L_fold_256_B_loop);
+  addl(pos, 256);
+  fold512bit_crc32_avx512(xmm0, xmm16, xmm1, buf, pos, 0 * 64);
+  fold512bit_crc32_avx512(xmm4, xmm16, xmm1, buf, pos, 1 * 64);
+  fold512bit_crc32_avx512(xmm7, xmm16, xmm1, buf, pos, 2 * 64);
+  fold512bit_crc32_avx512(xmm8, xmm16, xmm1, buf, pos, 3 * 64);
+
+  subl(len, 256);
+  jcc(Assembler::greaterEqual, L_fold_256_B_loop);
+
+  // Fold 256 into 128
+  addl(pos, 256);
+  evpclmulqdq(xmm1, xmm0, xmm10, 0x01, Assembler::AVX_512bit);
+  evpclmulqdq(xmm2, xmm0, xmm10, 0x10, Assembler::AVX_512bit);
+  vpternlogq(xmm7, 0x96, xmm1, xmm2, Assembler::AVX_512bit); // xor ABC
+
+  evpclmulqdq(xmm5, xmm4, xmm10, 0x01, Assembler::AVX_512bit);
+  evpclmulqdq(xmm6, xmm4, xmm10, 0x10, Assembler::AVX_512bit);
+  vpternlogq(xmm8, 0x96, xmm5, xmm6, Assembler::AVX_512bit); // xor ABC
+
+  evmovdquq(xmm0, xmm7, Assembler::AVX_512bit);
+  evmovdquq(xmm4, xmm8, Assembler::AVX_512bit);
+
+  addl(len, 128);
+  jmp(L_fold_128_B_register);
+
+  // at this section of the code, there is 128 * x + y(0 <= y<128) bytes of buffer.The fold_128_B_loop
+  // loop will fold 128B at a time until we have 128 + y Bytes of buffer
+
+  // fold 128B at a time.This section of the code folds 8 xmm registers in parallel
+  bind(L_fold_128_B_loop);
+  addl(pos, 128);
+  fold512bit_crc32_avx512(xmm0, xmm10, xmm1, buf, pos, 0 * 64);
+  fold512bit_crc32_avx512(xmm4, xmm10, xmm1, buf, pos, 1 * 64);
+
+  subl(len, 128);
+  jcc(Assembler::greaterEqual, L_fold_128_B_loop);
+
+  addl(pos, 128);
+
+  // at this point, the buffer pointer is pointing at the last y Bytes of the buffer, where 0 <= y < 128
+  // the 128B of folded data is in 8 of the xmm registers : xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7
+  bind(L_fold_128_B_register);
+  evmovdquq(xmm16, Address(key, 5 * 16), Assembler::AVX_512bit); // multiply by rk9-rk16
+  evmovdquq(xmm11, Address(key, 9 * 16), Assembler::AVX_512bit); // multiply by rk17-rk20, rk1,rk2, 0,0
+  evpclmulqdq(xmm1, xmm0, xmm16, 0x01, Assembler::AVX_512bit);
+  evpclmulqdq(xmm2, xmm0, xmm16, 0x10, Assembler::AVX_512bit);
+  // save last that has no multiplicand
+  vextracti64x2(xmm7, xmm4, 3);
+
+  evpclmulqdq(xmm5, xmm4, xmm11, 0x01, Assembler::AVX_512bit);
+  evpclmulqdq(xmm6, xmm4, xmm11, 0x10, Assembler::AVX_512bit);
+  // Needed later in reduction loop
+  movdqu(xmm10, Address(key, 1 * 16));
+  vpternlogq(xmm1, 0x96, xmm2, xmm5, Assembler::AVX_512bit); // xor ABC
+  vpternlogq(xmm1, 0x96, xmm6, xmm7, Assembler::AVX_512bit); // xor ABC
+
+  // Swap 1,0,3,2 - 01 00 11 10
+  evshufi64x2(xmm8, xmm1, xmm1, 0x4e, Assembler::AVX_512bit);
+  evpxorq(xmm8, xmm8, xmm1, Assembler::AVX_256bit);
+  vextracti128(xmm5, xmm8, 1);
+  evpxorq(xmm7, xmm5, xmm8, Assembler::AVX_128bit);
+
+  // instead of 128, we add 128 - 16 to the loop counter to save 1 instruction from the loop
+  // instead of a cmp instruction, we use the negative flag with the jl instruction
+  addl(len, 128 - 16);
+  jcc(Assembler::less, L_final_reduction_for_128);
+
+  bind(L_16B_reduction_loop);
+  vpclmulqdq(xmm8, xmm7, xmm10, 0x1);
+  vpclmulqdq(xmm7, xmm7, xmm10, 0x10);
+  vpxor(xmm7, xmm7, xmm8, Assembler::AVX_128bit);
+  movdqu(xmm0, Address(buf, pos, Address::times_1, 0 * 16));
+  vpxor(xmm7, xmm7, xmm0, Assembler::AVX_128bit);
+  addl(pos, 16);
+  subl(len, 16);
+  jcc(Assembler::greaterEqual, L_16B_reduction_loop);
+
+  bind(L_final_reduction_for_128);
+  addl(len, 16);
+  jcc(Assembler::equal, L_128_done);
+
+  bind(L_get_last_two_xmms);
+  movdqu(xmm2, xmm7);
+  addl(pos, len);
+  movdqu(xmm1, Address(buf, pos, Address::times_1, -16));
+  subl(pos, len);
+
+  // get rid of the extra data that was loaded before
+  // load the shift constant
+  lea(rax, ExternalAddress(StubRoutines::x86::shuf_table_crc32_avx512_addr()));
+  movdqu(xmm0, Address(rax, len));
+  addl(rax, len);
+
+  vpshufb(xmm7, xmm7, xmm0, Assembler::AVX_128bit);
+  //Change mask to 512
+  vpxor(xmm0, xmm0, ExternalAddress(StubRoutines::x86::crc_by128_masks_avx512_addr() + 2 * 16), Assembler::AVX_128bit, tmp2);
+  vpshufb(xmm2, xmm2, xmm0, Assembler::AVX_128bit);
+
+  blendvpb(xmm2, xmm2, xmm1, xmm0, Assembler::AVX_128bit);
+  vpclmulqdq(xmm8, xmm7, xmm10, 0x1);
+  vpclmulqdq(xmm7, xmm7, xmm10, 0x10);
+  vpxor(xmm7, xmm7, xmm8, Assembler::AVX_128bit);
+  vpxor(xmm7, xmm7, xmm2, Assembler::AVX_128bit);
+
+  bind(L_128_done);
+  // compute crc of a 128-bit value
+  movdqu(xmm10, Address(key, 3 * 16));
+  movdqu(xmm0, xmm7);
+
+  // 64b fold
+  vpclmulqdq(xmm7, xmm7, xmm10, 0x0);
+  vpsrldq(xmm0, xmm0, 0x8, Assembler::AVX_128bit);
+  vpxor(xmm7, xmm7, xmm0, Assembler::AVX_128bit);
+
+  // 32b fold
+  movdqu(xmm0, xmm7);
+  vpslldq(xmm7, xmm7, 0x4, Assembler::AVX_128bit);
+  vpclmulqdq(xmm7, xmm7, xmm10, 0x10);
+  vpxor(xmm7, xmm7, xmm0, Assembler::AVX_128bit);
+  jmp(L_barrett);
+
+  bind(L_less_than_256);
+  kernel_crc32_avx512_256B(crc, buf, len, key, pos, tmp1, tmp2, L_barrett, L_16B_reduction_loop, L_get_last_two_xmms, L_128_done, L_cleanup);
+
+  //barrett reduction
+  bind(L_barrett);
+  vpand(xmm7, xmm7, ExternalAddress(StubRoutines::x86::crc_by128_masks_avx512_addr() + 1 * 16), Assembler::AVX_128bit, tmp2);
+  movdqu(xmm1, xmm7);
+  movdqu(xmm2, xmm7);
+  movdqu(xmm10, Address(key, 4 * 16));
+
+  pclmulqdq(xmm7, xmm10, 0x0);
+  pxor(xmm7, xmm2);
+  vpand(xmm7, xmm7, ExternalAddress(StubRoutines::x86::crc_by128_masks_avx512_addr()), Assembler::AVX_128bit, tmp2);
+  movdqu(xmm2, xmm7);
+  pclmulqdq(xmm7, xmm10, 0x10);
+  pxor(xmm7, xmm2);
+  pxor(xmm7, xmm1);
+  pextrd(crc, xmm7, 2);
+
+  bind(L_cleanup);
+  notl(crc); // ~c
+  addptr(rsp, 16 * 2 + 8);
+  pop(r12);
+}
+
 // S. Gueron / Information Processing Letters 112 (2012) 184
 // Algorithm 4: Computing carry-less multiplication using a precomputed lookup table.
 // Input: A 32 bit value B = [byte3, byte2, byte1, byte0].
@@ -9564,7 +10065,7 @@ void MacroAssembler::char_array_compress(Register src, Register dst, Register le
   // save length for return
   push(len);
 
-  if ((UseAVX > 2) && // AVX512
+  if ((AVX3Threshold == 0) && (UseAVX > 2) && // AVX512
     VM_Version::supports_avx512vlbw() &&
     VM_Version::supports_bmi2()) {
 
@@ -9756,7 +10257,7 @@ void MacroAssembler::char_array_compress(Register src, Register dst, Register le
 //   }
 void MacroAssembler::byte_array_inflate(Register src, Register dst, Register len,
   XMMRegister tmp1, Register tmp2) {
-  Label copy_chars_loop, done, below_threshold;
+  Label copy_chars_loop, done, below_threshold, avx3_threshold;
   // rsi: src
   // rdi: dst
   // rdx: len
@@ -9766,7 +10267,7 @@ void MacroAssembler::byte_array_inflate(Register src, Register dst, Register len
   // rdi holds start addr of destination char[]
   // rdx holds length
   assert_different_registers(src, dst, len, tmp2);
-
+  movl(tmp2, len);
   if ((UseAVX > 2) && // AVX512
     VM_Version::supports_avx512vlbw() &&
     VM_Version::supports_bmi2()) {
@@ -9778,9 +10279,11 @@ void MacroAssembler::byte_array_inflate(Register src, Register dst, Register len
     testl(len, -16);
     jcc(Assembler::zero, below_threshold);
 
+    testl(len, -1 * AVX3Threshold);
+    jcc(Assembler::zero, avx3_threshold);
+
     // In order to use only one arithmetic operation for the main loop we use
     // this pre-calculation
-    movl(tmp2, len);
     andl(tmp2, (32 - 1)); // tail count (in chars), 32 element wide loop
     andl(len, -32);     // vector count
     jccb(Assembler::zero, copy_tail);
@@ -9811,11 +10314,10 @@ void MacroAssembler::byte_array_inflate(Register src, Register dst, Register len
     evmovdquw(Address(dst, 0), k2, tmp1, Assembler::AVX_512bit);
 
     jmp(done);
+    bind(avx3_threshold);
   }
   if (UseSSE42Intrinsics) {
     Label copy_16_loop, copy_8_loop, copy_bytes, copy_new_tail, copy_tail;
-
-    movl(tmp2, len);
 
     if (UseAVX > 1) {
       andl(tmp2, (16 - 1));
@@ -9841,13 +10343,7 @@ void MacroAssembler::byte_array_inflate(Register src, Register dst, Register len
 
       bind(below_threshold);
       bind(copy_new_tail);
-      if ((UseAVX > 2) &&
-        VM_Version::supports_avx512vlbw() &&
-        VM_Version::supports_bmi2()) {
-        movl(tmp2, len);
-      } else {
-        movl(len, tmp2);
-      }
+      movl(len, tmp2);
       andl(tmp2, 0x00000007);
       andl(len, 0xFFFFFFF8);
       jccb(Assembler::zero, copy_tail);

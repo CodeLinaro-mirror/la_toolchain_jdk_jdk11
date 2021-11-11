@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2021, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -31,9 +31,7 @@
 AC_DEFUN([FLAGS_SETUP_ARFLAGS],
 [
   # FIXME: figure out if we should select AR flags depending on OS or toolchain.
-  if test "x$OPENJDK_TARGET_OS" = xmacosx; then
-    ARFLAGS="-r -mmacosx-version-min=$MACOSX_VERSION_MIN"
-  elif test "x$OPENJDK_TARGET_OS" = xaix; then
+  if test "x$OPENJDK_TARGET_OS" = xaix; then
     ARFLAGS="-X64"
   elif test "x$OPENJDK_TARGET_OS" = xwindows; then
     # lib.exe is used as AR to create static libraries.
@@ -109,6 +107,16 @@ AC_DEFUN([FLAGS_SETUP_ASFLAGS],
 [
   if test "x$OPENJDK_TARGET_OS" = xmacosx; then
     JVM_BASIC_ASFLAGS="-x assembler-with-cpp -mno-omit-leaf-frame-pointer -mstack-alignment=16"
+
+    # Fix linker warning.
+    # Code taken from make/autoconf/flags-cflags.m4 and adapted.
+    JVM_BASIC_ASFLAGS+=" -DMAC_OS_X_VERSION_MIN_REQUIRED=$MACOSX_VERSION_MIN_NODOTS \
+        -mmacosx-version-min=$MACOSX_VERSION_MIN"
+
+    if test -n "$MACOSX_VERSION_MAX"; then
+        JVM_BASIC_ASFLAGS+=" $OS_CFLAGS \
+            -DMAC_OS_X_VERSION_MAX_ALLOWED=$MACOSX_VERSION_MAX_NODOTS"
+    fi
   fi
 ])
 
